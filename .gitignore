@@ -1,0 +1,77 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Docker
+docker-compose.override.yml
+
+# Python (ingestion, consumers, alert-evaluator)
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node / npm (ingestion poller, load-generator)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+.yarn/cache
+.yarn/unplugged
+
+# Angular (dashboard)
+dashboard/dist/
+dashboard/.angular/
+dashboard/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Data / Seeds (keep schema, not bulk data files)
+*.csv
+*.parquet
+*.json.gz
+seed-data/raw/
+
+# Kafka / Redpanda local data volumes
+kafka-data/
+redpanda-data/
+
+# TimescaleDB / Postgres local volumes
+pgdata/
+timescale-data/
+
+# Neo4j local data
+neo4j-data/
+neo4j-logs/
+
+# Redis local data
+redis-data/
+dump.rdb
+
+# Insights
+insights/
