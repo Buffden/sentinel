@@ -1,0 +1,11 @@
+{
+  "format": "svg",
+  "jobs": [
+    {
+      "name": "architecture",
+      "type": "plantuml",
+      "format": "svg",
+      "background": "transparent"
+    }
+  ]
+}
