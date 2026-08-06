@@ -1,0 +1,108 @@
+name: Generate and Commit Diagrams
+
+on:
+  pull_request:
+    paths:
+      - '**/*.puml'
+      - '**/*.plantuml'
+  push:
+    branches: [main]
+    paths:
+      - '**/*.puml'
+      - '**/*.plantuml'
+  workflow_dispatch:
+
+jobs:
+  preview:
+    name: Generate Preview
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Full history required so git diff can resolve base refs for --files filtering.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install PlantUML
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml
+
+      - name: Install diagram-sync
+        run: npm install -g diagram-sync
+
+      - name: Generate changed diagrams
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(puml|plantuml)$' || true)
+          if [ -n "$CHANGED" ]; then
+            diagram-sync --files $CHANGED
+          else
+            echo "No diagram files changed."
+          fi
+
+      - name: Upload diagram previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagrams-preview
+          path: diagrams/
+
+  commit:
+    name: Generate and Commit
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # GITHUB_TOKEN with contents: write is sufficient when the main branch is unprotected.
+          # If your branch is protected and you need to bypass protection rules, replace with a PAT:
+          #   token: ${{ secrets.PAT_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Full history required so git diff can resolve base refs for --files filtering.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install PlantUML
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml
+
+      - name: Install diagram-sync
+        run: npm install -g diagram-sync
+
+      - name: Generate changed diagrams
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            diagram-sync
+          else
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml)$' || true)
+            if [ -n "$CHANGED" ]; then
+              diagram-sync --files $CHANGED
+            else
+              echo "No diagram files changed."
+            fi
+          fi
+
+      - name: Commit generated diagrams
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add diagrams/
+          if git diff --staged --quiet; then
+            echo "No diagram changes to commit."
+          else
+            git commit -m "chore: auto-export diagrams [skip ci]"
+            git push
+          fi
