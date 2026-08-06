@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentScriptType="application/ecmascript" contentStyleType="text/css" height="211px" preserveAspectRatio="none" style="width:308px;height:211px;background:#000000;" version="1.1" viewBox="0 0 308 211" width="308px" zoomAndPan="magnify"><defs/><g><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="261" x="5" y="19">Dot Executable: /opt/local/bin/dot</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="145" x="5" y="35.2969">File does not exist</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="291" x="5" y="51.5938">Cannot find Graphviz. You should try</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="0" x="10" y="67.8906"/><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="79" x="5" y="84.1875">@startuml</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="57" x="5" y="100.4844">testdot</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="72" x="5" y="116.7813">@enduml</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="0" x="10" y="133.0781"/><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="17" x="10" y="149.375">or</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="0" x="10" y="165.6719"/><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="227" x="5" y="181.9688">java -jar plantuml.jar -testdot</text><text fill="#33FF02" font-family="sans-serif" font-size="14" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="0" x="10" y="198.2656"/><!--MD5=[2ef838771eb8bc825db9e419d128642e]
+@startuml Sentinel Architecture
+
+skinparam linetype ortho
+skinparam nodesep 80
+skinparam ranksep 100
+
+skinparam backgroundColor #1e1e2e
+skinparam defaultFontColor #cdd6f4
+skinparam defaultFontName "Courier New"
+skinparam arrowThickness 1.5
+
+skinparam node {
+    BackgroundColor #181825
+    BorderColor #45475a
+    FontColor #cdd6f4
+    FontStyle bold
+}
+
+skinparam component {
+    BackgroundColor #313244
+    BorderColor #585b70
+    FontColor #cdd6f4
+}
+
+skinparam database {
+    BackgroundColor #313244
+    BorderColor #585b70
+    FontColor #cdd6f4
+}
+
+skinparam queue {
+    BackgroundColor #4c1d95
+    BorderColor #7c3aed
+    FontColor #e9d5ff
+}
+
+together {
+    node "External Feeds" #1e3a2a {
+        component [OpenSky Network\n(ADS-B)] as ADSB #2d5a3d
+        component [AISHub\n(AIS)] as AIS #2d5a3d
+    }
+
+    node "Dev Tooling" #3a3a1a {
+        component [Load Generator\n(synthetic anomaly injection)] as LOADGEN #5a5a1a
+    }
+}
+
+node "Ingestion Layer" #1a2a3a {
+    component [Ingestion Poller\n(per region)] as POLLER #1e3a5a
+    component [Dead-Letter Queue\n(malformed events)] as DLQ #5a1a1a
+}
+
+node "Message Broker" #2a1a3a {
+    queue [Kafka / Redpanda\nadsb.raw  |  ais.raw  |  position.normalized] as KAFKA
+}
+
+together {
+    node "Position Consumer" #1a2a3a {
+        component [normalise + write\nto TimescaleDB + Redis] as POS_CONSUMER #1e3a5a
+    }
+
+    node "Correlation Worker" #1a2a3a {
+        component [proximity detection\nentity graph builder] as CORR_WORKER #1e3a5a
+    }
+}
+
+together {
+    node "TimescaleDB" #0c2a3a {
+        database [position history\ngeo-cell + time-bucket sharding] as TSDB #0c4a6e
+    }
+
+    node "Neo4j" #0a2a1a {
+        database [entity graph\nproximity relationships] as NEO4J #14532d
+    }
+
+    node "Redis" #3a0a0a {
+        database [live entity state\ncache — entity:live:{id}] as REDIS #7f1d1d
+    }
+}
+
+node "Alert Layer" #2a1a3a {
+    component [Alert Evaluator\n(leader-elected — single writer)] as ALERT #4c1d95
+}
+
+node "API Layer" #1a2a3a {
+    component [Dashboard API\nREST  +  WebSocket] as API #1e3a5a
+}
+
+node "Dashboard" #1e3a2a {
+    component [Angular + Leaflet\nLive Map  +  Alert Feed] as DASH #2d5a3d
+}
+
+
+ADSB        -[#4ade80]down->  POLLER
+AIS         -[#4ade80]down->  POLLER
+LOADGEN     -[#facc15]down->  KAFKA
+
+POLLER      -[#facc15]down->  KAFKA
+POLLER      -[#f87171]right-> DLQ
+
+KAFKA       -[#a78bfa]down->  POS_CONSUMER
+KAFKA       -[#a78bfa]down->  CORR_WORKER
+
+POS_CONSUMER -[#38bdf8]down-> TSDB
+POS_CONSUMER -[#f87171]down-> REDIS
+CORR_WORKER  -[#4ade80]down-> NEO4J
+
+TSDB        -[#fb923c]down->  ALERT
+NEO4J       -[#fb923c]down->  ALERT
+REDIS       -[#fb923c]down->  ALERT
+
+ALERT       -[#94a3b8]down->  API
+API         -[#94a3b8]down->  DASH
+
+@enduml
+
+PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Java Version: 17.0.20+8
+Operating System: Linux
+Default Encoding: UTF-8
+Language: en
+Country: null
+--></g></svg>
