@@ -6,7 +6,7 @@ skinparam ranksep 100
 
 skinparam backgroundColor #1e1e2e
 skinparam defaultFontColor #cdd6f4
-skinparam defaultFontName "Courier New"
+skinparam defaultFontName "Helvetica"
 skinparam arrowThickness 1.5
 
 skinparam node {
