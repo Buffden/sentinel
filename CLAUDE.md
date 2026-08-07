@@ -24,6 +24,7 @@ Read `insights/intent.md` for the full context on why this project exists and wh
 | Live entity state | Redis | Highest-frequency read; cache, not source of truth |
 | API | Express (Node.js) | Lightweight, native async I/O, simple WebSocket via `ws` |
 | Dashboard | Angular + Leaflet | Functional, not the point of the project |
+| Operator auth | Google OAuth 2.0 + JWT | Identity required for per-user workspace persistence; no new infrastructure - users table on TimescaleDB |
 | Deployment | Docker Compose (local) → AWS | Same CI/CD pattern as existing projects |
 
 If a suggested library or tool isn't in this table, flag it and explain the trade-off before adding it. Do not introduce new infrastructure components silently.
@@ -50,7 +51,11 @@ docker compose up -d        # Start all backing services
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
 - Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
 - Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
-- Redis keys: `entity:live:{entity_id}` for current position
+- Redis keys:
+  - `entity:live:{entity_id}` - current position, TTL = SIGNAL_LOSS_THRESHOLD_MS
+  - `alert-state:{entity_id}` - alert evaluator dedup flag; ephemeral, distinct from the durable alerts table in TimescaleDB
+  - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
+  - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
 
 ### Code style
 - Prefer explicit over clever  - this code will be read in an interview setting
@@ -82,7 +87,7 @@ docker compose up -d        # Start all backing services
 - Do not use defense/intelligence-flavored language, naming, or framing anywhere in code, comments, or docs. The project is a technical demo system, not a surveillance platform.
 - Do not directly couple services via inter-service HTTP calls (e.g. alert evaluator calling the position consumer's REST endpoints). Use Kafka for event flow or read from the shared persistence layers (TimescaleDB, Neo4j, Redis) directly - that is not coupling, that is the intended access pattern.
 - Do not skip the idempotency key on any write to any store.
-- Do not add authentication/account management beyond basic API key auth (ingestion clients) and RBAC (dashboard viewers)  - explicitly out of scope for v1.
+- Operator authentication uses Google OAuth 2.0 (ADR-011). Do not add other identity providers, username/password flows, or account management UI beyond what ADR-011 defines. Ingestion clients continue to use API key auth. Do not add RBAC beyond operator/viewer until it is justified by a real multi-role requirement.
 - Do not add ML-based anomaly detection  - rule- and correlation-based only in v1. ML is a stated future direction, not a current task.
 - Do not change the tech stack without writing an ADR first.
 - Do not over-invest in the dashboard/frontend. If a task is purely visual polish with no backend design implication, flag it and deprioritize it.

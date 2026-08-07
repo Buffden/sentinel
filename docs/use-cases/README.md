@@ -32,6 +32,19 @@ This folder defines what Sentinel does from the perspective of its users and the
 | [US-05](US-05-unscheduled-proximity/unscheduled-proximity.md) | Unscheduled proximity alert | ADR-003 | proximity detection, graph update |
 | [US-06](US-06-composite-alert/composite-alert.md) | Composite correlated alert | ADR-003 | signal correlation, composite emission, single signal path |
 | [US-07](US-07-duplicate-free-alerts/duplicate-free-alerts.md) | Duplicate-free alert emission | ADR-005 | leader election, failover, race condition without election |
+| [US-13](US-13-alert-lifecycle/alert-lifecycle.md) | Alert lifecycle management | ADR-010 | state transitions, acknowledge flow, resolve and reopen |
+
+### Operator - Investigation
+
+| ID | Title | ADR | Diagrams |
+|---|---|---|---|
+| [US-14](US-14-entity-investigation/entity-investigation.md) | Entity investigation timeline | ADR-002, ADR-003, ADR-004 | timeline query, evidence panel, graph pivot |
+
+### Operator - Workspace and Authentication
+
+| ID | Title | ADR | Diagrams |
+|---|---|---|---|
+| [US-15](US-15-scoped-alert-subscription/scoped-alert-subscription.md) | Scoped alert subscription and workspace | ADR-011, ADR-012 | scope setup, scoped alert delivery, workspace restore |
 
 ### System - Ingestion Reliability
 
@@ -57,7 +70,8 @@ This folder defines what Sentinel does from the perspective of its users and the
 
 ## Out of Scope for v1
 
-- Authentication and account management beyond API key auth for ingestion clients and basic RBAC for dashboard viewers
+- Additional identity providers beyond Google OAuth (see ADR-011)
+- RBAC beyond a single operator role - multi-role access control is not justified until there is a real multi-role requirement
 - ML-based anomaly scoring - all detection is rule-based and correlation-based
 - Historical alert replay or audit log browsing in the dashboard
 - Multi-tenant operator isolation

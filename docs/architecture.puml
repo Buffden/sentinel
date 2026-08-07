@@ -44,6 +44,10 @@ together {
     node "Dev Tooling" #3a3a1a {
         component [Load Generator\n(synthetic anomaly injection)] as LOADGEN #5a5a1a
     }
+
+    node "Identity Provider" #1a1a3a {
+        component [Google OAuth 2.0\n(ID token verification)] as GOOGLE #2d2d5a
+    }
 }
 
 ' --- Row 2: Ingestion ---
@@ -73,7 +77,7 @@ together {
 ' --- Row 5: Persistence ---
 together {
     node "TimescaleDB" #0c2a3a {
-        database [position history\ngeo-cell + time-bucket sharding] as TSDB #0c4a6e
+        database [position history · alerts\nusers · user_workspaces\ngeo-cell + time-bucket sharding] as TSDB #0c4a6e
     }
 
     node "Neo4j" #0a2a1a {
@@ -87,7 +91,7 @@ together {
 
 ' --- Row 6: Alert ---
 node "Alert Layer" #2a1a3a {
-    component [Alert Evaluator\n(leader-elected — single writer)] as ALERT #4c1d95
+    component [Alert Evaluator\n(leader-elected - single writer)] as ALERT #4c1d95
 }
 
 ' --- Row 7: API ---
@@ -143,9 +147,11 @@ REDIS       -[#fb923c]down->  ALERT
 ALERT       -[#94a3b8]down->  KAFKA_ALERTS
 KAFKA_ALERTS -[#94a3b8]down-> API
 
-' API reads from stores
+' API reads from stores and verifies identity with Google
 API         -[#38bdf8]left->  TSDB
 API         -[#f87171]left->  REDIS
+API         -[#4ade80]left->  NEO4J
+API         -[#a78bfa]up->    GOOGLE
 
 ' API -> dashboard
 API         -[#94a3b8]down->  DASH
