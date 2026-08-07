@@ -22,9 +22,17 @@ As the system, I want to replay events from a past Kafka offset so that a consum
 
 ## Flow Diagrams
 
-**Automatic restart replay** - a consumer that crashes resumes from its last committed offset on restart, replaying all missed events safely via idempotent writes.
+### Automatic Restart Replay
 
-**Intentional backfill** - a developer resets a consumer group offset to an earlier point to rebuild store state (e.g. Neo4j after a restart or after a corrected anomaly rule) without re-querying the source feeds.
+![Automatic Restart Replay](../../../diagrams/docs/use-cases/US-10-event-replay/automatic-restart-replay.svg)
+
+A consumer that crashes resumes from its last committed offset on restart, replaying all missed events safely via idempotent writes.
+
+### Intentional Backfill
+
+![Intentional Backfill](../../../diagrams/docs/use-cases/US-10-event-replay/intentional-backfill.svg)
+
+A developer resets a consumer group offset to an earlier point to rebuild store state (e.g. Neo4j after a restart or after a corrected anomaly rule) without re-querying the source feeds.
 
 ---
 

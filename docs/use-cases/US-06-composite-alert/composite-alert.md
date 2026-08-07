@@ -34,11 +34,23 @@ One composite alert at elevated priority
 
 ## Flow Diagrams
 
-**Signal correlation** - the alert evaluator detects a signal loss in Redis, then queries Neo4j to find proximity events involving the dark entity within the loss window, correlating the two weak signals into a single pattern.
+### Signal Correlation
 
-**Composite emission** - one elevated composite alert is published to Kafka and pushed to the operator, suppressing the individual signal loss and proximity alerts.
+![Signal Correlation](../../../diagrams/docs/use-cases/US-06-composite-alert/signal-correlation.svg)
 
-**Single signal path** - shows what happens when only one weak signal is present: no composite is raised, only the individual alert is emitted.
+The alert evaluator detects a signal loss in Redis, then queries Neo4j to find proximity events involving the dark entity within the loss window, correlating the two weak signals into a single pattern.
+
+### Composite Emission
+
+![Composite Emission](../../../diagrams/docs/use-cases/US-06-composite-alert/composite-emission.svg)
+
+One elevated composite alert is published to Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), and pushed only to operators whose saved scope matches - suppressing the individual signal loss and proximity alerts entirely.
+
+### Single Signal Path
+
+![Single Signal Path](../../../diagrams/docs/use-cases/US-06-composite-alert/single-signal-path.svg)
+
+Shows what happens when only one weak signal is present: no composite is raised, only the individual alert is emitted.
 
 ---
 

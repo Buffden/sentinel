@@ -13,7 +13,16 @@ The OpenSky Network API is an external dependency with rate limits, credential r
 
 ## Goal
 
-Confirm that live ADS-B data is accessible, parseable, and sufficient for the system's needs. Also validate that the Kafka producer and DLQ routing work correctly against real feed data.
+Confirm that live ADS-B data is accessible, parseable, and sufficient for the system's needs. Also validate the full two-stage ingestion pipeline: the Poller publishing raw events to `adsb.raw`, and the Position Consumer reading from `adsb.raw`, normalising, publishing to `position.normalized`, and routing malformed events to the DLQ.
+
+---
+
+## Scope
+
+This POC covers two components working together:
+
+- **Ingestion Poller** - polls OpenSky, publishes raw events to `adsb.raw`. Responsible only for fetching and forwarding. No parsing, no DLQ.
+- **Position Consumer** - reads from `adsb.raw`, attempts to parse and normalise, writes to `position.normalized` on success, routes to `adsb.dlq` on failure. DLQ routing is a consumer responsibility, not a poller responsibility.
 
 ---
 
@@ -23,18 +32,21 @@ Confirm that live ADS-B data is accessible, parseable, and sufficient for the sy
 - Response payload contains the fields assumed in the pipeline: entity identifier (ICAO hex), timestamp (Unix ms), latitude, longitude, and altitude
 - Polling at the intended interval does not exceed rate limits
 - Live data volume is sufficient to exercise the pipeline (or document that the synthetic generator is needed)
-- A deliberately malformed event is correctly routed to the DLQ topic without crashing the consumer (US-09)
-- Events produced to Kafka have the correct schema to support replay from an earlier offset (US-10)
+- Poller publishes raw event bytes to `adsb.raw` without any parsing - format fidelity only
+- Position Consumer successfully reads from `adsb.raw` and publishes normalised events to `position.normalized`
+- A deliberately malformed event injected into `adsb.raw` is routed by the Position Consumer to `adsb.dlq` with the original payload and rejection reason attached - consumer does not crash or stall (US-09)
+- Events in `adsb.raw` can be replayed from an earlier offset and the Position Consumer produces the same output in the same order (US-10)
 
 ---
 
 ## Done When
 
-- A poller script successfully fetches and prints parsed position records from the live OpenSky API
+- Poller script successfully fetches live OpenSky data and publishes raw payloads to `adsb.raw`
 - Rate limit behaviour is documented (requests per minute allowed, response on breach)
-- Data format is confirmed or any field-name mismatches are noted for the normalization step
-- A simulated bad event lands in the DLQ with the original payload and rejection reason attached
-- Replaying from an earlier Kafka offset produces the same events in the same order
+- Data format is confirmed or any field-name mismatches are noted for the normalisation step
+- Position Consumer reads from `adsb.raw` and normalised events appear in `position.normalized`
+- A simulated bad event in `adsb.raw` lands in `adsb.dlq` with original payload and rejection reason - confirmed via Redpanda console or consumer script
+- Replaying `adsb.raw` from an earlier offset produces the same normalised output in `position.normalized`
 
 ---
 

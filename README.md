@@ -29,7 +29,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 | Alert coordination | Leader election | prevents duplicate emission under horizontal scale |
 | Anomaly model | Composite correlation | single weak signal is not actionable; correlate across graph + time |
 
-Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISIONS.md)
+Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/)
 
 ---
 
@@ -43,6 +43,7 @@ Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISION
 | Live state cache | Redis |
 | Alert evaluation | Leader-elected worker service |
 | API | Express (Node.js) - REST + WebSocket |
+| Operator auth | Google OAuth 2.0 + JWT (identity required for per-user workspace) |
 | Dashboard | Angular + Leaflet |
 | Deployment | Docker Compose → AWS |
 | CI/CD | GitHub Actions |
@@ -85,6 +86,9 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 | ADR-007 | Idempotency key schema |
 | ADR-008 | Express (Node.js) for the API layer |
 | ADR-009 | Angular + Leaflet for the dashboard |
+| ADR-010 | Alert lifecycle state in PostgreSQL table on TimescaleDB |
+| ADR-011 | Google OAuth 2.0 for operator authentication |
+| ADR-012 | Workspace scope and server-side alert filtering |
 
 ---
 

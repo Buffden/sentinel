@@ -1,5 +1,5 @@
 @startuml entity-expiry
-title US-01: Entity Expiry - Stale Entity Removed from Map via Redis TTL
+title US-01: Entity Expiry - Stale Entity Removed from Map via Redis TTL and Client Staleness Timer
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,13 +9,19 @@ skinparam noteBackgroundColor #FFFDE7
 
 collections "OpenSky / AIS\nFeed" as Feed
 participant "Ingestion\nPoller" as Poller
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position\nConsumer" as Consumer
 database "Redis\nentity:live:{id}" as Redis
 participant "Express API" as API
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
 Feed -> Poller : position pings arriving normally
-Poller -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+Poller -> Kafka : publish to adsb.raw / ais.raw
+Kafka -> Consumer : consume event
+Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+Consumer -> API : publish update via Redis pub/sub
+API --> Dashboard : push { entity_id: XYZ123, lat, lon, timestamp_ms }
 
 note over Feed, Poller
   Entity XYZ123 stops broadcasting.
@@ -30,16 +36,29 @@ end note
 
 Redis -> Redis : TTL expires\nkey entity:live:XYZ123 deleted automatically
 
-API -> Redis : HGETALL entity:live:*\n(next dashboard refresh)
-Redis --> API : XYZ123 absent from response
+note over Consumer, API
+  No more position updates arrive for XYZ123.
+  Redis pub/sub publishes nothing - there is
+  no ping to forward. The API never pushes
+  a "remove entity" message.
+end note
 
-API --> Dashboard : position payload\n(XYZ123 not included)
-Dashboard --> Operator : entity XYZ123 removed from map
+note over Dashboard
+  Dashboard tracks the last_seen_ms for
+  each entity received over WebSocket.
+  When now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS,
+  the entity is faded and removed from the map.
+  No server push required for removal.
+end note
+
+Dashboard --> Operator : entity XYZ123 fades and is removed from map
 
 note over Dashboard, Operator
-  Entity disappears from the map
-  automatically when it stops broadcasting.
-  No explicit delete call required.
+  Entity disappears automatically when
+  it stops broadcasting - driven by
+  the same TTL value on both sides:
+  Redis expires the key server-side,
+  dashboard expires the entity client-side.
   Same TTL expiry triggers US-03
   signal loss detection.
 end note

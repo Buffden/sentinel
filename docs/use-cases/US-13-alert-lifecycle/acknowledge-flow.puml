@@ -1,0 +1,48 @@
+@startuml acknowledge-flow
+title US-13: Acknowledge Flow - Operator Takes Ownership of an Alert
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nalerts" as Kafka
+participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+== Alert Created ==
+
+Kafka -> API : consume alert event\n{ alert_id, entity_id, alert_type,\n  window_start_ms, payload }
+
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+
+note over TSDB
+  alert_id = {entity_id}:{alert_type}:{window_start_ms}
+  Idempotent insert - safe under Kafka replay.
+  Initial status = NEW.
+end note
+
+API --> Dashboard : push new alert over WebSocket\n{ alert_id, status: NEW, entity_id, ... }
+Dashboard --> Operator : alert appears in feed with status NEW
+
+== Operator Acknowledges ==
+
+Operator -> Dashboard : clicks Acknowledge on alert
+Dashboard -> API : PATCH /alerts/:alert_id\n{ status: ACKNOWLEDGED }
+
+API -> TSDB : UPDATE alerts\nSET status = 'ACKNOWLEDGED',\n    acknowledged_at = now()\nWHERE alert_id = $1
+
+note over TSDB
+  Idempotent - acknowledging an
+  already-ACKNOWLEDGED alert is a no-op
+  (no state change, no error).
+end note
+
+TSDB --> API : updated
+API --> Dashboard : push status update over WebSocket\n{ alert_id, status: ACKNOWLEDGED }
+Dashboard --> Operator : alert marked ACKNOWLEDGED in feed
+
+@enduml

@@ -9,15 +9,16 @@ skinparam noteBackgroundColor #FFFDE7
 
 collections "OpenSky / AIS\nFeed" as Feed
 participant "Ingestion\nPoller" as Poller
-queue "Kafka\nadsb.raw / ais.raw" as Kafka
+queue "Kafka\nadsb.raw / ais.raw" as KafkaRaw
 participant "Position\nConsumer" as PosConsumer
+queue "Kafka\nposition.normalized" as KafkaNorm
 participant "Correlation\nWorker" as Correlation
 
 Feed -> Poller : position pings (burst)
 
 loop for each ping
-  Poller -> Kafka : publish event\n{ entity_id, lat, lon, timestamp_ms }
-  Kafka --> Poller : ack
+  Poller -> KafkaRaw : publish raw event\n{ entity_id, lat, lon, timestamp_ms }
+  KafkaRaw --> Poller : ack
 
   note over Poller
     Poller does not wait for consumers.
@@ -27,20 +28,28 @@ loop for each ping
   end note
 end
 
-note over Kafka
+note over KafkaRaw
   Events retained for configured
   retention window regardless of
   consumer processing speed.
 end note
 
-Kafka -> PosConsumer : consume at own pace\n(consumer group: position-consumer)
-Kafka -> Correlation : consume at own pace\n(consumer group: correlation-worker)
+KafkaRaw -> PosConsumer : consume at own pace\n(consumer group: position-consumer)
 
-note over PosConsumer, Correlation
-  Each consumer group reads
-  independently from its own offset.
-  A slow correlation worker does not
-  block the position consumer.
+note over PosConsumer
+  Parses and normalises raw events.
+  Routes malformed events to DLQ (see US-09).
+  Publishes normalised events downstream.
+end note
+
+PosConsumer -> KafkaNorm : publish to position.normalized
+
+KafkaNorm -> Correlation : consume at own pace\n(consumer group: correlation-worker)
+
+note over KafkaRaw, Correlation
+  Each stage reads independently from its own offset.
+  A slow correlation worker does not block
+  the position consumer or the poller.
 end note
 
 @enduml

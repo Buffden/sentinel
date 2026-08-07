@@ -1,0 +1,79 @@
+@startuml workspace-restore
+title US-15: Workspace Restore - Returning Operator Resumes Scoped Stream
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Google\nOAuth" as Google
+participant "Express API" as API
+database "TimescaleDB\nusers + user_workspaces" as TSDB
+
+== Authentication ==
+
+Operator -> Dashboard : opens Sentinel dashboard\n(returning user)
+
+Dashboard -> Google : initiate OAuth flow\n(silent if Google session active)
+
+note over Google
+  If the operator's Google session is still valid,
+  Google issues a new ID token without a popup.
+  The operator sees no interruption.
+end note
+
+Google --> Dashboard : Google ID token
+
+Dashboard -> API : POST /auth/google\n{ id_token: <Google ID token> }
+
+API -> Google : verify ID token\n(google-auth-library)
+Google --> API : { sub: "google_user_id", email: "..." }
+
+API -> TSDB : INSERT INTO users (google_sub, email, last_login_at)\nON CONFLICT (google_sub) DO UPDATE\nSET last_login_at = now()\nRETURNING user_id
+
+TSDB --> API : { user_id: "uuid-..." }
+
+API --> Dashboard : { jwt: "<signed token>", expires_in: 28800 }
+
+note over Dashboard
+  JWT is stored in memory only - not localStorage,
+  not a cookie. It lives for the browser session.
+  On tab close, the operator re-authenticates on
+  next open (Google silent auth makes this seamless).
+end note
+
+== Workspace Load ==
+
+Dashboard -> API : GET /users/me/workspace\nAuthorization: Bearer <JWT>
+
+API -> TSDB : SELECT scope FROM user_workspaces\nWHERE user_id = $1
+
+TSDB --> API : { geo_region: { name: "France", bounds: {...} },\n  entity_types: ["aircraft","vessel"],\n  alert_types: ["SIGNAL_LOSS","COMPOSITE"] }
+
+API --> Dashboard : saved scope
+
+Dashboard --> Operator : map restores to France region\nalert type filters pre-selected\nno scope prompt shown
+
+== Stream Resume ==
+
+Dashboard -> API : WebSocket upgrade\nGET /stream?token=<JWT>
+
+API -> TSDB : SELECT scope FROM user_workspaces WHERE user_id = $1
+TSDB --> API : scope
+
+note over API
+  Scope is loaded into the in-memory connection map.
+  Only alerts matching this scope will be pushed.
+  The operator receives alerts from the moment the
+  connection opens - no replay of missed alerts.
+  Historical investigation uses US-14 instead.
+end note
+
+API --> Dashboard : 101 Switching Protocols
+
+Dashboard --> Operator : alert stream active\nexact same view as previous session
+
+@enduml

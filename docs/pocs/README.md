@@ -44,3 +44,6 @@ Each POC branch is merged only after its "Done when" criteria are met. If a POC 
 | Kafka/Redpanda producer-consumer | Standard, well-documented pattern. Low integration risk. | US-08, US-09, US-10 (covered by POC-02) |
 | Express + WebSocket (`ws` library) | Textbook setup. No novel integration. | US-02 |
 | Angular + Leaflet dashboard | Lowest-priority component. Built last, kept minimal. | US-01, US-02 (read path only) |
+| Google OAuth 2.0 + JWT (ADR-011) | `google-auth-library` handles token verification in ~10 lines. JWT issuance via `jsonwebtoken` is standard. No novel integration risk. | Scoped alert subscription |
+| Alert lifecycle state - TimescaleDB alerts table (ADR-010) | A plain PostgreSQL table with `ON CONFLICT DO NOTHING`. Covered by the TimescaleDB connectivity test in POC-01. | Alert lifecycle management |
+| Workspace scope + server-side filter (ADR-012) | In-process Map lookup and bounding-box check. No external dependency. | Scoped alert subscription |

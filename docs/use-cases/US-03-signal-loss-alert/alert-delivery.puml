@@ -1,5 +1,5 @@
 @startuml alert-delivery
-title US-03: Alert Delivery - Signal Loss Reaches Operator
+title US-03: Alert Delivery - Signal Loss Persisted and Pushed to Scoped Operators
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,12 +9,32 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nalerts" as Kafka
 participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Kafka -> API : consume SIGNAL_LOSS alert\n{ entity_id, last_known_position, duration_ms }
+Kafka -> API : consume SIGNAL_LOSS alert\n{ alert_id, entity_id, alert_type,\n  window_start_ms, last_known_position,\n  duration_ms }
 
-API --> Dashboard : push alert over WebSocket
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+
+note over TSDB
+  alert_id = {entity_id}:SIGNAL_LOSS:{window_start_ms}
+  Idempotent - safe under Kafka replay.
+  Initial status = NEW.
+  This is the durable record of the alert
+  that the operator can acknowledge and resolve.
+end note
+
+TSDB --> API : inserted (or conflict - no-op)
+
+note over API
+  Fan-out: check each active WebSocket connection's
+  saved scope before pushing.
+  geo_region bounds + entity_type + alert_type
+  must all match.
+end note
+
+API --> Dashboard : push alert over WebSocket\n(only to connections whose scope matches\nentity position, type, and alert type)
 
 note over Dashboard
   Alert panel updated in real time.
@@ -22,12 +42,14 @@ note over Dashboard
   No page refresh required.
 end note
 
-Dashboard --> Operator : signal loss alert displayed\n(entity ID, last position, time dark)
+Dashboard --> Operator : signal loss alert displayed\n(entity ID, last position, time dark)\nstatus: NEW
 
 note over Operator
   Alert is raised once per loss event.
   Not re-emitted on every evaluation
   cycle while the entity remains dark.
+  Operator can acknowledge or resolve
+  via the alert lifecycle flow (US-13).
 end note
 
 @enduml

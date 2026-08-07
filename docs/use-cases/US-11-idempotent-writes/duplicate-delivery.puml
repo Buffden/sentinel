@@ -7,10 +7,9 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-queue "Kafka\nposition.normalized" as Kafka
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
 database "TimescaleDB\nposition_history" as TSDB
-database "Neo4j\nentity graph" as Neo4j
 database "Redis\nentity:live:{id}" as Redis
 
 note over Kafka
@@ -23,7 +22,6 @@ end note
 Kafka -> Consumer : deliver event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
 Consumer -> Consumer : key = "ABC123:1700000000000"
 Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING
-Consumer -> Neo4j : MERGE on idempotency_key
 Consumer -> Redis : HSET entity:live:ABC123
 Consumer -> Kafka : commit offset
 
@@ -36,14 +34,16 @@ end note
 Kafka -> Consumer : redeliver same event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
 Consumer -> Consumer : key = "ABC123:1700000000000" (identical)
 Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING -> no-op
-Consumer -> Neo4j : MERGE on idempotency_key -> no-op
 Consumer -> Redis : HSET entity:live:ABC123 -> no-op
 Consumer -> Kafka : commit offset
 
 note over TSDB, Redis
-  All three stores in consistent state.
-  No duplicate rows, edges, or keys created.
+  Both stores in consistent state.
+  No duplicate rows or keys created.
   No coordination between instances required.
+  The Correlation Worker applies the same guarantee
+  when writing PROXIMITY_EVENT edges to Neo4j
+  from position.normalized.
 end note
 
 @enduml

@@ -1,0 +1,44 @@
+@startuml timeline-query
+title US-14: Timeline Query - Position Track and Proximity Events Reconstructed
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API" as API
+database "TimescaleDB\nposition_history" as TSDB
+database "Neo4j\nentity graph" as Neo4j
+
+Operator -> Dashboard : opens alert for VesselB
+Dashboard -> API : GET /alerts/:alert_id/investigation
+
+API -> TSDB : SELECT timestamp_ms, lat, lon, geo_cell\nFROM position_history\nWHERE entity_id = 'VesselB'\nAND timestamp_ms BETWEEN $window_start AND $window_end\nORDER BY timestamp_ms ASC
+
+note over TSDB
+  Geo-cell + time-bucket sharding (ADR-006)
+  means this query hits only the chunks
+  covering VesselB's region and time window.
+  Not a full table scan.
+end note
+
+TSDB --> API : position track [ { timestamp_ms, lat, lon }, ... ]
+
+API -> Neo4j : MATCH (b:Entity {id: 'VesselB'})-[e:PROXIMITY_EVENT]-(other)\nWHERE e.timestamp_ms BETWEEN $window_start AND $window_end\nRETURN other.id, e.timestamp_ms, e.lat, e.lon,\n  e.distance_metres,\n  exists((b)-[:KNOWN_ASSOCIATE]-(other)) AS known
+
+note over Neo4j
+  Single Cypher traversal from VesselB node.
+  Returns all proximity events in the window
+  with a flag indicating whether the other
+  entity was a known associate.
+end note
+
+Neo4j --> API : proximity events [ { entity_id, timestamp_ms, distance_metres, known }, ... ]
+
+API --> Dashboard : investigation response\n{ position_track, proximity_events }
+Dashboard --> Operator : entity track rendered on map\nproximity events overlaid as markers on timeline
+
+@enduml

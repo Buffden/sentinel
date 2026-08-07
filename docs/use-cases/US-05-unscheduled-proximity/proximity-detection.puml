@@ -11,8 +11,10 @@ queue "Kafka\nposition.normalized" as Kafka
 participant "Correlation\nWorker" as Correlation
 database "Redis\nentity:live:{id}" as Redis
 database "Neo4j\nentity graph" as Neo4j
+participant "Alert\nEvaluator\n(leader)" as Evaluator
 queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
@@ -34,13 +36,48 @@ alt two entities within threshold
   end note
 
   alt no KNOWN_ASSOCIATE edge found
-    Correlation -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
-    Alerts -> API : consume alert
-    API --> Dashboard : push alert over WebSocket
-    Dashboard --> Operator : proximity alert displayed
+    Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\n(see graph-update diagram for full idempotency detail)
+
+    note over Correlation
+      Correlation Worker's job ends here.
+      It writes proximity evidence to Neo4j.
+      Alert emission belongs to the Alert Evaluator
+      so that leader election (ADR-005) governs
+      all alert output from one place.
+    end note
   else prior relationship exists
-    Correlation -> Correlation : routine proximity - no alert
+    Correlation -> Correlation : routine proximity - no edge written
   end
 end
+
+== Alert Evaluator - runs on its own independent evaluation cycle ==
+
+note over Evaluator
+  Completely separate from the Correlation Worker.
+  Polls Neo4j on each evaluation cycle
+  to find unscheduled proximity evidence
+  written since the last cycle.
+end note
+
+Evaluator -> Neo4j : query PROXIMITY_EVENT edges\nwithout KNOWN_ASSOCIATE within window
+Neo4j --> Evaluator : unscheduled proximity pairs
+Evaluator -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
+
+Alerts -> API : consume alert
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: UNSCHEDULED_PROXIMITY,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+
+note over TSDB
+  Idempotent write - safe under Kafka replay.
+  alert_id = {entity_id}:UNSCHEDULED_PROXIMITY:{window_start_ms}
+end note
+
+note over API
+  Scope filter applied per connection:
+  entity position + type must match
+  the operator's saved workspace scope.
+end note
+
+API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
+Dashboard --> Operator : proximity alert displayed\nstatus: NEW
 
 @enduml
