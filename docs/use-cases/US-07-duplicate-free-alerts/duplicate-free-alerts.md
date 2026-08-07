@@ -25,6 +25,8 @@ As an operator, I want alerts to be free of duplicates even if the alert evaluat
 
 **Failover** - when the leader crashes and stops renewing its lease, the TTL expires and a follower acquires the lease and resumes alert emission within one TTL window.
 
+**Race condition without election** - shows why a naive check-then-emit pattern fails: two instances checking simultaneously both see "not sent" and both emit, producing duplicate alerts for the operator.
+
 ---
 
 ## Architectural Justification
