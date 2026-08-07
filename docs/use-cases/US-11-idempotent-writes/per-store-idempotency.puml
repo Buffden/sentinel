@@ -7,14 +7,20 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-participant "Position\nConsumer" as Consumer
+participant "Position\nConsumer" as PosConsumer
+participant "Correlation\nWorker" as CorrWorker
 database "TimescaleDB\nposition_history" as TSDB
-database "Neo4j\nentity graph" as Neo4j
 database "Redis\nentity:live:{id}" as Redis
+database "Neo4j\nentity graph" as Neo4j
 
-Consumer -> Consumer : derive idempotency key\n{entity_id}:{timestamp_ms}
+note over PosConsumer
+  Reads from adsb.raw / ais.raw.
+  Writes to TimescaleDB and Redis.
+end note
 
-Consumer -> TSDB : INSERT INTO position_history\n(entity_id, timestamp_ms, lat, lon, geo_cell)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+PosConsumer -> PosConsumer : derive idempotency key\n{entity_id}:{timestamp_ms}
+
+PosConsumer -> TSDB : INSERT INTO position_history\n(entity_id, timestamp_ms, lat, lon, geo_cell)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
 
 note right of TSDB
   Duplicate row silently ignored.
@@ -22,22 +28,30 @@ note right of TSDB
   primary key (entity_id, timestamp_ms).
 end note
 
-Consumer -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $key\n}]->(b)\nON CREATE SET e.lat = $lat, e.lon = $lon
-
-note right of Neo4j
-  MERGE matches on idempotency_key.
-  If edge exists - no-op.
-  If edge absent - create it.
-  Never produces duplicate edges.
-end note
-
-Consumer -> Redis : HSET entity:live:{entity_id}\nlat $lat lon $lon timestamp_ms $ts
+PosConsumer -> Redis : HSET entity:live:{entity_id}\nlat $lat lon $lon timestamp_ms $ts
 
 note right of Redis
   HSET overwrites the field value.
   Writing the same key/value twice
   has no observable side effect.
   Naturally idempotent.
+end note
+
+note over CorrWorker
+  Reads from position.normalized.
+  Writes to Neo4j.
+  Same idempotency key derived from the event.
+end note
+
+CorrWorker -> CorrWorker : derive idempotency key\n{entity_id}:{timestamp_ms}
+
+CorrWorker -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $key\n}]->(b)\nON CREATE SET e.lat = $lat, e.lon = $lon
+
+note right of Neo4j
+  MERGE matches on idempotency_key.
+  If edge exists - no-op.
+  If edge absent - create it.
+  Never produces duplicate edges.
 end note
 
 @enduml

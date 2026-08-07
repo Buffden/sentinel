@@ -32,7 +32,7 @@ Shows how each store enforces idempotency using a different mechanism: `ON CONFL
 
 ![Duplicate Delivery](../../../diagrams/docs/use-cases/US-11-idempotent-writes/duplicate-delivery.svg)
 
-End-to-end scenario where Kafka redelivers the same event twice after a consumer restart; all three stores handle the duplicate write as a no-op with no coordination required.
+End-to-end scenario where Kafka redelivers the same event twice after a consumer restart; the Position Consumer's writes to TimescaleDB and Redis are each a no-op on the second delivery, and the Correlation Worker applies the same guarantee for Neo4j - all without coordination between instances.
 
 ---
 

@@ -44,14 +44,23 @@ alt two entities within threshold
       so that leader election (ADR-005) governs
       all alert output from one place.
     end note
-
-    Evaluator -> Neo4j : query PROXIMITY_EVENT edges\nwithout KNOWN_ASSOCIATE within window
-    Neo4j --> Evaluator : unscheduled proximity pairs
-    Evaluator -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
   else prior relationship exists
     Correlation -> Correlation : routine proximity - no edge written
   end
 end
+
+== Alert Evaluator - runs on its own independent evaluation cycle ==
+
+note over Evaluator
+  Completely separate from the Correlation Worker.
+  Polls Neo4j on each evaluation cycle
+  to find unscheduled proximity evidence
+  written since the last cycle.
+end note
+
+Evaluator -> Neo4j : query PROXIMITY_EVENT edges\nwithout KNOWN_ASSOCIATE within window
+Neo4j --> Evaluator : unscheduled proximity pairs
+Evaluator -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
 
 Alerts -> API : consume alert
 API --> Dashboard : push alert over WebSocket
