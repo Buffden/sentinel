@@ -38,6 +38,8 @@ One composite alert at elevated priority
 
 **Composite emission** - one elevated composite alert is published to Kafka and pushed to the operator, suppressing the individual signal loss and proximity alerts.
 
+**Single signal path** - shows what happens when only one weak signal is present: no composite is raised, only the individual alert is emitted.
+
 ---
 
 ## Architectural Justification
