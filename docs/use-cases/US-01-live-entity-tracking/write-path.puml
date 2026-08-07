@@ -9,20 +9,24 @@ skinparam noteBackgroundColor #FFFDE7
 
 collections "OpenSky / AIS\nFeed" as Feed
 participant "Ingestion\nPoller" as Poller
-queue "Kafka\nposition.normalized" as Kafka
+queue "Kafka\nadsb.raw / ais.raw" as KafkaRaw
 participant "Position\nConsumer" as Consumer
+queue "Kafka\nposition.normalized" as KafkaNorm
 database "Redis\nentity:live:{id}" as Redis
 database "TimescaleDB\nposition_history" as TSDB
 
 Feed -> Poller : position ping\n(entity_id, lat, lon, timestamp_ms)
-Poller -> Kafka : publish to position.normalized
+Poller -> KafkaRaw : publish to adsb.raw / ais.raw
 
-note over Kafka
+note over KafkaRaw
   Decouples poller from consumers.
   Absorbs feed bursts without back-pressure.
+  Malformed events are routed to DLQ - not shown here (see US-09).
 end note
 
-Kafka -> Consumer : consume event (at-least-once)
+KafkaRaw -> Consumer : consume raw event (at-least-once)
+Consumer -> Consumer : parse and normalise\n(validate fields, convert units)
+Consumer -> KafkaNorm : publish to position.normalized
 
 Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms }
 
