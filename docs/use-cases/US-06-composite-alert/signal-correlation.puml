@@ -1,0 +1,47 @@
+@startuml signal-correlation
+title US-06: Signal Correlation - Two Weak Signals Joined via Neo4j
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nentity:live:{id}" as Redis
+database "Neo4j\nentity graph" as Neo4j
+
+note over Evaluator
+  Runs on each evaluation cycle.
+  Only the elected leader emits alerts.
+end note
+
+Evaluator -> Redis : check entity:live:{entity_b} TTL
+Redis --> Evaluator : key missing - Entity B is dark
+
+note over Evaluator
+  Weak signal 1: signal loss detected.
+  Not actionable on its own.
+end note
+
+Evaluator -> Neo4j : MATCH (b:Entity {id: $id_b})-[e:PROXIMITY_EVENT]->(a:Entity)\nWHERE e.timestamp_ms > $dark_since_ms\nAND NOT (b)-[:KNOWN_ASSOCIATE]-(a)\nRETURN a, e
+
+note over Neo4j
+  Multi-hop graph traversal:
+  find all entities that came near
+  Entity B after it went dark,
+  with no prior KNOWN_ASSOCIATE edge.
+  Single Cypher pattern match.
+end note
+
+Neo4j --> Evaluator : Entity A, proximity event { lat, lon, timestamp_ms, distance_metres }
+
+note over Evaluator
+  Weak signal 2: proximity to unrelated entity
+  within the signal loss window.
+  Together they form a composite pattern.
+end note
+
+Evaluator -> Evaluator : correlate signals\n-> COMPOSITE alert at elevated priority
+
+@enduml
