@@ -1,0 +1,33 @@
+Sentinel
+Copyright 2026
+
+This project is a non-commercial portfolio and learning exercise.
+It is not affiliated with, endorsed by, or connected to any commercial entity.
+
+---
+
+Third-Party Data Sources
+------------------------
+
+### OpenSky Network (ADS-B flight data)
+
+This project uses data from the OpenSky Network (https://opensky-network.org/).
+Use of OpenSky data is restricted to non-commercial and research purposes under
+their Terms of Use (https://opensky-network.org/about/terms-of-use).
+
+Academic and research use of OpenSky data should cite:
+
+  Matthias Schafer, Martin Strohmeier, Vincent Lenders, Ivan Martinovic, Matthias Wilhelm.
+  "Bringing Up OpenSky: A Large-scale ADS-B Sensor Network for Research."
+  In Proceedings of the 13th IEEE/ACM International Symposium on Information Processing
+  in Sensor Networks (IPSN), pages 83-94, April 2014.
+
+This project does not redistribute OpenSky data. It queries the live API at runtime
+for the sole purpose of demonstrating distributed systems architecture.
+
+### AISHub (AIS vessel data)
+
+This project references AISHub (https://www.aishub.net/) as a potential AIS data source.
+AISHub operates on a contribution model - users are expected to contribute AIS receiver
+data in exchange for API access. Verify eligibility with AISHub before connecting a
+live feed. This project does not redistribute AISHub data.
