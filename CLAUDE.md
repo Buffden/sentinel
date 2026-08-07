@@ -10,7 +10,7 @@ Sentinel is a real-time geospatial entity-tracking and anomaly-detection platfor
 
 **This is a portfolio/learning project, not a production system.** Every architectural decision exists to be defensible in a system design interview  - not to maximize feature count or visual polish.
 
-Read `intent.md` for the full context on why this project exists and what "done" looks like. Read `README.md` for the architecture overview and tech stack.
+Read `insights/intent.md` for the full context on why this project exists and what "done" looks like. Read `README.md` for the architecture overview and tech stack.
 
 ---
 
@@ -44,12 +44,12 @@ docker compose up -d        # Start all backing services
 ### General
 - Services are independently deployable  - no shared in-process state across service boundaries
 - Each service owns exactly one concern (ingestion, position storage, correlation, alert evaluation, API, dashboard)
-- No service should directly query another service's database  - go through the API or the message bus
+- No service should call another service's internal API or private endpoints directly - use Kafka for event flow between services. Reading from the shared persistence layers (TimescaleDB, Neo4j, Redis) is not inter-service coupling; it is the intended access pattern.
 
 ### Naming
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
 - Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
-- Kafka topics: `{entity_type}.{stage}`  - e.g. `adsb.raw`, `ais.raw`, `position.normalized`
+- Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
 - Redis keys: `entity:live:{entity_id}` for current position
 
 ### Code style
@@ -80,7 +80,7 @@ docker compose up -d        # Start all backing services
 ## Hard constraints  - never do these
 
 - Do not use defense/intelligence-flavored language, naming, or framing anywhere in code, comments, or docs. The project is a technical demo system, not a surveillance platform.
-- Do not directly couple services (e.g. alert evaluator querying TimescaleDB directly  - it goes through the correlation worker or API).
+- Do not directly couple services via inter-service HTTP calls (e.g. alert evaluator calling the position consumer's REST endpoints). Use Kafka for event flow or read from the shared persistence layers (TimescaleDB, Neo4j, Redis) directly - that is not coupling, that is the intended access pattern.
 - Do not skip the idempotency key on any write to any store.
 - Do not add authentication/account management beyond basic API key auth (ingestion clients) and RBAC (dashboard viewers)  - explicitly out of scope for v1.
 - Do not add ML-based anomaly detection  - rule- and correlation-based only in v1. ML is a stated future direction, not a current task.
@@ -93,7 +93,7 @@ docker compose up -d        # Start all backing services
 
 | File | Purpose |
 | --- | --- |
-| `intent.md` | Why this project exists, what success looks like, full context for decision-making |
+| `insights/intent.md` | Why this project exists, what success looks like, full context for decision-making (private, gitignored) |
 | `README.md` | Architecture overview, stack, anomaly types, project structure |
 | `docs/adr/` | Architecture Decision Records  - read the relevant ADR before implementing anything in its scope |
 | `docs/ARCHITECTURE.md` | Component contracts and service boundaries (to be written) |

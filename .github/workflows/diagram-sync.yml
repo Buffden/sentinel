@@ -85,7 +85,9 @@ jobs:
       - name: Generate changed diagrams
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            diagram-sync
+            # Manual trigger: regenerate all diagrams in the repo
+            ALLPUML=$(find . -name "*.puml" -o -name "*.plantuml" | tr '\n' ' ')
+            diagram-sync --files $ALLPUML
           else
             CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml)$' || true)
             if [ -n "$CHANGED" ]; then

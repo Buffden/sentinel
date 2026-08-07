@@ -29,7 +29,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 | Alert coordination | Leader election | prevents duplicate emission under horizontal scale |
 | Anomaly model | Composite correlation | single weak signal is not actionable; correlate across graph + time |
 
-Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISIONS.md)
+Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/)
 
 ---
 
