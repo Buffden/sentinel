@@ -26,6 +26,8 @@ As an operator, I want to see all currently tracked entities on a live map so th
 
 **Read path** - the dashboard receives live positions from Redis via the API WebSocket and renders them on the map.
 
+**Entity expiry** - when an entity stops broadcasting, its Redis TTL expires automatically and the entity is removed from the next map refresh without any explicit delete call.
+
 ---
 
 ## Architectural Justification
