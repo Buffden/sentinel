@@ -1,0 +1,42 @@
+@startuml state-transitions
+title US-13: Alert State Machine
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam stateArrowColor #333333
+
+[*] --> NEW : alert evaluator publishes\nalert event to Kafka\nAPI writes initial record
+
+NEW --> ACKNOWLEDGED : operator clicks Acknowledge\nPATCH /alerts/:alert_id\n{ status: ACKNOWLEDGED }
+
+ACKNOWLEDGED --> RESOLVED : operator clicks Resolve\nPATCH /alerts/:alert_id\n{ status: RESOLVED }
+
+NEW --> RESOLVED : operator skips acknowledge\nand resolves directly
+
+RESOLVED --> [*]
+
+note right of NEW
+  alert_id = {entity_id}:{alert_type}:{window_start_ms}
+  Deterministic - safe to replay from Kafka.
+  Duplicate insert is a no-op via ON CONFLICT DO NOTHING.
+end note
+
+note right of ACKNOWLEDGED
+  Records who acknowledged and when.
+  Other operators see the alert is owned.
+  Alert evaluator continues evaluating -
+  it does not read lifecycle state.
+end note
+
+note right of RESOLVED
+  Record is never deleted - it is the audit trail.
+  If the anomaly recurs, a new alert_id is generated
+  (new window_start_ms) - a fresh record, not a reopen.
+end note
+
+@enduml

@@ -1,0 +1,57 @@
+@startuml resolve-and-reopen
+title US-13: Resolve and Reopen - Resolved Alert Does Not Block New Detection
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+queue "Kafka\nalerts" as Kafka
+
+== Operator Resolves Alert ==
+
+Operator -> API : PATCH /alerts/VesselB:SIGNAL_LOSS:1700000000000\n{ status: RESOLVED }
+
+API -> TSDB : UPDATE alerts SET status = 'RESOLVED',\nresolved_at = now()\nWHERE alert_id = 'VesselB:SIGNAL_LOSS:1700000000000'
+
+note over TSDB
+  Record stays in the table permanently.
+  This is the audit trail - never deleted.
+  Resolved alerts are queryable for history.
+end note
+
+TSDB --> API : updated
+API --> Operator : 200 OK
+
+== Anomaly Recurs Later ==
+
+note over Evaluator
+  VesselB goes dark again in a new time window.
+  Alert Evaluator does not read the alerts table.
+  It evaluates based on Redis TTL and store state only.
+end note
+
+Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  window_start_ms: 1700005000000 }
+
+note over Kafka
+  New window_start_ms = new alert_id.
+  Completely independent of the resolved alert.
+  No reopen logic - just a fresh record.
+end note
+
+Kafka -> API : consume new alert event
+API -> TSDB : INSERT INTO alerts ( alert_id: VesselB:SIGNAL_LOSS:1700005000000, status: NEW, ... )\nON CONFLICT DO NOTHING
+
+note over TSDB
+  Two separate rows now exist:
+  VesselB:SIGNAL_LOSS:1700000000000 -> RESOLVED
+  VesselB:SIGNAL_LOSS:1700005000000 -> NEW
+  Full history preserved.
+end note
+
+@enduml
