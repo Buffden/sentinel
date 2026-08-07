@@ -14,45 +14,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 
 ## Architecture Overview
 
-```text
-┌─────────────────────┐     ┌────────────────────────────────┐
-│   ADS-B / AIS Feed  │────▶│   Ingestion Poller (per region) │
-│  (OpenSky / AISHub) │     └──────────────┬─────────────────┘
-└─────────────────────┘                    │
-                                           ▼
-                              ┌────────────────────────┐
-                              │   Kafka / Redpanda      │
-                              │  (topic per entity type)│
-                              └───────┬────────┬────────┘
-                                      │        │
-                          ┌───────────▼─┐  ┌───▼────────────────┐
-                          │  Position   │  │  Correlation Worker  │
-                          │  Consumer   │  │  (Anomaly Detection) │
-                          └──────┬──────┘  └────────┬────────────┘
-                                 │                   │
-              ┌──────────────────┼───────────────────┤
-              │                  │                   │
-     ┌────────▼──────┐  ┌────────▼──────┐  ┌────────▼──────┐
-     │  TimescaleDB  │  │     Neo4j     │  │     Redis     │
-     │ (position     │  │ (entity       │  │ (live state   │
-     │  history)     │  │  graph)       │  │  cache)       │
-     └───────────────┘  └───────────────┘  └───────────────┘
-                                 │
-                        ┌────────▼──────────┐
-                        │  Alert Evaluator   │
-                        │ (leader-elected)   │
-                        └────────┬──────────┘
-                                 │
-                        ┌────────▼──────────┐
-                        │  Dashboard API    │
-                        │  (REST + WS)      │
-                        └────────┬──────────┘
-                                 │
-                        ┌────────▼──────────┐
-                        │  Angular + Leaflet │
-                        │  (Map + Alerts)    │
-                        └───────────────────┘
-```
+![Architecture](diagrams/docs/Sentinel%20Architecture.svg)
 
 ---
 
