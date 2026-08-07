@@ -1,0 +1,32 @@
+@startuml graph-update
+title US-05: Graph Update - Proximity Event Written to Neo4j
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Correlation\nWorker" as Correlation
+database "Neo4j\nentity graph" as Neo4j
+
+Correlation -> Neo4j : MERGE (a:Entity {id: $id_a})\nMERGE (b:Entity {id: $id_b})
+
+note over Neo4j
+  MERGE creates the node if absent,
+  matches it if already present.
+  Entity nodes are never duplicated.
+end note
+
+Correlation -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $entity_a + ':' + $timestamp_ms\n}]->(b)\nON CREATE SET e.lat = $lat,\n  e.lon = $lon,\n  e.distance_metres = $distance,\n  e.timestamp_ms = $timestamp_ms
+
+note over Neo4j
+  Idempotency key on the edge.
+  Replaying the same Kafka event
+  produces exactly one edge - never a duplicate.
+  Safe to replay from any offset.
+end note
+
+Neo4j --> Correlation : edge created or matched (no-op on replay)
+
+@enduml
