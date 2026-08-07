@@ -1,0 +1,41 @@
+@startuml connection-setup
+title US-02: Connection Setup - WebSocket Handshake
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API\n(ws library)" as API
+
+Operator -> Dashboard : opens live map
+
+Dashboard -> API : HTTP GET /live\nUpgrade: websocket
+
+note over API
+  Express HTTP server and ws library
+  share the same port.
+  No separate WebSocket server process.
+end note
+
+API --> Dashboard : 101 Switching Protocols\n(WebSocket handshake complete)
+
+note over Dashboard
+  Connection is persistent.
+  Dashboard does not poll.
+  Server pushes updates as they arrive.
+end note
+
+Dashboard --> Operator : map rendered, awaiting live updates
+
+== On disconnect ==
+
+Dashboard -> Dashboard : detect connection drop
+Dashboard -> API : reconnect (exponential backoff)
+API --> Dashboard : 101 Switching Protocols
+Dashboard --> Operator : live updates resume
+
+@enduml

@@ -1,0 +1,38 @@
+@startuml update-push
+title US-02: Update Push - Live Position Pushed to Dashboard
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Position\nConsumer" as Consumer
+database "Redis\nentity:live:{id}" as Redis
+participant "Express API\n(ws library)" as API
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms }
+Consumer -> API : publish update via Redis pub/sub
+
+note over API
+  Redis pub/sub fans updates out
+  across multiple API instances
+  without duplicating Kafka consumption.
+end note
+
+loop for each connected WebSocket client
+  API -> Dashboard : push { entity_id, lat, lon, timestamp_ms }
+end
+
+Dashboard -> Dashboard : update entity position on map
+Dashboard --> Operator : entity moves to new position
+
+note over Dashboard, Operator
+  No HTTP request made.
+  No page refresh required.
+  Latency = network RTT only.
+end note
+
+@enduml
