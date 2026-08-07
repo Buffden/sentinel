@@ -1,0 +1,52 @@
+@startuml alert-suppression
+title US-03: Alert Suppression - No Re-Emit While Entity Stays Dark
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nalert-state:{id}" as AlertState
+queue "Kafka\nalerts" as Kafka
+
+note over Evaluator
+  Entity ABC is dark.
+  Alert has already been emitted
+  on a previous evaluation cycle.
+end note
+
+loop evaluation cycle N (entity still dark)
+  Evaluator -> AlertState : GET alert-state:ABC
+  AlertState --> Evaluator : SIGNAL_LOSS alert already active
+
+  Evaluator -> Evaluator : skip - alert already raised\ndo not re-emit
+
+  note over Evaluator
+    Operator does not receive
+    a duplicate alert on every cycle.
+    One alert per loss event.
+  end note
+end
+
+note over Evaluator
+  Entity ABC starts broadcasting again.
+  Redis key entity:live:ABC is restored
+  by the position consumer.
+end note
+
+Evaluator -> AlertState : DEL alert-state:ABC\n(clear active alert record)
+
+loop next evaluation cycle (entity live again)
+  Evaluator -> AlertState : GET alert-state:ABC
+  AlertState --> Evaluator : nil (no active alert)
+
+  note over Evaluator
+    Entity is back. Alert state cleared.
+    If entity goes dark again in future,
+    a new alert will be emitted.
+  end note
+end
+
+@enduml

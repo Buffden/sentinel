@@ -26,6 +26,8 @@ As an operator, I want to receive an alert when an entity's transponder goes dar
 
 **Alert delivery** - the alert travels from Kafka through the API and is pushed to the operator's dashboard over WebSocket.
 
+**Alert suppression** - once an alert is raised for an entity, subsequent evaluation cycles detect the active alert state and skip re-emission until the entity comes back online and the alert state is cleared.
+
 ---
 
 ## Architectural Justification
