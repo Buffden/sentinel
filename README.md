@@ -22,7 +22,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Ingestion buffer | Kafka / Redpanda | absorbs bursty feeds; decouples producers from consumers |
+| Ingestion buffer | Kafka (MSK on AWS, Redpanda locally) | absorbs bursty feeds; decouples producers from consumers |
 | Position history | TimescaleDB | geo-cell + time-bucket sharding matches the query shape |
 | Entity graph | Neo4j | proximity queries are traversals, not table scans |
 | Live state | Redis | highest-frequency read; cache, not source of truth |
@@ -37,12 +37,12 @@ Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISION
 
 | Layer | Technology |
 | --- | --- |
-| Data ingestion | Python/Node poller → Kafka/Redpanda |
+| Data ingestion | Python/Node poller → Kafka (Redpanda locally, MSK on AWS) |
 | Position store | TimescaleDB (geo-cell + time-bucket sharding) |
 | Correlation graph | Neo4j |
 | Live state cache | Redis |
 | Alert evaluation | Leader-elected worker service |
-| API | REST + WebSocket |
+| API | Express (Node.js) - REST + WebSocket |
 | Dashboard | Angular + Leaflet |
 | Deployment | Docker Compose → AWS |
 | CI/CD | GitHub Actions |
@@ -91,6 +91,8 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 | ADR-005 | Leader election strategy for alert evaluator |
 | ADR-006 | Geo-cell sharding key design and hot-spot mitigation |
 | ADR-007 | Idempotency key schema |
+| ADR-008 | Express (Node.js) for the API layer |
+| ADR-009 | Angular + Leaflet for the dashboard |
 
 ---
 

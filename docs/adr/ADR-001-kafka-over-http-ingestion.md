@@ -18,7 +18,10 @@ Two approaches were considered:
 
 ## Decision
 
-Use Kafka (or Redpanda as a drop-in replacement) as the message buffer between the ingestion poller and all downstream consumers.
+Use Kafka as the message broker between the ingestion poller and all downstream consumers.
+
+- **Local development (Docker Compose):** Redpanda - single binary, no ZooKeeper/KRaft setup, Kafka-compatible API
+- **Production (AWS):** Amazon MSK (managed Kafka) - operationally managed, integrates with IAM and VPC, same client code as local with no changes required
 
 ---
 
@@ -54,6 +57,6 @@ Use Kafka (or Redpanda as a drop-in replacement) as the message buffer between t
 
 ## Consequences
 
-- Adds operational complexity: Kafka/Redpanda must be running before any consumer can process data
+- Adds operational complexity: Redpanda (local) or MSK (AWS) must be running before any consumer can process data
 - Consumers must handle at-least-once delivery (Kafka does not guarantee exactly-once without additional configuration)
 - All writes downstream must be idempotent  - addressed by ADR-007

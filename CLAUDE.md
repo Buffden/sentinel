@@ -18,11 +18,11 @@ Read `intent.md` for the full context on why this project exists and what "done"
 
 | Concern | Technology | Why |
 | --- | --- | --- |
-| Message broker | Kafka / Redpanda | Decouples ingestion from processing; absorbs bursty feeds |
+| Message broker | Kafka (Redpanda locally, MSK on AWS) | Decouples ingestion from processing; absorbs bursty feeds |
 | Position history | TimescaleDB | Geo-cell + time-bucket sharding matches the query pattern |
 | Entity graph | Neo4j | Proximity/relationship queries are graph traversals, not table scans |
 | Live entity state | Redis | Highest-frequency read; cache, not source of truth |
-| API | To be decided | REST + WebSocket |
+| API | Express (Node.js) | Lightweight, native async I/O, simple WebSocket via `ws` |
 | Dashboard | Angular + Leaflet | Functional, not the point of the project |
 | Deployment | Docker Compose (local) → AWS | Same CI/CD pattern as existing projects |
 
