@@ -1,0 +1,46 @@
+@startuml automatic-restart-replay
+title US-10: Automatic Restart Replay - Consumer Resumes from Last Committed Offset
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nposition.normalized" as Kafka
+participant "Position\nConsumer" as Consumer
+database "Kafka\noffset store\n(__consumer_offsets)" as Offsets
+
+Consumer -> Kafka : consuming events
+Consumer -> Offsets : commit offset after each\nsuccessful batch
+
+note over Consumer
+  Consumer crashes mid-batch.
+  Last committed offset is preserved.
+end note
+
+Consumer ->x Consumer : crash
+
+note over Kafka
+  Events continue to accumulate.
+  Retention window keeps all events
+  regardless of consumer state.
+end note
+
+Consumer -> Consumer : restart
+Consumer -> Offsets : fetch last committed offset
+Offsets --> Consumer : resume from offset N
+
+Consumer -> Kafka : consume from offset N\n(replay missed events)
+Kafka --> Consumer : all events since last commit
+
+note over Consumer
+  Idempotent writes ensure replayed
+  events produce no duplicates
+  in TimescaleDB, Neo4j, or Redis. (US-11)
+end note
+
+Consumer -> Offsets : commit offset as events are processed
+Consumer -> Consumer : caught up - processing live events
+
+@enduml
