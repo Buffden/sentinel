@@ -1,0 +1,53 @@
+@startuml graph-pivot
+title US-14: Graph Pivot - Operator Explores Entity Relationship Network
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API" as API
+database "Neo4j\nentity graph" as Neo4j
+
+Operator -> Dashboard : clicks "Show related entities"\non VesselB in investigation view
+
+Dashboard -> API : GET /entities/VesselB/relationships?since=24h
+
+API -> Neo4j : MATCH (b:Entity {id: 'VesselB'})-[e:PROXIMITY_EVENT]-(other:Entity)\nWHERE e.timestamp_ms > $since_ms\nRETURN other.id,\n  collect(e) AS events,\n  exists((b)-[:KNOWN_ASSOCIATE]-(other)) AS known\nORDER BY size(events) DESC
+
+note over Neo4j
+  Variable-depth traversal from a single node.
+  Returns all entities that came within
+  proximity of VesselB in the last 24 hours,
+  with edge properties and relationship flags.
+  In SQL this is a self-join on a proximity
+  events table - expensive as density grows.
+  In Neo4j it is a single pattern match.
+end note
+
+Neo4j --> API : [ { entity_id, event_count,\n  closest_approach_metres,\n  known: bool }, ... ]
+
+API --> Dashboard : relationship network\n{ nodes: [...], edges: [...] }
+
+Dashboard --> Operator : network graph rendered\n- VesselB at centre\n- known associates in grey\n- unknown entities highlighted\n- edge weight = number of proximity events
+
+note over Operator
+  Operator spots VesselC made 3 approaches
+  to VesselB after it went dark - all flagged
+  as unknown. Clicks VesselC to pivot and
+  open its own investigation view.
+end note
+
+Operator -> Dashboard : clicks VesselC node
+Dashboard -> API : GET /entities/VesselC/relationships?since=24h
+
+note over API
+  Same query, different starting node.
+  The pivot pattern works for any entity
+  without additional API design.
+end note
+
+@enduml

@@ -1,0 +1,46 @@
+@startuml evidence-panel
+title US-14: Evidence Panel - Why the Alert Fired, Assembled from All Three Stores
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Express API" as API
+database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nalerts + position_history" as TSDB
+database "Neo4j\nentity graph" as Neo4j
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+note over API
+  Operator opens the evidence panel for a COMPOSITE alert.
+  API fetches from all three stores in parallel
+  to assemble the full picture.
+end note
+
+par fetch current state
+  API -> Redis : HGETALL entity:live:VesselB
+  Redis --> API : { lat, lon, timestamp_ms } or nil (still dark)
+else fetch alert record and position history
+  API -> TSDB : SELECT * FROM alerts WHERE alert_id = $1
+  TSDB --> API : { alert_type: COMPOSITE, payload: { signal_loss_duration_ms,\n  proximity_entity_id, proximity_distance_metres } }
+else fetch relationship context
+  API -> Neo4j : MATCH (b:Entity {id: 'VesselB'})\nOPTIONAL MATCH (b)-[k:KNOWN_ASSOCIATE]-(known)\nOPTIONAL MATCH (b)-[p:PROXIMITY_EVENT]-(recent)\nWHERE p.timestamp_ms > $window_start\nRETURN known, recent
+  Neo4j --> API : known associates, recent proximity events
+end
+
+note over API
+  Each store answers a different question:
+  Redis:     "Is the entity still dark right now?"
+  TSDB:      "What rule fired and what were the thresholds?"
+  Neo4j:     "Is this proximity entity known or unrelated?"
+  No single store answers all three.
+end note
+
+API --> Dashboard : evidence panel payload\n{ current_state, alert_detail,\n  known_associates, proximity_events,\n  composite_score }
+
+Dashboard --> Operator : evidence panel rendered\n- signal loss duration\n- proximity entity (flagged as unknown)\n- last known position on map\n- which thresholds were crossed
+
+@enduml
