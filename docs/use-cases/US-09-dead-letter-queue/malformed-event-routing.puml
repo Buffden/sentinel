@@ -1,0 +1,43 @@
+@startuml malformed-event-routing
+title US-09: Malformed Event Routing - Bad Event Sent to DLQ
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position\nConsumer" as Consumer
+queue "Kafka\nadsb.dlq / ais.dlq" as DLQ
+
+Kafka -> Consumer : consume raw event
+
+Consumer -> Consumer : attempt to parse event
+
+alt event is valid
+  Consumer -> Consumer : normalise and forward\nto position.normalized
+  note over Consumer
+    Happy path - processing continues.
+  end note
+
+else event is malformed or unparseable
+  note over Consumer
+    Bad payload - missing required fields,
+    invalid coordinates, unrecognised format.
+    Do not crash. Do not drop silently.
+  end note
+
+  Consumer -> DLQ : publish to adsb.dlq / ais.dlq\n{ raw_payload, rejection_reason, timestamp_ms,\n  consumer_id, source_topic, source_offset }
+
+  note over DLQ
+    Original raw payload preserved.
+    Rejection reason attached.
+    Event is inspectable and recoverable.
+    No data is silently lost.
+  end note
+
+  Consumer -> Kafka : commit offset and continue\nprocessing next event
+end
+
+@enduml
