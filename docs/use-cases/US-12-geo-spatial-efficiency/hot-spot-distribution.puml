@@ -1,0 +1,44 @@
+@startuml hot-spot-distribution
+title US-12: Hot-Spot Distribution - High-Traffic Area Spread Across Multiple H3 Cells
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Position\nConsumer" as Consumer
+database "TimescaleDB\nChunk A\n(geo_cell=8a2a1072b59ffff)" as ChunkA
+database "TimescaleDB\nChunk B\n(geo_cell=8a2a1072b4fffff)" as ChunkB
+database "TimescaleDB\nChunk C\n(geo_cell=8a2a1072b58ffff)" as ChunkC
+
+note over Consumer
+  Busy airspace - e.g. London Heathrow approach.
+  Hundreds of aircraft in a small area.
+  All pings arrive at the position consumer.
+end note
+
+Consumer -> Consumer : compute H3 cell for each ping\nat resolution 5 (~252 km² per cell)
+
+note over Consumer
+  Aircraft dispersed across the
+  approach corridor map to
+  different H3 cells at resolution 5.
+  No single cell receives all writes.
+end note
+
+Consumer -> ChunkA : INSERT positions for aircraft\nin cell 8a2a1072b59ffff
+Consumer -> ChunkB : INSERT positions for aircraft\nin cell 8a2a1072b4fffff
+Consumer -> ChunkC : INSERT positions for aircraft\nin cell 8a2a1072b58ffff
+
+note over ChunkA, ChunkC
+  Write load distributed across
+  multiple chunks in parallel.
+  No single chunk is a bottleneck.
+  Compare: a single rectangular
+  grid cell covering the same area
+  would receive all writes into
+  one partition - a hot-spot.
+end note
+
+@enduml

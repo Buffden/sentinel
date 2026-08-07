@@ -26,6 +26,8 @@ As the system, I want position history queries for "all entities in region R dur
 
 **Regional query** - the API or alert evaluator translates a bounding box into a set of H3 cell IDs in application code, then queries TimescaleDB with those cell IDs so chunk exclusion restricts the scan to only the relevant spatial and time partitions.
 
+**Hot-spot distribution** - shows how a high-traffic area such as a busy airport naturally maps to multiple H3 cells at resolution 5, distributing write load across multiple chunks rather than concentrating it in one.
+
 ---
 
 ## Architectural Justification
