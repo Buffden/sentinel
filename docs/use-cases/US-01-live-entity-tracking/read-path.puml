@@ -1,0 +1,38 @@
+@startuml read-path
+title US-01: Read Path - Dashboard Renders Live Map
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API" as API
+database "Redis\nentity:live:{id}" as Redis
+
+Operator -> Dashboard : opens live map
+
+Dashboard -> API : establish WebSocket connection
+
+note over API
+  Express + ws library.
+  One persistent connection per client.
+  No polling required.
+end note
+
+loop on each position update received by API
+  API -> Redis : HGETALL entity:live:*
+  Redis --> API : { entity_id, lat, lon, altitude, timestamp_ms }
+  API --> Dashboard : push position payload over WebSocket
+  Dashboard --> Operator : entity position updated on map
+end
+
+note over Dashboard, Operator
+  Entities with expired Redis TTL
+  are absent from the response
+  and removed from the map.
+end note
+
+@enduml

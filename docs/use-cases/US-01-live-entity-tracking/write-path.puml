@@ -1,0 +1,42 @@
+@startuml write-path
+title US-01: Write Path - Position Ping Ingested
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+collections "OpenSky / AIS\nFeed" as Feed
+participant "Ingestion\nPoller" as Poller
+queue "Kafka\nposition.normalized" as Kafka
+participant "Position\nConsumer" as Consumer
+database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nposition_history" as TSDB
+
+Feed -> Poller : position ping\n(entity_id, lat, lon, timestamp_ms)
+Poller -> Kafka : publish to position.normalized
+
+note over Kafka
+  Decouples poller from consumers.
+  Absorbs feed bursts without back-pressure.
+end note
+
+Kafka -> Consumer : consume event (at-least-once)
+
+Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms }
+
+note right of Redis
+  TTL = SIGNAL_LOSS_THRESHOLD_MS
+  Key expiry removes stale entities
+  from the map automatically.
+end note
+
+Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+
+note right of TSDB
+  Idempotency key: entity_id + timestamp_ms
+  Safe to replay from Kafka offset.
+end note
+
+@enduml
