@@ -22,7 +22,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Ingestion buffer | Kafka / Redpanda | absorbs bursty feeds; decouples producers from consumers |
+| Ingestion buffer | Kafka (MSK on AWS, Redpanda locally) | absorbs bursty feeds; decouples producers from consumers |
 | Position history | TimescaleDB | geo-cell + time-bucket sharding matches the query shape |
 | Entity graph | Neo4j | proximity queries are traversals, not table scans |
 | Live state | Redis | highest-frequency read; cache, not source of truth |
@@ -37,12 +37,12 @@ Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISION
 
 | Layer | Technology |
 | --- | --- |
-| Data ingestion | Python/Node poller → Kafka/Redpanda |
+| Data ingestion | Python/Node poller → Kafka (Redpanda locally, MSK on AWS) |
 | Position store | TimescaleDB (geo-cell + time-bucket sharding) |
 | Correlation graph | Neo4j |
 | Live state cache | Redis |
 | Alert evaluation | Leader-elected worker service |
-| API | REST + WebSocket |
+| API | Express (Node.js) - REST + WebSocket |
 | Dashboard | Angular + Leaflet |
 | Deployment | Docker Compose → AWS |
 | CI/CD | GitHub Actions |
@@ -70,27 +70,21 @@ All data sources are public. API terms of service are respected throughout  - ra
 
 ---
 
-## Explicit Non-Goals (v1)
-
-- No ML-based predictive modeling  - anomaly detection is rule- and correlation-based initially, with ML as a stated future direction
-- No user-facing account/registration system beyond basic RBAC for dashboard access
-- No exactly-once processing guarantee  - the system is designed around **idempotent at-least-once semantics**, which is the realistic, defensible choice for this problem class
-
----
-
 ## Architecture Decision Records
 
 Significant design choices are documented in `/docs/adr/` with alternatives considered and explicitly rejected.
 
 | ADR | Decision |
 | --- | --- |
-| ADR-001 | Kafka over direct HTTP ingestion |
+| ADR-001 | Kafka (MSK on AWS, Redpanda locally) over direct HTTP ingestion |
 | ADR-002 | TimescaleDB over Cassandra for position history |
 | ADR-003 | Neo4j for entity relationship graph |
 | ADR-004 | Redis for live entity state |
 | ADR-005 | Leader election strategy for alert evaluator |
 | ADR-006 | Geo-cell sharding key design and hot-spot mitigation |
 | ADR-007 | Idempotency key schema |
+| ADR-008 | Express (Node.js) for the API layer |
+| ADR-009 | Angular + Leaflet for the dashboard |
 
 ---
 
@@ -112,25 +106,6 @@ open http://localhost:4200
 ```
 
 > To use live ADS-B data, set `OPENSKY_USERNAME` and `OPENSKY_PASSWORD` in `.env`. See `.env.example`.
-
----
-
-## Project Structure
-
-```text
-sentinel/
-├── ingestion/          # Pollers for ADS-B and AIS feeds → Kafka
-├── consumers/
-│   ├── position/       # Writes position pings to TimescaleDB + Redis
-│   └── correlation/    # Builds entity graph in Neo4j
-├── alert-evaluator/    # Leader-elected SLO/rule evaluation worker
-├── api/                # REST + WebSocket API for dashboard
-├── dashboard/          # Angular + Leaflet frontend
-├── load-generator/     # Synthetic telemetry + anomaly injection
-├── docs/
-│   └── adr/            # Architecture Decision Records
-└── docker-compose.yml
-```
 
 ---
 

@@ -54,7 +54,7 @@ node "Ingestion Layer" #1a2a3a {
 
 ' ─── Row 3: Message Broker ───────────────────────────────────
 node "Message Broker" #2a1a3a {
-    queue [Kafka / Redpanda\nadsb.raw  |  ais.raw  |  position.normalized] as KAFKA
+    queue [Kafka\nadsb.raw  |  ais.raw  |  position.normalized] as KAFKA
 }
 
 ' ─── Row 4: Processing ───────────────────────────────────────
