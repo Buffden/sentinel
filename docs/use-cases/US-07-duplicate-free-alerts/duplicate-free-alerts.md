@@ -21,11 +21,23 @@ As an operator, I want alerts to be free of duplicates even if the alert evaluat
 
 ## Flow Diagrams
 
-**Leader election** - multiple evaluator instances compete for the Redis lease using SET NX PX; exactly one wins and becomes the sole alert emitter while followers wait on standby.
+### Leader Election
 
-**Failover** - when the leader crashes and stops renewing its lease, the TTL expires and a follower acquires the lease and resumes alert emission within one TTL window.
+![Leader Election](../../../diagrams/docs/use-cases/US-07-duplicate-free-alerts/leader-election.svg)
 
-**Race condition without election** - shows why a naive check-then-emit pattern fails: two instances checking simultaneously both see "not sent" and both emit, producing duplicate alerts for the operator.
+Multiple evaluator instances compete for the Redis lease using SET NX PX; exactly one wins and becomes the sole alert emitter while followers wait on standby.
+
+### Failover
+
+![Failover](../../../diagrams/docs/use-cases/US-07-duplicate-free-alerts/failover.svg)
+
+When the leader crashes and stops renewing its lease, the TTL expires and a follower acquires the lease and resumes alert emission within one TTL window.
+
+### Race Condition Without Election
+
+![Race Condition Without Election](../../../diagrams/docs/use-cases/US-07-duplicate-free-alerts/race-condition-without-election.svg)
+
+Shows why a naive check-then-emit pattern fails: two instances checking simultaneously both see "not sent" and both emit, producing duplicate alerts for the operator.
 
 ---
 

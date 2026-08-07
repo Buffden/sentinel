@@ -22,11 +22,23 @@ As an operator, I want to see all currently tracked entities on a live map so th
 
 ## Flow Diagrams
 
-**Write path** - position ping travels from the feed through Kafka and the position consumer into Redis and TimescaleDB.
+### Write Path
 
-**Read path** - the dashboard receives live positions from Redis via the API WebSocket and renders them on the map.
+![Write Path](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/write-path.svg)
 
-**Entity expiry** - when an entity stops broadcasting, its Redis TTL expires automatically and the entity is removed from the next map refresh without any explicit delete call.
+Position ping travels from the feed through Kafka and the position consumer into Redis and TimescaleDB.
+
+### Read Path
+
+![Read Path](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/read-path.svg)
+
+The dashboard receives live positions from Redis via the API WebSocket and renders them on the map.
+
+### Entity Expiry
+
+![Entity Expiry](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/entity-expiry.svg)
+
+When an entity stops broadcasting, its Redis TTL expires automatically and the entity is removed from the next map refresh without any explicit delete call.
 
 ---
 

@@ -22,9 +22,17 @@ As the system, I want malformed or unparseable telemetry events to be routed to 
 
 ## Flow Diagrams
 
-**Malformed event routing** - the consumer catches a bad event, publishes it to the DLQ topic with the raw payload and rejection reason attached, commits the offset, and continues processing without crashing.
+### Malformed Event Routing
 
-**DLQ inspection and recovery** - a developer reads events from the DLQ, identifies the root cause, and either republishes a corrected event to the source topic or discards it as genuinely bad data.
+![Malformed Event Routing](../../../diagrams/docs/use-cases/US-09-dead-letter-queue/malformed-event-routing.svg)
+
+The consumer catches a bad event, publishes it to the DLQ topic with the raw payload and rejection reason attached, commits the offset, and continues processing without crashing.
+
+### DLQ Inspection and Recovery
+
+![DLQ Inspection and Recovery](../../../diagrams/docs/use-cases/US-09-dead-letter-queue/dlq-inspection-recovery.svg)
+
+A developer reads events from the DLQ, identifies the root cause, and either republishes a corrected event to the source topic or discards it as genuinely bad data.
 
 ---
 

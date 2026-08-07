@@ -22,9 +22,17 @@ As the system, I want every write to every store to be safe to repeat so that re
 
 ## Flow Diagrams
 
-**Per-store idempotency** - shows how each store enforces idempotency using a different mechanism: `ON CONFLICT DO NOTHING` in TimescaleDB, `MERGE` on the idempotency key in Neo4j, and natural overwrite semantics via `HSET` in Redis.
+### Per-Store Idempotency
 
-**Duplicate delivery** - end-to-end scenario where Kafka redelivers the same event twice after a consumer restart; all three stores handle the duplicate write as a no-op with no coordination required.
+![Per-Store Idempotency](../../../diagrams/docs/use-cases/US-11-idempotent-writes/per-store-idempotency.svg)
+
+Shows how each store enforces idempotency using a different mechanism: `ON CONFLICT DO NOTHING` in TimescaleDB, `MERGE` on the idempotency key in Neo4j, and natural overwrite semantics via `HSET` in Redis.
+
+### Duplicate Delivery
+
+![Duplicate Delivery](../../../diagrams/docs/use-cases/US-11-idempotent-writes/duplicate-delivery.svg)
+
+End-to-end scenario where Kafka redelivers the same event twice after a consumer restart; all three stores handle the duplicate write as a no-op with no coordination required.
 
 ---
 

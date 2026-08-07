@@ -22,11 +22,23 @@ As an operator, I want to receive an alert when an entity's transponder goes dar
 
 ## Flow Diagrams
 
-**Detection** - the alert evaluator checks Redis for entities whose TTL has expired, fetches last known position from TimescaleDB, and emits an alert to Kafka.
+### Detection
 
-**Alert delivery** - the alert travels from Kafka through the API and is pushed to the operator's dashboard over WebSocket.
+![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-**Alert suppression** - once an alert is raised for an entity, subsequent evaluation cycles detect the active alert state and skip re-emission until the entity comes back online and the alert state is cleared.
+The alert evaluator checks Redis for entities whose TTL has expired, fetches last known position from TimescaleDB, and emits an alert to Kafka.
+
+### Alert Delivery
+
+![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
+
+The alert travels from Kafka through the API and is pushed to the operator's dashboard over WebSocket.
+
+### Alert Suppression
+
+![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
+
+Once an alert is raised for an entity, subsequent evaluation cycles detect the active alert state and skip re-emission until the entity comes back online and the alert state is cleared.
 
 ---
 

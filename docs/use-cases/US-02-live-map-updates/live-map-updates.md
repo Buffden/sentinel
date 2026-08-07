@@ -22,9 +22,17 @@ As an operator, I want the map to update continuously without requiring a page r
 
 ## Flow Diagrams
 
-**Connection setup** - how the dashboard establishes and recovers a WebSocket connection with the API.
+### Connection Setup
 
-**Update push** - how a position update flows from the position consumer through to the operator's map via WebSocket.
+![Connection Setup](../../../diagrams/docs/use-cases/US-02-live-map-updates/connection-setup.svg)
+
+How the dashboard establishes and recovers a WebSocket connection with the API.
+
+### Update Push
+
+![Update Push](../../../diagrams/docs/use-cases/US-02-live-map-updates/update-push.svg)
+
+How a position update flows from the position consumer through to the operator's map via WebSocket.
 
 ---
 

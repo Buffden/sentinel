@@ -21,9 +21,17 @@ As the ingestion client, I want to publish position pings to the pipeline withou
 
 ## Flow Diagrams
 
-**Normal ingestion** - the poller publishes position pings to Kafka and returns immediately; each consumer group reads independently at its own pace with no back-pressure reaching the poller.
+### Normal Ingestion
 
-**Consumer outage recovery** - Kafka retains events on disk while a consumer is down; on recovery the consumer resumes from its last committed offset and replays all missed events safely.
+![Normal Ingestion](../../../diagrams/docs/use-cases/US-08-ingestion-reliability/normal-ingestion.svg)
+
+The poller publishes position pings to Kafka and returns immediately; each consumer group reads independently at its own pace with no back-pressure reaching the poller.
+
+### Consumer Outage Recovery
+
+![Consumer Outage Recovery](../../../diagrams/docs/use-cases/US-08-ingestion-reliability/consumer-outage-recovery.svg)
+
+Kafka retains events on disk while a consumer is down; on recovery the consumer resumes from its last committed offset and replays all missed events safely.
 
 ---
 

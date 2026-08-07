@@ -22,11 +22,23 @@ As an operator, I want to receive an alert when an entity's current track diverg
 
 ## Flow Diagrams
 
-**Baseline computation** - position history written to TimescaleDB is rolled up into a continuous aggregate that materialises the expected route per entity per time bucket.
+### Baseline Computation
 
-**Deviation detection** - the alert evaluator compares the current position from Redis against the materialised baseline and emits an alert when sustained deviation exceeds the threshold.
+![Baseline Computation](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/baseline-computation.svg)
 
-**Transient vs sustained** - a single position ping outside the baseline increments a counter but does not trigger an alert; only N consecutive out-of-baseline pings cross the sustained threshold and emit.
+Position history written to TimescaleDB is rolled up into a continuous aggregate that materialises the expected route per entity per time bucket.
+
+### Deviation Detection
+
+![Deviation Detection](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/deviation-detection.svg)
+
+The alert evaluator compares the current position from Redis against the materialised baseline and emits an alert when sustained deviation exceeds the threshold.
+
+### Transient vs Sustained
+
+![Transient vs Sustained](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/transient-vs-sustained.svg)
+
+A single position ping outside the baseline increments a counter but does not trigger an alert; only N consecutive out-of-baseline pings cross the sustained threshold and emit.
 
 ---
 

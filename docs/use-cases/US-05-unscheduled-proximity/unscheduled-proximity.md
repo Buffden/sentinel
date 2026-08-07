@@ -22,9 +22,17 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ## Flow Diagrams
 
-**Proximity detection** - the correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, and emits an alert only when none exists.
+### Proximity Detection
 
-**Graph update** - the correlation worker writes the proximity event as an edge in Neo4j using MERGE, ensuring the write is idempotent under Kafka replay.
+![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
+
+The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, and emits an alert only when none exists.
+
+### Graph Update
+
+![Graph Update](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/graph-update.svg)
+
+The correlation worker writes the proximity event as an edge in Neo4j using MERGE, ensuring the write is idempotent under Kafka replay.
 
 ---
 

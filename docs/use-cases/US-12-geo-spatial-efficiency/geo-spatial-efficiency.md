@@ -22,11 +22,23 @@ As the system, I want position history queries for "all entities in region R dur
 
 ## Flow Diagrams
 
-**Geo-cell write** - the position consumer computes the H3 cell ID from the event coordinates at ingest time and stores it as part of the composite partition key alongside the time bucket.
+### Geo-Cell Write
 
-**Regional query** - the API or alert evaluator translates a bounding box into a set of H3 cell IDs in application code, then queries TimescaleDB with those cell IDs so chunk exclusion restricts the scan to only the relevant spatial and time partitions.
+![Geo-Cell Write](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/geo-cell-write.svg)
 
-**Hot-spot distribution** - shows how a high-traffic area such as a busy airport naturally maps to multiple H3 cells at resolution 5, distributing write load across multiple chunks rather than concentrating it in one.
+The position consumer computes the H3 cell ID from the event coordinates at ingest time and stores it as part of the composite partition key alongside the time bucket.
+
+### Regional Query
+
+![Regional Query](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/regional-query.svg)
+
+The API or alert evaluator translates a bounding box into a set of H3 cell IDs in application code, then queries TimescaleDB with those cell IDs so chunk exclusion restricts the scan to only the relevant spatial and time partitions.
+
+### Hot-Spot Distribution
+
+![Hot-Spot Distribution](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/hot-spot-distribution.svg)
+
+Shows how a high-traffic area such as a busy airport naturally maps to multiple H3 cells at resolution 5, distributing write load across multiple chunks rather than concentrating it in one.
 
 ---
 
