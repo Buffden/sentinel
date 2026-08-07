@@ -1,0 +1,43 @@
+@startuml regional-query
+title US-12: Regional Query - Bounding Box Translated to H3 Cells, Only Relevant Chunks Scanned
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Express API /\nAlert Evaluator" as Caller
+participant "H3 Library" as H3
+database "TimescaleDB\nposition_history" as TSDB
+
+Caller -> H3 : polyfill(bounding_box, resolution=5)
+
+note over H3
+  Translates the bounding box into
+  the set of H3 cell IDs that overlap it.
+  Done in application code before
+  the query hits the database.
+end note
+
+H3 --> Caller : [ "8a2a1072b59ffff", "8a2a1072b4fffff", ... ]
+
+Caller -> TSDB : SELECT entity_id, lat, lon, timestamp_ms\nFROM position_history\nWHERE geo_cell IN ($cell_ids)\nAND time_bucket BETWEEN $t1 AND $t2
+
+note over TSDB
+  Chunk exclusion applies:
+  only chunks matching the geo_cell
+  and time_bucket range are scanned.
+  Unrelated spatial regions and
+  time windows are never touched.
+end note
+
+TSDB --> Caller : position rows for entities\nin region R during window T
+
+note over Caller
+  Query cost scales with the number of
+  entities in the queried region and window,
+  not with the total entity count in the system.
+end note
+
+@enduml
