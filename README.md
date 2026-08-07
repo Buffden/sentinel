@@ -70,21 +70,13 @@ All data sources are public. API terms of service are respected throughout  - ra
 
 ---
 
-## Explicit Non-Goals (v1)
-
-- No ML-based predictive modeling  - anomaly detection is rule- and correlation-based initially, with ML as a stated future direction
-- No user-facing account/registration system beyond basic RBAC for dashboard access
-- No exactly-once processing guarantee  - the system is designed around **idempotent at-least-once semantics**, which is the realistic, defensible choice for this problem class
-
----
-
 ## Architecture Decision Records
 
 Significant design choices are documented in `/docs/adr/` with alternatives considered and explicitly rejected.
 
 | ADR | Decision |
 | --- | --- |
-| ADR-001 | Kafka over direct HTTP ingestion |
+| ADR-001 | Kafka (MSK on AWS, Redpanda locally) over direct HTTP ingestion |
 | ADR-002 | TimescaleDB over Cassandra for position history |
 | ADR-003 | Neo4j for entity relationship graph |
 | ADR-004 | Redis for live entity state |
@@ -114,25 +106,6 @@ open http://localhost:4200
 ```
 
 > To use live ADS-B data, set `OPENSKY_USERNAME` and `OPENSKY_PASSWORD` in `.env`. See `.env.example`.
-
----
-
-## Project Structure
-
-```text
-sentinel/
-├── ingestion/          # Pollers for ADS-B and AIS feeds → Kafka
-├── consumers/
-│   ├── position/       # Writes position pings to TimescaleDB + Redis
-│   └── correlation/    # Builds entity graph in Neo4j
-├── alert-evaluator/    # Leader-elected SLO/rule evaluation worker
-├── api/                # REST + WebSocket API for dashboard
-├── dashboard/          # Angular + Leaflet frontend
-├── load-generator/     # Synthetic telemetry + anomaly injection
-├── docs/
-│   └── adr/            # Architecture Decision Records
-└── docker-compose.yml
-```
 
 ---
 
