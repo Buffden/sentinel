@@ -7,7 +7,7 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-queue "Kafka\nposition.normalized" as Kafka
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
 database "Kafka\noffset store\n(__consumer_offsets)" as Offsets
 
@@ -37,7 +37,10 @@ Kafka --> Consumer : all events since last commit
 note over Consumer
   Idempotent writes ensure replayed
   events produce no duplicates
-  in TimescaleDB, Neo4j, or Redis. (US-11)
+  in TimescaleDB or Redis. (US-11)
+  The Correlation Worker applies the same
+  guarantee for Neo4j when replaying
+  from position.normalized.
 end note
 
 Consumer -> Offsets : commit offset as events are processed

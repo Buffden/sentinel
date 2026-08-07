@@ -8,10 +8,10 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Ingestion\nPoller" as Poller
-queue "Kafka\nposition.normalized" as Kafka
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
 
-Poller -> Kafka : publishing events continuously
+Poller -> Kafka : publishing raw events continuously
 
 note over Consumer
   Consumer goes down.

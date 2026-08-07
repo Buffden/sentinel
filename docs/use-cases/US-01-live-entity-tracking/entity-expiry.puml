@@ -9,13 +9,17 @@ skinparam noteBackgroundColor #FFFDE7
 
 collections "OpenSky / AIS\nFeed" as Feed
 participant "Ingestion\nPoller" as Poller
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position\nConsumer" as Consumer
 database "Redis\nentity:live:{id}" as Redis
 participant "Express API" as API
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
 Feed -> Poller : position pings arriving normally
-Poller -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+Poller -> Kafka : publish to adsb.raw / ais.raw
+Kafka -> Consumer : consume event
+Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
 
 note over Feed, Poller
   Entity XYZ123 stops broadcasting.
