@@ -1,0 +1,46 @@
+@startuml proximity-detection
+title US-05: Proximity Detection - No Prior Relationship Check via Neo4j
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nposition.normalized" as Kafka
+participant "Correlation\nWorker" as Correlation
+database "Redis\nentity:live:{id}" as Redis
+database "Neo4j\nentity graph" as Neo4j
+queue "Kafka\nalerts" as Alerts
+participant "Express API" as API
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+Kafka -> Correlation : consume position event\n{ entity_id, lat, lon, timestamp_ms }
+
+Correlation -> Redis : HGETALL entity:live:*\n(fetch all current positions)
+Redis --> Correlation : positions of all live entities
+
+Correlation -> Correlation : compute pairwise distances\nflag pairs within PROXIMITY_THRESHOLD_METRES
+
+alt two entities within threshold
+  Correlation -> Neo4j : MATCH (a:Entity {id: $id_a})-[:KNOWN_ASSOCIATE]-(b:Entity {id: $id_b})\nRETURN b
+
+  note over Neo4j
+    Graph absence query.
+    Checks for a KNOWN_ASSOCIATE edge
+    between the two entity nodes.
+    Single traversal - not a table scan.
+  end note
+
+  alt no KNOWN_ASSOCIATE edge found
+    Correlation -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
+    Alerts -> API : consume alert
+    API --> Dashboard : push alert over WebSocket
+    Dashboard --> Operator : proximity alert displayed
+  else prior relationship exists
+    Correlation -> Correlation : routine proximity - no alert
+  end
+end
+
+@enduml

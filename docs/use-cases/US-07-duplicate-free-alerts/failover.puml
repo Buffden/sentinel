@@ -1,0 +1,50 @@
+@startuml failover
+title US-07: Failover - Follower Takes Over When Leader Crashes
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Evaluator\nInstance A\n(leader)" as A
+participant "Evaluator\nInstance B\n(follower)" as B
+database "Redis\nalert-evaluator:leader" as Redis
+queue "Kafka\nalerts" as Kafka
+
+A -> Kafka : emitting alerts normally
+A -> Redis : renewing lease (heartbeat)
+
+note over A
+  Instance A crashes.
+  Lease renewal stops.
+  TTL counts down.
+end note
+
+A ->x A : crash
+
+loop follower polling
+  B -> Redis : GET alert-evaluator:leader
+  Redis --> B : $instance_a (lease still held)
+end
+
+note over Redis
+  TTL expires.
+  Key is automatically deleted.
+end note
+
+Redis -> Redis : key expired and deleted
+
+B -> Redis : SET alert-evaluator:leader $instance_b NX PX $TTL_MS
+Redis --> B : OK (lease acquired - Instance B is now leader)
+
+note over B
+  Failover complete within one TTL window.
+  No manual intervention required.
+  No duplicate alerts emitted during transition
+  as B was not evaluating while A held the lease.
+end note
+
+B -> Kafka : emit alerts (new leader)
+
+@enduml

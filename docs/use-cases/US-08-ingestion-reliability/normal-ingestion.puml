@@ -1,0 +1,46 @@
+@startuml normal-ingestion
+title US-08: Normal Ingestion - Poller Publishes Without Blocking
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+collections "OpenSky / AIS\nFeed" as Feed
+participant "Ingestion\nPoller" as Poller
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position\nConsumer" as PosConsumer
+participant "Correlation\nWorker" as Correlation
+
+Feed -> Poller : position pings (burst)
+
+loop for each ping
+  Poller -> Kafka : publish event\n{ entity_id, lat, lon, timestamp_ms }
+  Kafka --> Poller : ack
+
+  note over Poller
+    Poller does not wait for consumers.
+    Publishes and moves on immediately.
+    No retry or buffer logic needed
+    in the poller itself.
+  end note
+end
+
+note over Kafka
+  Events retained for configured
+  retention window regardless of
+  consumer processing speed.
+end note
+
+Kafka -> PosConsumer : consume at own pace\n(consumer group: position-consumer)
+Kafka -> Correlation : consume at own pace\n(consumer group: correlation-worker)
+
+note over PosConsumer, Correlation
+  Each consumer group reads
+  independently from its own offset.
+  A slow correlation worker does not
+  block the position consumer.
+end note
+
+@enduml

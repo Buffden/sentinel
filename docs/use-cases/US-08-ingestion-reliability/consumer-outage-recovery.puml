@@ -1,0 +1,49 @@
+@startuml consumer-outage-recovery
+title US-08: Consumer Outage Recovery - Kafka Retains Events Until Consumer Returns
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Ingestion\nPoller" as Poller
+queue "Kafka\nposition.normalized" as Kafka
+participant "Position\nConsumer" as Consumer
+
+Poller -> Kafka : publishing events continuously
+
+note over Consumer
+  Consumer goes down.
+  Offset is committed up to last
+  successfully processed event.
+end note
+
+Consumer ->x Consumer : crash / restart
+
+Poller -> Kafka : events continue to accumulate
+Poller -> Kafka : events continue to accumulate
+Poller -> Kafka : events continue to accumulate
+
+note over Kafka
+  Events are retained on disk
+  for the configured retention window.
+  No events are lost while
+  the consumer is down.
+end note
+
+Consumer -> Consumer : restart
+
+Consumer -> Kafka : resume from last committed offset
+Kafka --> Consumer : replay all missed events in order
+
+note over Consumer
+  Consumer catches up at its
+  own processing speed.
+  Idempotency key on every write
+  makes replay safe. (US-11)
+end note
+
+Consumer -> Consumer : offset caught up - processing live events
+
+@enduml

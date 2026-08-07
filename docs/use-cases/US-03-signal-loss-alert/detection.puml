@@ -1,0 +1,42 @@
+@startuml detection
+title US-03: Detection - Signal Loss Identified
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nposition_history" as TSDB
+queue "Kafka\nalerts" as Kafka
+
+note over Evaluator
+  Only the elected leader instance
+  runs evaluation. Followers are
+  on standby. (ADR-005)
+end note
+
+loop every evaluation cycle
+  Evaluator -> Redis : HGETALL entity:live:*
+  Redis --> Evaluator : { entity_id, timestamp_ms } for all live entities
+
+  alt entity key missing (TTL expired)
+    note over Redis
+      TTL = SIGNAL_LOSS_THRESHOLD_MS
+      Expired key means no ping received
+      within the threshold window.
+    end note
+
+    Evaluator -> TSDB : SELECT last known position\nWHERE entity_id = ? ORDER BY timestamp_ms DESC LIMIT 1
+    TSDB --> Evaluator : { lat, lon, timestamp_ms }
+
+    Evaluator -> Kafka : publish to alerts\n{ type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
+
+  else entity seen within threshold
+    Evaluator -> Evaluator : no action
+  end
+end
+
+@enduml

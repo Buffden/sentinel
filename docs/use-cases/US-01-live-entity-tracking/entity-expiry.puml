@@ -1,0 +1,47 @@
+@startuml entity-expiry
+title US-01: Entity Expiry - Stale Entity Removed from Map via Redis TTL
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+collections "OpenSky / AIS\nFeed" as Feed
+participant "Ingestion\nPoller" as Poller
+database "Redis\nentity:live:{id}" as Redis
+participant "Express API" as API
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+Feed -> Poller : position pings arriving normally
+Poller -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+
+note over Feed, Poller
+  Entity XYZ123 stops broadcasting.
+  Feed returns no further pings for it.
+end note
+
+note over Redis
+  TTL countdown begins from
+  last received ping.
+  No manual cleanup needed.
+end note
+
+Redis -> Redis : TTL expires\nkey entity:live:XYZ123 deleted automatically
+
+API -> Redis : HGETALL entity:live:*\n(next dashboard refresh)
+Redis --> API : XYZ123 absent from response
+
+API --> Dashboard : position payload\n(XYZ123 not included)
+Dashboard --> Operator : entity XYZ123 removed from map
+
+note over Dashboard, Operator
+  Entity disappears from the map
+  automatically when it stops broadcasting.
+  No explicit delete call required.
+  Same TTL expiry triggers US-03
+  signal loss detection.
+end note
+
+@enduml

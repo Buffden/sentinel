@@ -1,0 +1,57 @@
+@startuml transient-vs-sustained
+title US-04: Transient vs Sustained - Single Ping Does Not Alert, Sustained Deviation Does
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nroute_baseline" as Baseline
+database "Redis\ndeviation-state:{id}" as DevState
+queue "Kafka\nalerts" as Kafka
+
+== Transient ping outside baseline (no alert) ==
+
+Evaluator -> Redis : fetch current position of entity DEF
+Redis --> Evaluator : position outside baseline by 45 km
+
+Evaluator -> DevState : INCR deviation-counter:DEF
+DevState --> Evaluator : counter = 1
+
+Evaluator -> Evaluator : counter < SUSTAINED_DEVIATION_CYCLES\nno alert emitted
+
+note over Evaluator
+  A single ping outside the baseline
+  could be a GPS glitch or brief correction.
+  Not actionable on its own.
+end note
+
+== Next cycle: back within baseline ==
+
+Evaluator -> Redis : fetch current position of entity DEF
+Redis --> Evaluator : position within baseline
+
+Evaluator -> DevState : DEL deviation-counter:DEF
+note over Evaluator
+  Counter reset. Transient - no alert raised.
+end note
+
+== Sustained deviation (alert emitted) ==
+
+loop for N consecutive cycles
+  Evaluator -> Redis : fetch current position of entity DEF
+  Redis --> Evaluator : position outside baseline by 45 km
+  Evaluator -> DevState : INCR deviation-counter:DEF
+end
+
+DevState --> Evaluator : counter >= SUSTAINED_DEVIATION_CYCLES
+
+Evaluator -> Baseline : confirm baseline for this time bucket
+Baseline --> Evaluator : expected position range
+
+Evaluator -> Kafka : publish ROUTE_DEVIATION alert\n{ entity_id, current_position,\n  baseline_position, deviation_metres,\n  sustained_cycles }
+
+@enduml

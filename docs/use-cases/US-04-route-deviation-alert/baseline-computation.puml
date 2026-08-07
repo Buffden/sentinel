@@ -1,0 +1,33 @@
+@startuml baseline-computation
+title US-04: Baseline Computation - Historical Route Built from TimescaleDB
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Position\nConsumer" as Consumer
+database "TimescaleDB\nposition_history" as TSDB
+database "TimescaleDB\nroute_baseline\n(continuous aggregate)" as Baseline
+
+Consumer -> TSDB : INSERT INTO position_history\n{ entity_id, geo_cell, timestamp_ms, lat, lon }
+
+note over TSDB
+  Partitioned by (geo_cell, time_bucket).
+  Each entity builds up a position
+  history across many time chunks.
+end note
+
+TSDB -> Baseline : continuous aggregate refresh\n(time-bucket rollup per entity)
+
+note over Baseline
+  Materialised view updated automatically.
+  Computes average track per entity
+  per time bucket over the last N days.
+  No full table scan on each evaluation.
+end note
+
+Baseline --> Baseline : route_baseline ready\n{ entity_id, time_bucket,\n  avg_lat, avg_lon, stddev_metres }
+
+@enduml

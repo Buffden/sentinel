@@ -1,0 +1,38 @@
+@startuml dlq-inspection-recovery
+title US-09: DLQ Inspection and Recovery - Bad Events Examined and Reprocessed
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Developer
+queue "Kafka\nadsb.dlq / ais.dlq" as DLQ
+participant "DLQ\nInspection Tool" as Tool
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position\nConsumer" as Consumer
+
+Developer -> Tool : consume from DLQ topic
+Tool -> DLQ : read events
+DLQ --> Tool : { raw_payload, rejection_reason, source_offset }
+
+Developer -> Developer : inspect rejection reasons\nidentify root cause\n(e.g. schema change in feed)
+
+alt event can be fixed and reprocessed
+  Developer -> Tool : apply fix to raw payload
+  Tool -> Kafka : republish corrected event\nto adsb.raw / ais.raw
+  Kafka -> Consumer : consume corrected event
+  Consumer -> Consumer : parse and process successfully
+
+else event is genuinely bad data
+  Developer -> Developer : discard - no further action needed\noriginal preserved in DLQ for audit
+end
+
+note over DLQ
+  DLQ acts as an audit log of all
+  bad events. Retention policy applies
+  the same as any other Kafka topic.
+end note
+
+@enduml

@@ -1,0 +1,49 @@
+@startuml duplicate-delivery
+title US-11: Duplicate Delivery - Same Kafka Event Processed Twice, No Duplicates Created
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nposition.normalized" as Kafka
+participant "Position\nConsumer" as Consumer
+database "TimescaleDB\nposition_history" as TSDB
+database "Neo4j\nentity graph" as Neo4j
+database "Redis\nentity:live:{id}" as Redis
+
+note over Kafka
+  At-least-once delivery.
+  Same event can be delivered
+  more than once after a
+  consumer restart or rebalance.
+end note
+
+Kafka -> Consumer : deliver event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
+Consumer -> Consumer : key = "ABC123:1700000000000"
+Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING
+Consumer -> Neo4j : MERGE on idempotency_key
+Consumer -> Redis : HSET entity:live:ABC123
+Consumer -> Kafka : commit offset
+
+note over Kafka
+  Consumer restarts before offset
+  is durably committed. Same event
+  is redelivered.
+end note
+
+Kafka -> Consumer : redeliver same event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
+Consumer -> Consumer : key = "ABC123:1700000000000" (identical)
+Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING -> no-op
+Consumer -> Neo4j : MERGE on idempotency_key -> no-op
+Consumer -> Redis : HSET entity:live:ABC123 -> no-op
+Consumer -> Kafka : commit offset
+
+note over TSDB, Redis
+  All three stores in consistent state.
+  No duplicate rows, edges, or keys created.
+  No coordination between instances required.
+end note
+
+@enduml

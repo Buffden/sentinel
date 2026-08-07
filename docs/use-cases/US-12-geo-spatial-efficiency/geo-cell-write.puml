@@ -1,0 +1,34 @@
+@startuml geo-cell-write
+title US-12: Geo-Cell Write - H3 Cell Computed at Ingest and Stored as Partition Key
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nposition.normalized" as Kafka
+participant "Position\nConsumer" as Consumer
+database "TimescaleDB\nposition_history" as TSDB
+
+Kafka -> Consumer : consume event\n{ entity_id, lat, lon, timestamp_ms }
+
+Consumer -> Consumer : compute H3 cell ID\nh3.latLngToCell(lat, lon, resolution=5)
+
+note over Consumer
+  H3 resolution 5 = ~252 km² per cell.
+  High-traffic areas span multiple cells
+  naturally - no single cell becomes
+  a write hot-spot.
+end note
+
+Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- H3 cell ID\n  time_bucket,     -- truncated to chunk interval\n  timestamp_ms,\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+
+note over TSDB
+  Composite partition key: (geo_cell, time_bucket).
+  TimescaleDB routes the row to the chunk
+  that owns this geo-cell + time-bucket pair.
+  Spatially nearby events land in the same chunk.
+end note
+
+@enduml

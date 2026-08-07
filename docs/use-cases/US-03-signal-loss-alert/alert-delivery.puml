@@ -1,0 +1,33 @@
+@startuml alert-delivery
+title US-03: Alert Delivery - Signal Loss Reaches Operator
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+queue "Kafka\nalerts" as Kafka
+participant "Express API" as API
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+Kafka -> API : consume SIGNAL_LOSS alert\n{ entity_id, last_known_position, duration_ms }
+
+API --> Dashboard : push alert over WebSocket
+
+note over Dashboard
+  Alert panel updated in real time.
+  Entity marker on map flagged.
+  No page refresh required.
+end note
+
+Dashboard --> Operator : signal loss alert displayed\n(entity ID, last position, time dark)
+
+note over Operator
+  Alert is raised once per loss event.
+  Not re-emitted on every evaluation
+  cycle while the entity remains dark.
+end note
+
+@enduml

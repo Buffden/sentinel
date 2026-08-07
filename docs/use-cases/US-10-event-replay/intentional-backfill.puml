@@ -1,0 +1,49 @@
+@startuml intentional-backfill
+title US-10: Intentional Backfill - Consumer Rewound to Rebuild State
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Developer
+participant "Correlation\nWorker" as Worker
+queue "Kafka\nposition.normalized" as Kafka
+database "Neo4j\nentity graph" as Neo4j
+database "Kafka\noffset store\n(__consumer_offsets)" as Offsets
+
+note over Neo4j
+  Neo4j restarted.
+  Entity relationship graph lost.
+  Must be rebuilt from event history.
+end note
+
+Developer -> Worker : stop correlation worker
+Developer -> Offsets : reset consumer group offset\nto timestamp T (start of retention window)
+
+note over Offsets
+  Offset reset is explicit and intentional.
+  Kafka retains all events within
+  the configured retention window.
+end note
+
+Developer -> Worker : restart correlation worker
+
+Worker -> Kafka : consume from reset offset T
+Kafka --> Worker : all position events from T onwards
+
+loop for each replayed event
+  Worker -> Neo4j : MERGE proximity edges\n(idempotent - no duplicates created)
+end
+
+note over Worker
+  Graph rebuilt from event history
+  without re-querying OpenSky or AIS.
+  Same mechanism works for corrected
+  anomaly rules - rewind and re-evaluate.
+end note
+
+Worker -> Worker : offset caught up\nprocessing live events
+
+@enduml

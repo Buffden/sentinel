@@ -1,0 +1,54 @@
+@startuml race-condition-without-election
+title US-07: Race Condition Without Leader Election - Why Naive Dedup Fails
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Evaluator\nInstance A" as A
+participant "Evaluator\nInstance B" as B
+database "Redis\nalert-sent:{event_id}" as Redis
+queue "Kafka\nalerts" as Kafka
+actor Operator
+
+note over A, B
+  Naive approach: check a Redis flag
+  before emitting. No leader election.
+  Both instances run evaluation simultaneously.
+end note
+
+A -> Redis : GET alert-sent:event-123
+B -> Redis : GET alert-sent:event-123
+
+Redis --> A : nil (not sent yet)
+Redis --> B : nil (not sent yet)
+
+note over A, B
+  Both instances see "not sent"
+  at the same moment.
+  Race condition: both proceed to emit.
+end note
+
+A -> Redis : SET alert-sent:event-123
+B -> Redis : SET alert-sent:event-123
+
+A -> Kafka : publish alert for event-123
+B -> Kafka : publish alert for event-123
+
+Kafka --> Operator : duplicate alert #1
+Kafka --> Operator : duplicate alert #2
+
+note over Operator
+  Operator receives two alerts
+  for the same event.
+  The check-then-act pattern
+  is not atomic - it cannot prevent
+  this race condition.
+  Leader election eliminates the race
+  by ensuring only one instance
+  ever evaluates at a time.
+end note
+
+@enduml

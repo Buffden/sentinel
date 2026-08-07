@@ -1,0 +1,48 @@
+@startuml leader-election
+title US-07: Leader Election - One Instance Wins the Lease
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Evaluator\nInstance A" as A
+participant "Evaluator\nInstance B" as B
+database "Redis\nalert-evaluator:leader" as Redis
+queue "Kafka\nalerts" as Kafka
+
+note over A, B
+  Both instances start simultaneously.
+  Both attempt to acquire the leader lease.
+end note
+
+A -> Redis : SET alert-evaluator:leader $instance_a NX PX $TTL_MS
+B -> Redis : SET alert-evaluator:leader $instance_b NX PX $TTL_MS
+
+note over Redis
+  NX = only set if key does not exist.
+  PX = expire after TTL_MS milliseconds.
+  Atomic. Exactly one instance wins.
+end note
+
+Redis --> A : OK (lease acquired - Instance A is leader)
+Redis --> B : nil (lease already held - Instance B is follower)
+
+note over B
+  Follower polls the lease key.
+  Runs no evaluation.
+  Emits no alerts.
+  Waits for the key to expire.
+end note
+
+loop every heartbeat interval (< TTL_MS)
+  A -> Redis : SET alert-evaluator:leader $instance_a XX PX $TTL_MS
+  note over Redis
+    XX = only set if key exists.
+    Renews the TTL while leader is alive.
+  end note
+  A -> Kafka : emit alerts (leader only)
+end
+
+@enduml

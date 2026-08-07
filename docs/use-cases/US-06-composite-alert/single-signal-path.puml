@@ -1,0 +1,54 @@
+@startuml single-signal-path
+title US-06: Single Signal Path - Only One Weak Signal Present, No Composite Raised
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nentity:live:{id}" as Redis
+database "Neo4j\nentity graph" as Neo4j
+queue "Kafka\nalerts" as Kafka
+
+== Signal loss only - no proximity event ==
+
+Evaluator -> Redis : check entity:live:VesselB
+Redis --> Evaluator : key missing - VesselB is dark
+
+Evaluator -> Neo4j : MATCH (b:Entity {id: "VesselB"})-[e:PROXIMITY_EVENT]->(a)\nWHERE e.timestamp_ms > $dark_since_ms\nAND NOT (b)-[:KNOWN_ASSOCIATE]-(a)\nRETURN a, e
+Neo4j --> Evaluator : no results
+
+note over Evaluator
+  VesselB is dark but has not appeared
+  near any unrelated entity.
+  Only one weak signal present.
+  No composite alert raised.
+end note
+
+Evaluator -> Kafka : publish individual SIGNAL_LOSS alert\n{ type: SIGNAL_LOSS, entity_id: VesselB }
+
+== Proximity only - no prior signal loss ==
+
+Evaluator -> Redis : check entity:live:VesselC
+Redis --> Evaluator : VesselC is live (key present)
+
+note over Evaluator
+  VesselC is in proximity to VesselD
+  but has not gone dark.
+  No signal loss component.
+  Only one weak signal present.
+  No composite alert raised.
+end note
+
+Evaluator -> Kafka : publish individual UNSCHEDULED_PROXIMITY alert\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_c, entity_d }
+
+note over Kafka
+  Composite alert requires BOTH:
+  signal loss AND proximity to an
+  unrelated entity within the loss window.
+  Neither case above qualifies.
+end note
+
+@enduml

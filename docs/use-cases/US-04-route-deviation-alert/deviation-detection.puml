@@ -1,0 +1,37 @@
+@startuml deviation-detection
+title US-04: Deviation Detection - Current Track Compared Against Baseline
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nroute_baseline" as Baseline
+queue "Kafka\nalerts" as Kafka
+participant "Express API" as API
+participant "Angular\nDashboard" as Dashboard
+actor Operator
+
+loop every evaluation cycle
+  Evaluator -> Redis : HGETALL entity:live:{entity_id}\n(current position)
+  Redis --> Evaluator : { lat, lon, timestamp_ms }
+
+  Evaluator -> Baseline : SELECT avg_lat, avg_lon, stddev_metres\nWHERE entity_id = ? AND time_bucket = current_bucket
+  Baseline --> Evaluator : expected position range
+
+  Evaluator -> Evaluator : compute distance\nbetween current and baseline position
+
+  alt distance > ROUTE_DEVIATION_THRESHOLD_METRES (sustained)
+    Evaluator -> Kafka : publish to alerts\n{ type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres }
+    Kafka -> API : consume alert
+    API --> Dashboard : push alert over WebSocket
+    Dashboard --> Operator : route deviation alert displayed
+  else within threshold or single transient ping
+    Evaluator -> Evaluator : no action
+  end
+end
+
+@enduml
