@@ -29,10 +29,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install PlantUML
+      - name: Install PlantUML and Graphviz
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml
+          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml graphviz
 
       - name: Install diagram-sync
         run: npm install -g diagram-sync
@@ -74,10 +74,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install PlantUML
+      - name: Install PlantUML and Graphviz
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml
+          sudo apt-get install -y --no-install-recommends default-jre-headless plantuml graphviz
 
       - name: Install diagram-sync
         run: npm install -g diagram-sync
