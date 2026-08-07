@@ -13,9 +13,11 @@ As an operator, I want to see all currently tracked entities on a live map so th
 
 ## Acceptance Criteria
 
-- All entities with a position update within the last configurable TTL window are visible on the map
-- Each entity is rendered at its most recently known position
-- Entities that stop broadcasting are removed from the map after the TTL expires
+- All entities within the operator's saved scope (geo region + entity type) with a position update within the last configurable TTL window are visible on the map
+- On initial load, the map is populated with the current positions of all in-scope live entities from a Redis scan
+- Each entity is rendered at its most recently known position; ongoing updates arrive via WebSocket (US-02)
+- Entities that stop broadcasting are removed from the map after their Redis TTL expires - no explicit delete required
+- Entities outside the operator's scope bounds or of the wrong entity type are never sent to the dashboard
 - The map handles at least hundreds of simultaneous entities without degrading render performance
 
 ---
@@ -38,7 +40,7 @@ The dashboard receives live positions from Redis via the API WebSocket and rende
 
 ![Entity Expiry](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/entity-expiry.svg)
 
-When an entity stops broadcasting, its Redis TTL expires automatically and the entity is removed from the next map refresh without any explicit delete call.
+When an entity stops broadcasting, its Redis TTL expires automatically (no explicit delete). Because no further pub/sub updates arrive for it, the dashboard's client-side staleness timer removes it from the map when `now() - last_seen_ms` exceeds `SIGNAL_LOSS_THRESHOLD_MS`. The same TTL expiry triggers signal loss detection (US-03).
 
 ---
 

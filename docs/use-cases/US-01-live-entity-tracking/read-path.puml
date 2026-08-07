@@ -1,5 +1,5 @@
 @startuml read-path
-title US-01: Read Path - Dashboard Renders Live Map
+title US-01: Read Path - Initial Map Load and Scoped Live Updates
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,28 +11,46 @@ actor Operator
 participant "Angular\nDashboard" as Dashboard
 participant "Express API" as API
 database "Redis\nentity:live:{id}" as Redis
+database "TimescaleDB\nuser_workspaces" as TSDB
+
+== Authenticated Connection and Scope Load ==
 
 Operator -> Dashboard : opens live map
+Dashboard -> API : GET /stream?token=<JWT>\nUpgrade: websocket
 
-Dashboard -> API : establish WebSocket connection
+API -> TSDB : SELECT scope FROM user_workspaces WHERE user_id = $1
+TSDB --> API : { geo_region.bounds, entity_types, alert_types }
+
+API --> Dashboard : 101 Switching Protocols
+
+== Initial Map State ==
+
+Dashboard -> API : send { type: "initial_load" } over WebSocket
+
+API -> Redis : SCAN entity:live:* (batched)\nfor each key: HGETALL entity:live:{entity_id}
 
 note over API
-  Express + ws library.
-  One persistent connection per client.
-  No polling required.
+  Initial load scans all live entity keys.
+  Each result is filtered against the operator's
+  saved scope before being included in the response:
+  - entity position within geo_region.bounds
+  - entity_type in scope.entity_types
+  Expired keys are absent automatically (Redis TTL).
 end note
 
-loop on each position update received by API
-  API -> Redis : HGETALL entity:live:*
-  Redis --> API : { entity_id, lat, lon, altitude, timestamp_ms }
-  API --> Dashboard : push position payload over WebSocket
-  Dashboard --> Operator : entity position updated on map
-end
+Redis --> API : live entity positions (all currently active)
 
-note over Dashboard, Operator
-  Entities with expired Redis TTL
-  are absent from the response
-  and removed from the map.
+API --> Dashboard : push initial state\n{ entities: [ { entity_id, lat, lon,\n  entity_type, timestamp_ms }, ... ] }\n(scope-filtered subset only)
+
+Dashboard --> Operator : map renders with all\nin-scope entities at current positions
+
+== Live Updates (ongoing) ==
+
+note over API, Redis
+  After initial load, ongoing position updates
+  arrive via Redis pub/sub from the Position Consumer.
+  Each update is scope-filtered before push.
+  See US-02 update-push for the per-update flow.
 end note
 
 @enduml

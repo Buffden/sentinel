@@ -32,7 +32,7 @@ Position history written to TimescaleDB is rolled up into a continuous aggregate
 
 ![Deviation Detection](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/deviation-detection.svg)
 
-The alert evaluator compares the current position from Redis against the materialised baseline and emits an alert when sustained deviation exceeds the threshold.
+The alert evaluator compares the current position from Redis against the materialised baseline and emits an alert when sustained deviation exceeds the threshold. The API writes the alert to the alerts table (status: NEW, idempotent on replay) before pushing to scope-matched WebSocket connections.
 
 ### Transient vs Sustained
 

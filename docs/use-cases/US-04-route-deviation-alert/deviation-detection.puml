@@ -9,7 +9,7 @@ skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nentity:live:{id}" as Redis
-database "TimescaleDB\nroute_baseline" as Baseline
+database "TimescaleDB\nroute_baseline + alerts" as Baseline
 queue "Kafka\nalerts" as Kafka
 participant "Express API" as API
 participant "Angular\nDashboard" as Dashboard
@@ -27,8 +27,15 @@ loop every evaluation cycle
   alt distance > ROUTE_DEVIATION_THRESHOLD_METRES (sustained)
     Evaluator -> Kafka : publish to alerts\n{ type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres }
     Kafka -> API : consume alert
-    API --> Dashboard : push alert over WebSocket
-    Dashboard --> Operator : route deviation alert displayed
+    API -> Baseline : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+    note over API
+      Idempotent write - safe under Kafka replay.
+      Scope filter applied before push:
+      entity position + type must match
+      the operator's saved workspace scope.
+    end note
+    API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
+    Dashboard --> Operator : route deviation alert displayed\nstatus: NEW
   else within threshold or single transient ping
     Evaluator -> Evaluator : no action
   end

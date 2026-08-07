@@ -1,5 +1,5 @@
 @startuml connection-setup
-title US-02: Connection Setup - WebSocket Handshake
+title US-02: Connection Setup - Authenticated WebSocket Handshake with Scope
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -10,32 +10,53 @@ skinparam noteBackgroundColor #FFFDE7
 actor Operator
 participant "Angular\nDashboard" as Dashboard
 participant "Express API\n(ws library)" as API
+database "TimescaleDB\nuser_workspaces" as TSDB
 
 Operator -> Dashboard : opens live map
 
-Dashboard -> API : HTTP GET /live\nUpgrade: websocket
+note over Dashboard
+  Dashboard holds the Sentinel JWT
+  in memory from the Google OAuth
+  flow (US-15 workspace-restore).
+end note
+
+Dashboard -> API : HTTP GET /stream?token=<JWT>\nUpgrade: websocket
 
 note over API
   Express HTTP server and ws library
   share the same port.
   No separate WebSocket server process.
+  JWT is validated before the upgrade
+  is accepted - unauthenticated requests
+  receive 401 and are dropped.
 end note
+
+API -> TSDB : SELECT scope FROM user_workspaces\nWHERE user_id = $1
+
+note over TSDB
+  Scope is loaded once at connection time
+  and held in the in-memory connection map.
+  No database lookup on every pushed message.
+end note
+
+TSDB --> API : { geo_region, entity_types, alert_types }
 
 API --> Dashboard : 101 Switching Protocols\n(WebSocket handshake complete)
 
 note over Dashboard
   Connection is persistent.
   Dashboard does not poll.
-  Server pushes updates as they arrive.
+  Server pushes position updates and alerts
+  filtered by the operator's saved scope.
 end note
 
-Dashboard --> Operator : map rendered, awaiting live updates
+Dashboard --> Operator : map rendered, scoped live stream active
 
 == On disconnect ==
 
 Dashboard -> Dashboard : detect connection drop
-Dashboard -> API : reconnect (exponential backoff)
-API --> Dashboard : 101 Switching Protocols
+Dashboard -> API : reconnect with same JWT\nGET /stream?token=<JWT>
+API --> Dashboard : 101 Switching Protocols\nscope reloaded from user_workspaces
 Dashboard --> Operator : live updates resume
 
 @enduml

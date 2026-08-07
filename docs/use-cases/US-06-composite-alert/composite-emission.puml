@@ -1,5 +1,5 @@
 @startuml composite-emission
-title US-06: Composite Emission - One Alert, Individual Alerts Suppressed
+title US-06: Composite Emission - One Alert Persisted and Pushed, Individual Alerts Suppressed
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -10,10 +10,11 @@ skinparam noteBackgroundColor #FFFDE7
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 queue "Kafka\nalerts" as Kafka
 participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Evaluator -> Kafka : publish ONE composite alert\n{ type: COMPOSITE,\n  priority: ELEVATED,\n  entity_b: signal loss,\n  entity_a: unrelated proximity,\n  correlation_window_ms,\n  location, timestamp_ms }
+Evaluator -> Kafka : publish ONE composite alert\n{ alert_id, type: COMPOSITE,\n  priority: ELEVATED,\n  entity_b: signal loss,\n  entity_a: unrelated proximity,\n  correlation_window_ms,\n  window_start_ms,\n  location, timestamp_ms }
 
 note over Evaluator
   Individual SIGNAL_LOSS and
@@ -24,9 +25,28 @@ end note
 
 Kafka -> API : consume composite alert
 
-API --> Dashboard : push composite alert over WebSocket
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: COMPOSITE,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
-Dashboard --> Operator : single elevated alert displayed\n(signal loss + proximity correlated)
+note over TSDB
+  Composite alert stored as a single row.
+  alert_id = {entity_id}:COMPOSITE:{window_start_ms}
+  Idempotent - safe under Kafka replay.
+  Operator can acknowledge and resolve it
+  via the same lifecycle flow as any alert (US-13).
+end note
+
+TSDB --> API : inserted (or conflict - no-op)
+
+note over API
+  Fan-out: check each active WebSocket connection's
+  saved scope before pushing.
+  geo_region bounds + entity_type + COMPOSITE
+  must all match the connection's scope.
+end note
+
+API --> Dashboard : push composite alert over WebSocket\n(only to connections whose scope matches)
+
+Dashboard --> Operator : single elevated alert displayed\n(signal loss + proximity correlated)\nstatus: NEW
 
 note over Dashboard, Operator
   Operator sees one notification,

@@ -1,5 +1,5 @@
 @startuml update-push
-title US-02: Update Push - Live Position Pushed to Dashboard
+title US-02: Update Push - Live Position Filtered by Scope Before Push
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -13,7 +13,7 @@ participant "Express API\n(ws library)" as API
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms }
+Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms, entity_type }
 Consumer -> API : publish update via Redis pub/sub
 
 note over API
@@ -22,12 +22,26 @@ note over API
   without duplicating Kafka consumption.
 end note
 
-loop for each connected WebSocket client
-  API -> Dashboard : push { entity_id, lat, lon, timestamp_ms }
-end
+loop for each active WebSocket connection
+  note over API
+    Each connection has a saved scope:
+    { geo_region.bounds, entity_types, alert_types }
+    Both position updates and alerts are filtered
+    before being pushed to each client.
+  end note
 
-Dashboard -> Dashboard : update entity position on map
-Dashboard --> Operator : entity moves to new position
+  alt entity position within scope geo bounds\nAND entity_type in scope.entity_types
+    API -> Dashboard : push { entity_id, lat, lon,\n  altitude, entity_type, timestamp_ms }
+    Dashboard -> Dashboard : update entity position on map
+    Dashboard --> Operator : entity moves to new position
+  else entity outside scope bounds or wrong type
+    note over API
+      Update is silently dropped for this connection.
+      The operator's scope determines which entities
+      appear on their map, not just which alerts they receive.
+    end note
+  end
+end
 
 note over Dashboard, Operator
   No HTTP request made.

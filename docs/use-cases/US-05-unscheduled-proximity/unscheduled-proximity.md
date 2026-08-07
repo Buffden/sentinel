@@ -26,7 +26,7 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
 
-The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, and writes a PROXIMITY_EVENT edge to Neo4j when none exists. The Alert Evaluator then queries Neo4j and emits the alert - keeping all alert emission under leader election (ADR-005).
+The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, and writes a PROXIMITY_EVENT edge to Neo4j when none exists. The Alert Evaluator then queries Neo4j, emits the alert to Kafka, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
 
 ### Graph Update
 

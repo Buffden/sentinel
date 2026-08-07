@@ -32,7 +32,7 @@ The alert evaluator checks Redis for entities whose TTL has expired, fetches las
 
 ![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
 
-The alert travels from Kafka through the API and is pushed to the operator's dashboard over WebSocket.
+The alert is consumed from Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), then pushed over WebSocket only to operators whose saved scope matches the entity's position, type, and alert type.
 
 ### Alert Suppression
 

@@ -44,7 +44,7 @@ The alert evaluator detects a signal loss in Redis, then queries Neo4j to find p
 
 ![Composite Emission](../../../diagrams/docs/use-cases/US-06-composite-alert/composite-emission.svg)
 
-One elevated composite alert is published to Kafka and pushed to the operator, suppressing the individual signal loss and proximity alerts.
+One elevated composite alert is published to Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), and pushed only to operators whose saved scope matches - suppressing the individual signal loss and proximity alerts entirely.
 
 ### Single Signal Path
 
