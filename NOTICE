@@ -1,5 +1,5 @@
 Sentinel
-Copyright 2026
+Copyright (c) 2026 Harshwardhan Patil. All rights reserved.
 
 This project is a non-commercial portfolio and learning exercise.
 It is not affiliated with, endorsed by, or connected to any commercial entity.
@@ -9,11 +9,12 @@ It is not affiliated with, endorsed by, or connected to any commercial entity.
 Third-Party Data Sources
 ------------------------
 
-### OpenSky Network (ADS-B flight data)
+OpenSky Network (ADS-B flight data)
+------------------------------------
 
-This project uses data from the OpenSky Network (https://opensky-network.org/).
+This project uses data from the OpenSky Network (<https://opensky-network.org/>).
 Use of OpenSky data is restricted to non-commercial and research purposes under
-their Terms of Use (https://opensky-network.org/about/terms-of-use).
+their Terms of Use (<https://opensky-network.org/about/terms-of-use>).
 
 Academic and research use of OpenSky data should cite:
 
@@ -25,9 +26,39 @@ Academic and research use of OpenSky data should cite:
 This project does not redistribute OpenSky data. It queries the live API at runtime
 for the sole purpose of demonstrating distributed systems architecture.
 
-### AISHub (AIS vessel data)
+AISHub (AIS vessel data)
+------------------------
 
-This project references AISHub (https://www.aishub.net/) as a potential AIS data source.
+This project references AISHub (<https://www.aishub.net/>) as a potential AIS data source.
 AISHub operates on a contribution model - users are expected to contribute AIS receiver
 data in exchange for API access. Verify eligibility with AISHub before connecting a
 live feed. This project does not redistribute AISHub data.
+
+OpenStreetMap (map tiles)
+------------------------
+
+The dashboard uses map tiles rendered from OpenStreetMap data
+(<https://www.openstreetmap.org/>). OpenStreetMap data is made available
+under the Open Database License (ODbL):
+<https://opendatacommons.org/licenses/odbl/>
+
+As required by the ODbL, the dashboard displays the attribution
+"(c) OpenStreetMap contributors" on all map views at runtime.
+
+H3 (geospatial indexing)
+------------------------
+
+This project uses the H3 geospatial indexing library developed by Uber Technologies, Inc.
+H3 is licensed under the Apache License 2.0.
+Source: <https://github.com/uber/h3>
+
+Leaflet (map rendering)
+------------------------
+
+The dashboard uses Leaflet for interactive map rendering.
+Leaflet is licensed under the BSD 2-Clause License.
+Source: <https://leafletjs.com>
+
+As required by the BSD 2-Clause License, the Leaflet copyright notice
+"(c) Leaflet" is displayed on all map views at runtime alongside the
+OpenStreetMap attribution.

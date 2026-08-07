@@ -111,4 +111,8 @@ open http://localhost:4200
 
 ## License
 
-MIT
+Copyright (c) 2026 Harshwardhan Patil. All rights reserved.
+
+This project is available for personal, educational, and portfolio review only.
+Commercial use, redistribution, and use as a basis for competing products are prohibited.
+See [LICENSE](LICENSE) for full terms.
