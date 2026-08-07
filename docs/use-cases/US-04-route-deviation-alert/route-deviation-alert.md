@@ -26,6 +26,8 @@ As an operator, I want to receive an alert when an entity's current track diverg
 
 **Deviation detection** - the alert evaluator compares the current position from Redis against the materialised baseline and emits an alert when sustained deviation exceeds the threshold.
 
+**Transient vs sustained** - a single position ping outside the baseline increments a counter but does not trigger an alert; only N consecutive out-of-baseline pings cross the sustained threshold and emit.
+
 ---
 
 ## Architectural Justification
