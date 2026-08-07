@@ -46,6 +46,6 @@ When an entity stops broadcasting, its Redis TTL expires automatically (no expli
 
 ## Architectural Justification
 
-Justifies: [ADR-004 - Redis for Live Entity State](../../adr/ADR-004-redis-live-state.md)
+Justifies: [ADR-004 - Redis for Live Entity State](../../adr/ADR-004-redis-live-state.md), [ADR-012 - Workspace Scope and Server-Side Alert Filtering](../../adr/ADR-012-workspace-scope-alert-filtering.md)
 
 The map refresh rate demands sub-millisecond reads for current entity positions. TimescaleDB stores the full position history but is optimised for range queries, not point lookups at high frequency. Redis holds only the latest position per entity (`entity:live:{entity_id}`) and expires stale entries automatically via TTL - matching this access pattern exactly.

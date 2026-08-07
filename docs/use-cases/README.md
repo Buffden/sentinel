@@ -20,8 +20,8 @@ This folder defines what Sentinel does from the perspective of its users and the
 
 | ID | Title | ADR | Diagrams |
 |---|---|---|---|
-| [US-01](US-01-live-entity-tracking/live-entity-tracking.md) | Live entity tracking on map | ADR-004 | write path, read path, entity expiry |
-| [US-02](US-02-live-map-updates/live-map-updates.md) | Continuous map updates via WebSocket | ADR-008 | connection setup, update push |
+| [US-01](US-01-live-entity-tracking/live-entity-tracking.md) | Live entity tracking on map | ADR-004, ADR-012 | write path, read path, entity expiry |
+| [US-02](US-02-live-map-updates/live-map-updates.md) | Continuous map updates via WebSocket | ADR-008, ADR-012 | connection setup, update push |
 
 ### Operator - Anomaly Alerts
 
