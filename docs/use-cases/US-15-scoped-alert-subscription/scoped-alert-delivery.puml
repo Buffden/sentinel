@@ -1,0 +1,69 @@
+@startuml scoped-alert-delivery
+title US-15: Scoped Alert Delivery - Server Filters Before Pushing
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+participant "Alert\nEvaluator\n(leader)" as Evaluator
+queue "Kafka\nalerts" as Kafka
+participant "Express API\n(WebSocket server)" as API
+database "Redis\nentity:live:{id}" as Redis
+participant "Operator A\n(scope: France,\naircraft+vessel,\nSIGNAL_LOSS)" as OpA
+participant "Operator B\n(scope: Atlantic,\nvessel only,\nall alert types)" as OpB
+
+Evaluator -> Kafka : publish alert event\n{ alert_id: FLT123:SIGNAL_LOSS:1700010000000,\n  entity_id: FLT123,\n  entity_type: aircraft,\n  alert_type: SIGNAL_LOSS,\n  lat: 48.8, lon: 2.3 }
+
+Kafka -> API : consume alert event
+
+note over API
+  API maintains in-memory scope map for
+  all active WebSocket connections:
+  { conn_A -> scope_A, conn_B -> scope_B }
+  Fan-out evaluates each scope independently.
+end note
+
+API -> Redis : HGETALL entity:live:FLT123
+
+note over Redis
+  Redis holds the entity's last known position.
+  Used to evaluate the geo_region bounds check.
+  If the entity is dark (key expired), last known
+  position from the alert payload is used instead.
+end note
+
+Redis --> API : { lat: 48.8, lon: 2.3,\n  entity_type: aircraft,\n  timestamp_ms: ... }
+
+== Scope evaluation for Operator A ==
+
+note over API
+  Operator A scope check:
+  geo: lat 48.8, lon 2.3 within France bounds? YES
+  entity_type: aircraft in [aircraft, vessel]? YES
+  alert_type: SIGNAL_LOSS in [SIGNAL_LOSS]? YES
+  -> PUSH
+end note
+
+API -> OpA : WebSocket push\n{ alert_id, entity_id, alert_type,\n  lat, lon, summary }
+
+OpA --> OpA : alert appears on map\nand in alert panel
+
+== Scope evaluation for Operator B ==
+
+note over API
+  Operator B scope check:
+  geo: lat 48.8, lon 2.3 within Atlantic bounds? NO
+  -> DROP (no further checks needed)
+end note
+
+note over OpB
+  Operator B receives nothing.
+  FLT123 is over France, not the Atlantic.
+  Client-side filtering would have sent this
+  alert to Operator B and let the browser discard it.
+  Server-side filtering prevents that entirely.
+end note
+
+@enduml

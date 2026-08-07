@@ -1,0 +1,69 @@
+@startuml scope-setup
+title US-15: Scope Setup - First-Time Operator Configures Workspace
+
+skinparam sequenceArrowThickness 1.5
+skinparam participantBorderColor #555555
+skinparam participantBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API" as API
+database "TimescaleDB\nusers + user_workspaces" as TSDB
+
+== Authentication ==
+
+Operator -> Dashboard : opens Sentinel dashboard
+Dashboard -> API : GET /users/me/workspace\nAuthorization: Bearer <JWT>
+
+note over API
+  JWT is validated by Express middleware.
+  user_id is extracted from the token.
+end note
+
+API -> TSDB : SELECT scope FROM user_workspaces\nWHERE user_id = $1
+TSDB --> API : (no rows - first visit)
+
+API --> Dashboard : 404 No workspace saved
+
+Dashboard --> Operator : clean map\n+ scope setup prompt\n(no alerts yet)
+
+== Scope Configuration ==
+
+Operator -> Dashboard : selects region "France"\nentity types: aircraft + vessel\nalert types: SIGNAL_LOSS, COMPOSITE
+
+note over Dashboard
+  Region "France" resolves to a bounding box
+  from the predefined static region list.
+  { min_lat: 41.3, max_lat: 51.1,
+    min_lon: -5.2, max_lon: 9.6 }
+  No external geocoder required.
+end note
+
+Dashboard -> API : PUT /users/me/workspace\n{ geo_region: { name: "France", bounds: {...} },\n  entity_types: ["aircraft","vessel"],\n  alert_types: ["SIGNAL_LOSS","COMPOSITE"] }
+
+API -> TSDB : INSERT INTO user_workspaces (user_id, scope, updated_at)\nVALUES ($1, $2, now())\nON CONFLICT (user_id) DO UPDATE SET scope = $2, updated_at = now()
+
+TSDB --> API : updated
+API --> Dashboard : 200 OK
+
+== WebSocket Connection with Scope ==
+
+Dashboard -> API : WebSocket upgrade\nGET /stream?token=<JWT>
+
+API -> TSDB : SELECT scope FROM user_workspaces WHERE user_id = $1
+TSDB --> API : { geo_region, entity_types, alert_types }
+
+note over API
+  Scope is loaded into the in-memory
+  connection map: { connection_id -> scope }.
+  All subsequent alert fan-out for this
+  connection uses this scope object.
+end note
+
+API --> Dashboard : 101 Switching Protocols
+
+Dashboard --> Operator : map highlights France region\nalert stream active\n(scoped to France, aircraft+vessel, SIGNAL_LOSS+COMPOSITE)
+
+@enduml
