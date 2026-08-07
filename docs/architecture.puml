@@ -7,7 +7,7 @@ skinparam ranksep 110
 skinparam backgroundColor #1e1e2e
 skinparam defaultFontColor #cdd6f4
 skinparam defaultFontName "Helvetica"
-skinparam arrowThickness 1.5
+skinparam arrowThickness 2
 
 skinparam node {
     BackgroundColor #181825
