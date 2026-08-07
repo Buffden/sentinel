@@ -51,11 +51,11 @@ Full reasoning and rejected alternatives → [`docs/DECISIONS.md`](docs/DECISION
 
 ## Data Sources
 
-- **Aircraft:** [OpenSky Network](https://opensky-network.org/)  - free, public ADS-B feed, no auth required for basic use
-- **Vessels:** AISHub / public AIS aggregators
-- **Synthetic generator:** controllable anomaly injection for demos (real feeds don't reliably produce interesting events on demand)
+- **Aircraft:** [OpenSky Network](https://opensky-network.org/) - free, public ADS-B feed, restricted to non-commercial and research use. See [OpenSky Terms of Use](https://opensky-network.org/about/terms-of-use).
+- **Vessels:** [AISHub](https://www.aishub.net/) - AIS data aggregator. Access requires contributing AIS data or explicit approval. Verify eligibility before use.
+- **Synthetic generator:** controllable anomaly injection for demos (real feeds do not reliably produce interesting events on demand)
 
-All data sources are public. API terms of service are respected throughout  - rate limits are honoured, attribution is included where required.
+This project is a non-commercial portfolio and learning exercise. All data source terms of service are respected - rate limits are honoured and attribution is included where required. See `NOTICE` for third-party attributions.
 
 ---
 
