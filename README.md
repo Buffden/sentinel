@@ -14,7 +14,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 
 ## Architecture Overview
 
-![Architecture](diagrams/docs/Sentinel%20Architecture.svg)
+![Architecture](diagrams/docs/architecture.svg)
 
 ---
 
