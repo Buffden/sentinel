@@ -22,6 +22,7 @@ Read `insights/intent.md` for the full context on why this project exists and wh
 | Position history | TimescaleDB | Geo-cell + time-bucket sharding matches the query pattern |
 | Entity graph | Neo4j | Proximity/relationship queries are graph traversals, not table scans |
 | Live entity state | Redis | Highest-frequency read; cache, not source of truth |
+| Ingestion poller | Node.js | Shares TypeScript types and Kafka client config with the API; one runtime across the backend — see ADR-013 |
 | API | Express (Node.js) | Lightweight, native async I/O, simple WebSocket via `ws` |
 | Dashboard | Angular + Leaflet | Functional, not the point of the project |
 | Operator auth | Google OAuth 2.0 + JWT | Identity required for per-user workspace persistence; no new infrastructure - users table on TimescaleDB |
@@ -51,11 +52,12 @@ docker compose up -d        # Start all backing services
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
 - Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
 - Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
-- Redis keys:
-  - `entity:live:{entity_id}` - current position, TTL = SIGNAL_LOSS_THRESHOLD_MS
-  - `alert-state:{entity_id}` - alert evaluator dedup flag; ephemeral, distinct from the durable alerts table in TimescaleDB
+- Redis keys and channels:
+  - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` (drives dashboard ghost cleanup only, not alert detection)
+  - `alert-state:{entity_id}` - in-loop alert suppression flag; **no TTL** — written by alert evaluator on first emission, deleted explicitly by position consumer when entity resumes broadcasting; distinct from the durable dedup in the `alerts` table (TimescaleDB)
   - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
   - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
+  - `position-updates` - Redis pub/sub channel; position consumer publishes every normalised position event here after writing to the hash; all API instances subscribe and fan out to scoped WebSocket connections
 
 ### Code style
 - Prefer explicit over clever  - this code will be read in an interview setting
@@ -67,9 +69,12 @@ docker compose up -d        # Start all backing services
 - Retries are idempotent by construction (idempotency key on every write)  - retry freely, don't over-engineer retry logic
 - Alert evaluator failures must not result in duplicate alerts  - leader election handles this, not application-level dedup hacks
 
+### Service contracts
+- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; writes PROXIMITY_EVENT edges to Neo4j only — does not write to TimescaleDB, Redis, or Kafka
+
 ### Commits
 - Commit message format: `<scope>: <what and why>`  - e.g. `ingestion: add DLQ for malformed AIS events`
-- Scopes match service names: `ingestion`, `position-consumer`, `correlation`, `alert-evaluator`, `api`, `dashboard`, `infra`
+- Scopes match service names: `ingestion`, `position-consumer`, `correlation`, `alert-evaluator`, `api`, `dashboard`, `infra`, `schema`
 
 ---
 

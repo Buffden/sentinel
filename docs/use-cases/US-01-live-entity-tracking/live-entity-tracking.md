@@ -40,7 +40,7 @@ The dashboard receives live positions from Redis via the API WebSocket and rende
 
 ![Entity Expiry](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/entity-expiry.svg)
 
-When an entity stops broadcasting, its Redis TTL expires automatically (no explicit delete). Because no further pub/sub updates arrive for it, the dashboard's client-side staleness timer removes it from the map when `now() - last_seen_ms` exceeds `SIGNAL_LOSS_THRESHOLD_MS`. The same TTL expiry triggers signal loss detection (US-03).
+When an entity stops broadcasting, its Redis TTL expires automatically (no explicit delete). Because no further pub/sub updates arrive for it, the dashboard's client-side staleness timer removes it from the map when `now() - last_seen_ms` exceeds `SIGNAL_LOSS_THRESHOLD_MS`. The TTL drives dashboard ghost cleanup only — signal loss detection (US-03) is driven by the `last_seen_ms` field in the hash, read by the alert evaluator on a scheduled scan, not by TTL expiry.
 
 ---
 
