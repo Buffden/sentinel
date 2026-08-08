@@ -26,7 +26,7 @@ As an operator, I want to receive an alert when an entity's transponder goes dar
 
 ![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-The alert evaluator checks Redis for entities whose TTL has expired, fetches last known position from TimescaleDB, and emits an alert to Kafka.
+The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry — the TTL is used only for dashboard ghost cleanup (US-01).
 
 ### Alert Delivery
 
@@ -38,7 +38,7 @@ The alert is consumed from Kafka, written to the `alerts` table in TimescaleDB w
 
 ![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
 
-Once an alert is raised for an entity, subsequent evaluation cycles detect the active alert state and skip re-emission until the entity comes back online and the alert state is cleared.
+Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` key to Redis (no TTL). Subsequent evaluation cycles check for this key first and skip re-emission if it is present. When the entity comes back online, the position consumer explicitly deletes `alert-state:{entity_id}` on its next write, clearing the suppression. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
 
 ---
 

@@ -19,7 +19,7 @@ actor Operator
 Feed -> Poller : position pings arriving normally
 Poller -> Kafka : publish to adsb.raw / ais.raw
 Kafka -> Consumer : consume event
-Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, timestamp_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, last_seen_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
 Consumer -> API : publish update via Redis pub/sub
 API --> Dashboard : push { entity_id: XYZ123, lat, lon, timestamp_ms }
 
@@ -59,8 +59,11 @@ note over Dashboard, Operator
   the same TTL value on both sides:
   Redis expires the key server-side,
   dashboard expires the entity client-side.
-  Same TTL expiry triggers US-03
-  signal loss detection.
+  TTL drives dashboard ghost cleanup only.
+  Signal loss detection (US-03) is driven
+  by last_seen_ms in the hash, scanned by
+  the alert evaluator on a schedule -
+  not by TTL expiry.
 end note
 
 @enduml

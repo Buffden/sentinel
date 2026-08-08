@@ -37,7 +37,7 @@ Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/
 
 | Layer | Technology |
 | --- | --- |
-| Data ingestion | Python/Node poller → Kafka (Redpanda locally, MSK on AWS) |
+| Data ingestion | Node.js poller → Kafka (Redpanda locally, MSK on AWS) |
 | Position store | TimescaleDB (geo-cell + time-bucket sharding) |
 | Correlation graph | Neo4j |
 | Live state cache | Redis |
@@ -89,6 +89,7 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 | ADR-010 | Alert lifecycle state in PostgreSQL table on TimescaleDB |
 | ADR-011 | Google OAuth 2.0 for operator authentication |
 | ADR-012 | Workspace scope and server-side alert filtering |
+| ADR-013 | Node.js for the ingestion poller |
 
 ---
 
@@ -110,6 +111,17 @@ open http://localhost:4200
 ```
 
 > To use live ADS-B data, set `OPENSKY_USERNAME` and `OPENSKY_PASSWORD` in `.env`. See `.env.example`.
+
+---
+
+## Future Work
+
+These are intentionally out of scope for v1 but are the natural next steps:
+
+- **Multi-region ingestion** — regional collectors buffering and forwarding to a central store, with explicit consistency tiers (strongly consistent: entity identity and alert state; eventually consistent: historical position backfill)
+- **ML-based anomaly scoring** — layering a scoring model on top of the rule-based detection to rank alert severity
+- **Multi-tenant operator isolation** — scoped data access per organisation, not just per operator workspace
+- **Historical alert replay and audit log** — browsing past anomalies in the dashboard
 
 ---
 
