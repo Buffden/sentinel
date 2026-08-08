@@ -9,6 +9,7 @@ skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nentity:live:{id}" as Redis
+database "Redis\nalert-state:{id}" as AlertState
 database "TimescaleDB\nposition_history" as TSDB
 queue "Kafka\nalerts" as Kafka
 
@@ -18,21 +19,31 @@ note over Evaluator
   on standby. (ADR-005)
 end note
 
-loop every evaluation cycle
-  Evaluator -> Redis : HGETALL entity:live:*
-  Redis --> Evaluator : { entity_id, timestamp_ms } for all live entities
+loop every 10s (scheduled scan)
+  Evaluator -> Redis : SCAN entity:live:* + HGETALL each key
+  Redis --> Evaluator : { entity_id, last_seen_ms, lat, lon } for all live entities
 
-  alt entity key missing (TTL expired)
-    note over Redis
-      TTL = SIGNAL_LOSS_THRESHOLD_MS
-      Expired key means no ping received
-      within the threshold window.
-    end note
+  note over Redis
+    Detection is driven by last_seen_ms in the hash,
+    not by TTL expiry. The key may still be alive
+    when the threshold is crossed.
+    TTL = SIGNAL_LOSS_THRESHOLD_MS (drives dashboard
+    ghost cleanup only - see US-01).
+  end note
 
-    Evaluator -> TSDB : SELECT last known position\nWHERE entity_id = ? ORDER BY timestamp_ms DESC LIMIT 1
-    TSDB --> Evaluator : { lat, lon, timestamp_ms }
+  alt now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS
+    Evaluator -> AlertState : GET alert-state:{entity_id}
 
-    Evaluator -> Kafka : publish to alerts\n{ type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
+    alt no active alert
+      Evaluator -> TSDB : SELECT last known position\nWHERE entity_id = ? ORDER BY timestamp_ms DESC LIMIT 1
+      TSDB --> Evaluator : { lat, lon, timestamp_ms }
+
+      Evaluator -> Kafka : publish to alerts\n{ type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
+      Evaluator -> AlertState : SET alert-state:{entity_id}\n(no TTL - cleared by position consumer on entity resume)
+
+    else alert already active
+      Evaluator -> Evaluator : skip - suppressed by alert-state key\nsee alert-suppression diagram
+    end
 
   else entity seen within threshold
     Evaluator -> Evaluator : no action

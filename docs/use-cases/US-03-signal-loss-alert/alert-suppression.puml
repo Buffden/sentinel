@@ -9,6 +9,8 @@ skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nalert-state:{id}" as AlertState
+participant "Position\nConsumer" as Consumer
+database "Redis\nentity:live:{id}" as LiveState
 queue "Kafka\nalerts" as Kafka
 
 note over Evaluator
@@ -30,13 +32,20 @@ loop evaluation cycle N (entity still dark)
   end note
 end
 
-note over Evaluator
+note over Consumer, LiveState
   Entity ABC starts broadcasting again.
-  Redis key entity:live:ABC is restored
-  by the position consumer.
+  Position consumer receives a new ping
+  and writes it to Redis.
 end note
 
-Evaluator -> AlertState : DEL alert-state:ABC\n(clear active alert record)
+Consumer -> LiveState : HSET entity:live:ABC\n{ lat, lon, last_seen_ms }
+Consumer -> AlertState : DEL alert-state:ABC
+note over Consumer, AlertState
+  The position consumer clears the suppression key,
+  not the evaluator. This ensures the key is only
+  removed when a real ping is received — not on
+  a timer or assumption.
+end note
 
 loop next evaluation cycle (entity live again)
   Evaluator -> AlertState : GET alert-state:ABC
