@@ -85,7 +85,7 @@ together {
     }
 
     node "Redis" #3a0a0a {
-        database [live entity state\ncache - entity:live:{id}] as REDIS #7f1d1d
+        database [live entity state · leader election\nentity:live:{id} · alert-state:{id}\npub/sub · position-updates channel] as REDIS #7f1d1d
     }
 }
 
@@ -148,8 +148,9 @@ ALERT       -[#94a3b8]down->  KAFKA_ALERTS
 KAFKA_ALERTS -[#94a3b8]down-> API
 
 ' API reads from stores and verifies identity with Google
+' Redis is bidirectional: API reads entity state (hash GET), API also subscribes to position-updates pub/sub channel
 API         -[#38bdf8]left->  TSDB
-API         -[#f87171]left->  REDIS
+API         <-[#f87171]->     REDIS
 API         -[#4ade80]left->  NEO4J
 API         -[#a78bfa]up->    GOOGLE
 
