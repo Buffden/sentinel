@@ -5,11 +5,13 @@ on:
     paths:
       - '**/*.puml'
       - '**/*.plantuml'
+      - '**/*.excalidraw'
   push:
     branches: [main]
     paths:
       - '**/*.puml'
       - '**/*.plantuml'
+      - '**/*.excalidraw'
   workflow_dispatch:
 
 jobs:
@@ -37,9 +39,12 @@ jobs:
       - name: Install diagram-sync
         run: npm install -g diagram-sync
 
+      - name: Install excalidraw-cli
+        run: npm install -g @swiftlysingh/excalidraw-cli
+
       - name: Generate changed diagrams
         run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(puml|plantuml)$' || true)
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(puml|plantuml|excalidraw)$' || true)
           if [ -n "$CHANGED" ]; then
             diagram-sync --files $CHANGED
           else
@@ -82,14 +87,16 @@ jobs:
       - name: Install diagram-sync
         run: npm install -g diagram-sync
 
+      - name: Install excalidraw-cli
+        run: npm install -g @swiftlysingh/excalidraw-cli
+
       - name: Generate changed diagrams
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual trigger: regenerate all diagrams in the repo
-            ALLPUML=$(find . -name "*.puml" -o -name "*.plantuml" | tr '\n' ' ')
-            diagram-sync --files $ALLPUML
+            # Manual trigger: let diagram-sync auto-discover all supported files in the repo
+            diagram-sync
           else
-            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml)$' || true)
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml|excalidraw)$' || true)
             if [ -n "$CHANGED" ]; then
               diagram-sync --files $CHANGED
             else
