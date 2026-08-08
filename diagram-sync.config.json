@@ -6,6 +6,11 @@
       "type": "plantuml",
       "format": "svg",
       "background": "transparent"
+    },
+    {
+      "name": "architecture-excalidraw",
+      "type": "excalidraw",
+      "format": "svg"
     }
   ]
 }
