@@ -25,9 +25,9 @@ loop every evaluation cycle
   Evaluator -> Evaluator : compute distance\nbetween current and baseline position
 
   alt distance > ROUTE_DEVIATION_THRESHOLD_METRES (sustained)
-    Evaluator -> Kafka : publish to alerts\n{ type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres }
+    Evaluator -> Kafka : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres }
     Kafka -> API : consume alert
-    API -> Baseline : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+    API -> Baseline : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
     note over API
       Idempotent write - safe under Kafka replay.
       Scope filter applied before push:

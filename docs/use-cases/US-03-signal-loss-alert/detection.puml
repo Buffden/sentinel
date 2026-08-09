@@ -38,7 +38,7 @@ loop every 10s (scheduled scan)
       Evaluator -> TSDB : SELECT last known position\nWHERE entity_id = ? ORDER BY timestamp_ms DESC LIMIT 1
       TSDB --> Evaluator : { lat, lon, timestamp_ms }
 
-      Evaluator -> Kafka : publish to alerts\n{ type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
+      Evaluator -> Kafka : publish to alerts\n{ alert_id, alert_type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
       Evaluator -> AlertState : SET alert-state:{entity_id} $last_seen_ms\n(value = dark_since_ms; no TTL - cleared by position consumer on entity resume)
 
     else alert already active

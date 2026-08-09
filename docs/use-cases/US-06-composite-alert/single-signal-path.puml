@@ -27,7 +27,7 @@ note over Evaluator
   No composite alert raised.
 end note
 
-Evaluator -> Kafka : publish individual SIGNAL_LOSS alert\n{ type: SIGNAL_LOSS, entity_id: VesselB }
+Evaluator -> Kafka : publish individual SIGNAL_LOSS alert\n{ alert_id, alert_type: SIGNAL_LOSS, entity_id: VesselB }
 
 == Proximity only - no prior signal loss ==
 
@@ -42,7 +42,7 @@ note over Evaluator
   No composite alert raised.
 end note
 
-Evaluator -> Kafka : publish individual UNSCHEDULED_PROXIMITY alert\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_c, entity_d }
+Evaluator -> Kafka : publish individual UNSCHEDULED_PROXIMITY alert\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  entity_c, entity_d }
 
 note over Kafka
   Composite alert requires BOTH:

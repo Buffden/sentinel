@@ -15,7 +15,7 @@ actor Operator
 
 Kafka -> API : consume SIGNAL_LOSS alert\n{ alert_id, entity_id, alert_type,\n  window_start_ms, last_known_position,\n  duration_ms }
 
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
 note over TSDB
   alert_id = {entity_id}:SIGNAL_LOSS:{window_start_ms}

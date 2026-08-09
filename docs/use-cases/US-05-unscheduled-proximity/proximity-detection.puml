@@ -61,10 +61,10 @@ end note
 
 Evaluator -> Neo4j : query PROXIMITY_EVENT edges\nwithout KNOWN_ASSOCIATE within window
 Neo4j --> Evaluator : unscheduled proximity pairs
-Evaluator -> Alerts : publish to alerts\n{ type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
+Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
 
 Alerts -> API : consume alert
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: UNSCHEDULED_PROXIMITY,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: UNSCHEDULED_PROXIMITY,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
 note over TSDB
   Idempotent write - safe under Kafka replay.
