@@ -107,5 +107,5 @@ docker compose up -d        # Start all backing services
 | `README.md` | Architecture overview, stack, anomaly types, project structure |
 | `docs/adr/` | Architecture Decision Records  - read the relevant ADR before implementing anything in its scope |
 | `docs/ARCHITECTURE.md` | Component contracts, service boundaries, Kafka topics, consumer groups, and persistence ownership |
-| `docs/DATA_MODEL.md` | Schemas for every store (to be written) |
+| `docs/DATA_MODEL.md` | Schemas for all stores — TimescaleDB tables, Neo4j nodes/edges, Redis keys, Kafka event schemas |
 | `docs/DEVELOPMENT.md` | Local setup, seed data, load generator usage (to be written as services are built) |
