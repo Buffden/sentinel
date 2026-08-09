@@ -10,7 +10,7 @@ skinparam noteBackgroundColor #FFFDE7
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nentity:live:{id}" as Redis
 database "TimescaleDB\nroute_baseline" as Baseline
-database "Redis\ndeviation-state:{id}" as DevState
+database "Redis\ndeviation-counter:{id}" as DevState
 queue "Kafka\nalerts" as Kafka
 
 == Transient ping outside baseline (no alert) ==

@@ -8,7 +8,7 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nentity:live:{id}" as Redis
+database "Redis\nalert-state:{id}" as AlertState
 database "Neo4j\nentity graph" as Neo4j
 
 note over Evaluator
@@ -16,11 +16,12 @@ note over Evaluator
   Only the elected leader emits alerts.
 end note
 
-Evaluator -> Redis : check entity:live:{entity_b} TTL
-Redis --> Evaluator : key missing - Entity B is dark
+Evaluator -> AlertState : GET alert-state:{entity_b}
+AlertState --> Evaluator : $dark_since_ms (SIGNAL_LOSS alert active - Entity B is dark)
 
 note over Evaluator
-  Weak signal 1: signal loss detected.
+  Weak signal 1: active signal loss confirmed via alert-state key.
+  dark_since_ms from the key value gives the start of the loss window.
   Not actionable on its own.
 end note
 
