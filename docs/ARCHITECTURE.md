@@ -57,8 +57,8 @@ This document defines the service boundaries, component contracts, data flow, an
 | Direction | What |
 |---|---|
 | Consumes | `position.normalized` (consumer group: `correlation-worker`) |
+| Reads from Redis | `entity:live:*` hashes — all current entity positions, needed for pairwise distance computation |
 | Writes to Neo4j | `PROXIMITY_EVENT` edges via MERGE (idempotent) |
-| Reads from | — |
 
 **Contract:**
 - Does not write to TimescaleDB, Redis, or Kafka.

@@ -25,7 +25,7 @@ end note
 
 Kafka -> API : consume composite alert
 
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: COMPOSITE,\n  status: NEW, created_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: COMPOSITE,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
 note over TSDB
   Composite alert stored as a single row.

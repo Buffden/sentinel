@@ -33,7 +33,8 @@ API --> Operator : 200 OK
 note over Evaluator
   VesselB goes dark again in a new time window.
   Alert Evaluator does not read the alerts table.
-  It evaluates based on Redis TTL and store state only.
+  It evaluates based on last_seen_ms in the Redis hash
+  and the alert-state:{entity_id} suppression key.
 end note
 
 Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  window_start_ms: 1700005000000 }

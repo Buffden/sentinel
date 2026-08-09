@@ -48,14 +48,13 @@ A TimescaleDB continuous aggregate materialised from `position_history`. Compute
 | `time_bucket` | TIMESTAMPTZ | 1-hour bucket derived from `position_history.time_bucket` |
 | `avg_lat` | DOUBLE PRECISION | Mean latitude across all pings in the bucket |
 | `avg_lon` | DOUBLE PRECISION | Mean longitude across all pings in the bucket |
-| `stddev_lat` | DOUBLE PRECISION | Standard deviation of latitude across pings |
-| `stddev_lon` | DOUBLE PRECISION | Standard deviation of longitude across pings |
+| `stddev_metres` | DOUBLE PRECISION | Approximate standard deviation of positions in metres across the bucket (derived from lat/lon stddev) |
 | `sample_count` | BIGINT | Number of pings contributing to this bucket |
 
 **Design notes:**
 - Look-back window: **30 days**. An entity needs at least 30 days of position history for a meaningful baseline. New entities produce no route deviation alerts until sufficient history accumulates.
 - Refresh policy: every hour, covering up to the last 30 days.
-- The alert evaluator queries by `(entity_id, time_bucket)` to retrieve the expected position range. `stddev_lat` and `stddev_lon` are converted to metres at query time using the entity's latitude — the evaluator does not store a pre-computed `stddev_metres`.
+- The alert evaluator queries by `(entity_id, time_bucket)` and reads `stddev_metres` directly to compare against `ROUTE_DEVIATION_THRESHOLD_METRES`. POC-03 validates the computation approach.
 
 ---
 
@@ -74,7 +73,9 @@ Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypert
 | `payload` | JSONB | No | Type-specific fields (see Kafka alert schema below) |
 | `detected_at` | TIMESTAMPTZ | No | When the anomaly was first detected |
 | `updated_at` | TIMESTAMPTZ | No | Last status change timestamp |
+| `acknowledged_at` | TIMESTAMPTZ | Yes | When the alert was acknowledged; NULL until acknowledged |
 | `acknowledged_by` | UUID | Yes | FK → `users.user_id`; NULL until acknowledged |
+| `resolved_at` | TIMESTAMPTZ | Yes | When the alert was resolved; NULL until resolved |
 | `resolved_by` | UUID | Yes | FK → `users.user_id`; NULL until resolved |
 
 **Constraints and indexes:**
