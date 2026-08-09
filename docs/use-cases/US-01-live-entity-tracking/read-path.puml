@@ -40,7 +40,7 @@ end note
 
 Redis --> API : live entity positions (all currently active)
 
-API --> Dashboard : push initial state\n{ entities: [ { entity_id, lat, lon,\n  entity_type, timestamp_ms }, ... ] }\n(scope-filtered subset only)
+API --> Dashboard : push initial state\n{ entities: [ { entity_id, lat, lon,\n  entity_type, last_seen_ms }, ... ] }\n(scope-filtered subset only)
 
 Dashboard --> Operator : map renders with all\nin-scope entities at current positions
 

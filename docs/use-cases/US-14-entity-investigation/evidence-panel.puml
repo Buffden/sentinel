@@ -22,7 +22,7 @@ end note
 
 par fetch current state
   API -> Redis : HGETALL entity:live:VesselB
-  Redis --> API : { lat, lon, timestamp_ms } or nil (still dark)
+  Redis --> API : { lat, lon, last_seen_ms } or nil (still dark)
 else fetch alert record and position history
   API -> TSDB : SELECT * FROM alerts WHERE alert_id = $1
   TSDB --> API : { alert_type: COMPOSITE, payload: { signal_loss_duration_ms,\n  proximity_entity_id, proximity_distance_metres } }

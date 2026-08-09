@@ -35,7 +35,7 @@ Use Express (Node.js) for the API layer.
 
 **WebSocket story is simple.** The `ws` library attaches directly to an Express HTTP server in a few lines. No separate server process, no framework-specific abstraction to learn.
 
-**Same runtime as the ingestion poller.** If the poller is also Node, shared utilities (schema validators, Kafka client config) can live in a shared internal package without crossing a language boundary.
+**Same runtime as the ingestion poller.** The poller is also Node.js (ADR-013), so shared utilities (schema validators, Kafka client config, `position.normalized` event types) live in a shared internal TypeScript package without crossing a language boundary.
 
 **Interview readability.** A portfolio project is read, not operated. Express routes are self-documenting in a way that Spring Boot controller classes with annotations are not.
 
@@ -65,7 +65,7 @@ Use Express (Node.js) for the API layer.
 
 ## Consequences
 
-- API service is Node.js - adds Node as a runtime alongside whatever language the poller uses
+- API service is Node.js - same runtime as the ingestion poller (ADR-013); one runtime across the entire backend
 - WebSocket connections are stateful - horizontal scaling requires a shared pub/sub layer (Redis pub/sub) to broadcast events across API instances; this is a known pattern and does not require additional infrastructure beyond the Redis already in the stack
 - No type-safe RPC contract between API and dashboard by default - a shared TypeScript types package or OpenAPI spec should be introduced before the dashboard is built
 - The API is the sole consumer of the `alerts` Kafka topic - it writes to the `alerts` table on TimescaleDB and fans out to scoped WebSocket connections

@@ -8,14 +8,14 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nentity:live:{id}" as Redis
+database "Redis\nalert-state:{id}" as AlertState
 database "Neo4j\nentity graph" as Neo4j
 queue "Kafka\nalerts" as Kafka
 
 == Signal loss only - no proximity event ==
 
-Evaluator -> Redis : check entity:live:VesselB
-Redis --> Evaluator : key missing - VesselB is dark
+Evaluator -> AlertState : GET alert-state:VesselB
+AlertState --> Evaluator : $dark_since_ms (SIGNAL_LOSS alert active - VesselB is dark)
 
 Evaluator -> Neo4j : MATCH (b:Entity {id: "VesselB"})-[e:PROXIMITY_EVENT]->(a)\nWHERE e.timestamp_ms > $dark_since_ms\nAND NOT (b)-[:KNOWN_ASSOCIATE]-(a)\nRETURN a, e
 Neo4j --> Evaluator : no results
@@ -31,8 +31,8 @@ Evaluator -> Kafka : publish individual SIGNAL_LOSS alert\n{ type: SIGNAL_LOSS, 
 
 == Proximity only - no prior signal loss ==
 
-Evaluator -> Redis : check entity:live:VesselC
-Redis --> Evaluator : VesselC is live (key present)
+Evaluator -> AlertState : GET alert-state:VesselC
+AlertState --> Evaluator : nil - no active signal loss for VesselC
 
 note over Evaluator
   VesselC is in proximity to VesselD

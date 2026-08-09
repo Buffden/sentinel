@@ -54,7 +54,7 @@ docker compose up -d        # Start all backing services
 - Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
 - Redis keys and channels:
   - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` (drives dashboard ghost cleanup only, not alert detection)
-  - `alert-state:{entity_id}` - in-loop alert suppression flag; **no TTL** — written by alert evaluator on first emission, deleted explicitly by position consumer when entity resumes broadcasting; distinct from the durable dedup in the `alerts` table (TimescaleDB)
+  - `alert-state:{entity_id}` - in-loop alert suppression flag; value = `dark_since_ms` (Unix ms when entity went dark); **no TTL** — written by alert evaluator on first emission, deleted explicitly by position consumer when entity resumes broadcasting; used by composite alert evaluator (US-06) to retrieve the loss window start; distinct from the durable dedup in the `alerts` table (TimescaleDB)
   - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
   - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
   - `position-updates` - Redis pub/sub channel; position consumer publishes every normalised position event here after writing to the hash; all API instances subscribe and fan out to scoped WebSocket connections
@@ -106,6 +106,6 @@ docker compose up -d        # Start all backing services
 | `insights/intent.md` | Why this project exists, what success looks like, full context for decision-making (private, gitignored) |
 | `README.md` | Architecture overview, stack, anomaly types, project structure |
 | `docs/adr/` | Architecture Decision Records  - read the relevant ADR before implementing anything in its scope |
-| `docs/ARCHITECTURE.md` | Component contracts and service boundaries (to be written) |
+| `docs/ARCHITECTURE.md` | Component contracts, service boundaries, Kafka topics, consumer groups, and persistence ownership |
 | `docs/DATA_MODEL.md` | Schemas for every store (to be written) |
 | `docs/DEVELOPMENT.md` | Local setup, seed data, load generator usage (to be written as services are built) |

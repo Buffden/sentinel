@@ -20,8 +20,8 @@ Feed -> Poller : position pings arriving normally
 Poller -> Kafka : publish to adsb.raw / ais.raw
 Kafka -> Consumer : consume event
 Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, last_seen_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
-Consumer -> API : publish update via Redis pub/sub
-API --> Dashboard : push { entity_id: XYZ123, lat, lon, timestamp_ms }
+Consumer -> Redis : PUBLISH position-updates\n{ entity_id: XYZ123, lat, lon, last_seen_ms }
+API --> Dashboard : push { entity_id: XYZ123, lat, lon, last_seen_ms }
 
 note over Feed, Poller
   Entity XYZ123 stops broadcasting.

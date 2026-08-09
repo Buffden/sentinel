@@ -35,7 +35,7 @@ How the dashboard establishes an authenticated, scoped WebSocket connection with
 
 ![Update Push](../../../diagrams/docs/use-cases/US-02-live-map-updates/update-push.svg)
 
-How a position update flows from the position consumer through Redis pub/sub to the operator's map, with scope filtering applied per connection before any message is pushed.
+How a position update flows from the position consumer through the `position-updates` Redis pub/sub channel to the operator's map, with scope filtering applied per connection before any message is pushed.
 
 ---
 
