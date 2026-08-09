@@ -181,7 +181,7 @@ This document defines the service boundaries, component contracts, data flow, an
 
 | Key / Channel | Writer | Reader | Notes |
 |---|---|---|---|
-| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, API | Hash: lat, lon, `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only |
+| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only |
 | `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Value = `dark_since_ms`; no TTL; deleted by Position Consumer on entity resume |
 | `deviation-counter:{entity_id}` | Alert Evaluator | Alert Evaluator | INCR/DEL per evaluation cycle |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease; renewed on each heartbeat |

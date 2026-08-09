@@ -14,7 +14,7 @@ database "TimescaleDB\nalerts table" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Evaluator -> Kafka : publish ONE composite alert\n{ alert_id, type: COMPOSITE,\n  priority: ELEVATED,\n  entity_b: signal loss,\n  entity_a: unrelated proximity,\n  correlation_window_ms,\n  window_start_ms,\n  location, timestamp_ms }
+Evaluator -> Kafka : publish ONE composite alert\n{ alert_id, alert_type: COMPOSITE,\n  priority: ELEVATED,\n  entity_b: signal loss,\n  entity_a: unrelated proximity,\n  correlation_window_ms,\n  window_start_ms,\n  location, timestamp_ms }
 
 note over Evaluator
   Individual SIGNAL_LOSS and
