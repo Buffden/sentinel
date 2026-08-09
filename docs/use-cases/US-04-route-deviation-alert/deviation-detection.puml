@@ -17,7 +17,7 @@ actor Operator
 
 loop every evaluation cycle
   Evaluator -> Redis : HGETALL entity:live:{entity_id}\n(current position)
-  Redis --> Evaluator : { lat, lon, timestamp_ms }
+  Redis --> Evaluator : { lat, lon, last_seen_ms }
 
   Evaluator -> Baseline : SELECT avg_lat, avg_lon, stddev_metres\nWHERE entity_id = ? AND time_bucket = current_bucket
   Baseline --> Evaluator : expected position range

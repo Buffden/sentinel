@@ -28,7 +28,7 @@ note right of TSDB
   primary key (entity_id, timestamp_ms).
 end note
 
-PosConsumer -> Redis : HSET entity:live:{entity_id}\nlat $lat lon $lon timestamp_ms $ts
+PosConsumer -> Redis : HSET entity:live:{entity_id}\nlat $lat lon $lon last_seen_ms $ts
 
 note right of Redis
   HSET overwrites the field value.

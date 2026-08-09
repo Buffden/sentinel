@@ -28,12 +28,23 @@ KafkaRaw -> Consumer : consume raw event (at-least-once)
 Consumer -> Consumer : parse and normalise\n(validate fields, convert units)
 Consumer -> KafkaNorm : publish to position.normalized
 
-Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, timestamp_ms }
+Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, last_seen_ms }
 
 note right of Redis
   TTL = SIGNAL_LOSS_THRESHOLD_MS
-  Key expiry removes stale entities
-  from the map automatically.
+  Key expiry removes stale entities from
+  the map automatically (dashboard ghost cleanup).
+  Signal loss detection reads last_seen_ms
+  from the hash on a schedule - not TTL expiry.
+end note
+
+Consumer -> Redis : PUBLISH position-updates\n{ entity_id, lat, lon, altitude, last_seen_ms }
+
+note right of Redis
+  All API instances subscribe to position-updates.
+  Each fans out to scoped WebSocket connections.
+  Enables horizontal API scaling without
+  additional pub/sub infrastructure.
 end note
 
 Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING

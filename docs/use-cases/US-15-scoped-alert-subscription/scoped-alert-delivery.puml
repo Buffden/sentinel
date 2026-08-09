@@ -34,7 +34,7 @@ note over Redis
   position from the alert payload is used instead.
 end note
 
-Redis --> API : { lat: 48.8, lon: 2.3,\n  entity_type: aircraft,\n  timestamp_ms: ... }
+Redis --> API : { lat: 48.8, lon: 2.3,\n  entity_type: aircraft,\n  last_seen_ms: ... }
 
 == Scope evaluation for Operator A ==
 
