@@ -54,7 +54,7 @@ Use `geo_cell` (H3 resolution 5) as an indexed query column on `position_history
 ## Consequences
 
 - The H3 library must be available in the Position Consumer to compute `geo_cell` at ingest time, and in the Correlation Worker for live proximity scoping.
-- `HISTORY_H3_RESOLUTION` (used for the TimescaleDB `geo_cell` column) and `LIVE_H3_RESOLUTION` (used for the Redis `geo-cell:*` sorted set) are separate configuration values. They need not be identical — historical queries and live proximity scoping have different access patterns and density requirements. POC-03 validates the right values.
+- `HISTORY_H3_RESOLUTION` (used for the TimescaleDB `geo_cell` column) and `LIVE_H3_RESOLUTION` (used for the Redis `geo-cell:*` sorted set) are separate configuration values. They need not be identical — historical queries and live proximity scoping have different access patterns and density requirements. Tune during implementation based on observed entity density and `PROXIMITY_THRESHOLD_METRES`.
 - `HISTORY_H3_RESOLUTION` defaults to 5 for v1. Changing it requires rewriting the `geo_cell` column (expensive migration).
 - `LIVE_H3_RESOLUTION` may be tuned independently based on entity density, `PROXIMITY_THRESHOLD_METRES`, and the number of cells scanned per event. The Correlation Worker computes the k-ring radius from `PROXIMITY_THRESHOLD_METRES` and the cell edge length at `LIVE_H3_RESOLUTION` — not hardcoded to k-ring(1).
 - Queries must translate a bounding box to H3 cell IDs before hitting the database — done in the API or consumer, not in SQL.

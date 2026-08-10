@@ -1,5 +1,5 @@
 @startuml baseline-computation
-title US-04: Reference Route Model - Static Waypoints Seeded at Startup (not computed from history)
+title US-04: Reference Route Setup - Static Routes Seeded at Startup
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -15,26 +15,25 @@ participant "Deviation\nDetector" as Detector
 note over LoadGen
   At startup, the synthetic load generator
   seeds known route definitions into TimescaleDB.
-  Real ADS-B/AIS entities have no known route —
+  Real ADS-B/AIS entities have no assigned route —
   they are skipped by the Deviation Detector.
 end note
 
-LoadGen -> RouteRef : INSERT INTO route_references\n{ route_id, entity_id, description }
+LoadGen -> RouteRef : insert route header\n{ route_id, entity_id, route_name,\n  corridor_threshold_metres, source }
 
-LoadGen -> RoutePoints : INSERT INTO route_reference_points\n{ route_id, sequence_index, lat, lon,\n  tolerance_metres }\n(one row per waypoint)
+LoadGen -> RoutePoints : insert ordered waypoints\n{ route_id, sequence_no, lat, lon }\n(one row per waypoint; pairs define route segments)
 
 note over RoutePoints
   Waypoints define the expected corridor.
-  tolerance_metres = per-waypoint deviation threshold.
+  corridor_threshold_metres lives on route_references.
   Seeded from the generator's known route definition —
-  deterministic, injectable, and consistent with
+  deterministic, injectable, consistent with
   the anomalies the generator will produce.
-  No statistical averaging of lat/lon positions.
-  (Averaging A→B→C produces a midpoint, not a route.)
+  No statistical averaging of historical positions.
 end note
 
-Detector -> RouteRef : SELECT entity_id FROM route_references\nWHERE entity_id = $entity_id
-RouteRef --> Detector : row exists (entity has a reference route)
+Detector -> RouteRef : look up entity in route_references
+RouteRef --> Detector : row found (entity has an assigned reference route)
 
 note over Detector
   If no row found: entity has no reference route.
@@ -42,7 +41,7 @@ note over Detector
   Real ADS-B/AIS entities fall through here in v1.
 end note
 
-Detector -> RoutePoints : SELECT sequence_index, lat, lon, tolerance_metres\nFROM route_reference_points\nWHERE route_id = $route_id\nORDER BY sequence_index
+Detector -> RoutePoints : fetch ordered waypoints for route_id
 RoutePoints --> Detector : ordered waypoint list
 
 @enduml

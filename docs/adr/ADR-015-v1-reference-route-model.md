@@ -25,28 +25,9 @@ Route deviation in v1 uses a **deterministic reference route** model, not a stat
 
 ### Reference route store
 
-Two plain PostgreSQL tables hold explicitly defined route data for synthetic entities:
+Two plain PostgreSQL tables hold explicitly defined route data for synthetic entities: `route_references` (route header — entity assignment, corridor threshold, source) and `route_reference_points` (ordered waypoints defining the route segments). The schema is canonical in `DATA_MODEL.md`.
 
-```sql
-route_references (
-  route_id           TEXT PRIMARY KEY,
-  entity_id          TEXT NOT NULL,
-  route_name         TEXT NOT NULL,
-  corridor_threshold_metres REAL NOT NULL,
-  source             TEXT NOT NULL,  -- 'synthetic' | 'manual'
-  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-)
-
-route_reference_points (
-  route_id           TEXT NOT NULL REFERENCES route_references(route_id),
-  sequence_no        INTEGER NOT NULL,
-  lat                DOUBLE PRECISION NOT NULL,
-  lon                DOUBLE PRECISION NOT NULL,
-  PRIMARY KEY (route_id, sequence_no)
-)
-```
-
-This schema replaces the single flat `reference_routes` table used previously. Separating the route header from its waypoints makes it easier to assign a per-corridor threshold and describe the route metadata.
+Separating the route header from its waypoints makes it straightforward to assign a per-corridor threshold (`corridor_threshold_metres`) and describe route metadata independently of the waypoint list.
 
 ### Deviation Detector logic
 

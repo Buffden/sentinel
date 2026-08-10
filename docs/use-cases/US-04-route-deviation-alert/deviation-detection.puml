@@ -1,5 +1,5 @@
 @startuml deviation-detection
-title US-04: Deviation Detection - Deviation Detector publishes candidates, Alert Evaluator emits alert
+title US-04: Deviation Detection - Detector classifies each ping; Evaluator owns episode state
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,26 +9,26 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nposition.normalized" as NormKafka
 participant "Deviation\nDetector" as Detector
-database "TimescaleDB\nroute_reference_points" as RoutePoints
+database "TimescaleDB\nroute_references +\nroute_reference_points" as RoutePoints
 queue "Kafka\ndeviation.candidates" as DevCandKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\ndeviation-state:{id}\n(hash)" as DevState
+database "Redis\ndeviation-state:{id}" as DevState
 queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
-database "TimescaleDB\nalerts table" as TSDB
+database "TimescaleDB\nalerts" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-NormKafka -> Detector : consume position event\n{ entity_id, lat, lon, timestamp_ms }
+NormKafka -> Detector : consume position event\n{ entity_id, lat, lon, timestamp_ms, ... }
 
-Detector -> RoutePoints : SELECT sequence_index, lat, lon, tolerance_metres\nFROM route_reference_points\nJOIN route_references USING (route_id)\nWHERE entity_id = $entity_id
-RoutePoints --> Detector : ordered waypoint list\n(or empty if no reference route)
+Detector -> RoutePoints : look up assigned reference route for entity
+RoutePoints --> Detector : waypoint list + corridor_threshold_metres\n(or empty if no reference route)
 
 alt no reference route found
-  Detector -> Detector : skip — entity has no reference route\nno event published
+  Detector -> Detector : skip — entity has no assigned route\nno event published (real ADS-B/AIS in v1)
 end
 
-Detector -> Detector : find nearest route segment (point[i]→point[i+1])\ncompute minimum perpendicular distance to each segment
+Detector -> Detector : for each segment (waypoint[i] → waypoint[i+1]):\ncompute minimum perpendicular distance\nidentify nearest segment index
 
 alt deviation_metres > corridor_threshold_metres
   Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, deviation_metres,\n  nearest_segment_index }
@@ -37,53 +37,47 @@ else within threshold
 end
 
 note over Detector
-  Stateless: no counter, no alert suppression.
-  Detector owns comparison only.
-  Counter and alert emission belong
-  to the Alert Evaluator (ADR-014).
+  Stateless: classifies every eligible ping independently.
+  No counter, no alert suppression.
+  Episode state belongs entirely to the Alert Evaluator.
 end note
 
 DevCandKafka -> Evaluator : consume deviation.candidates event
 
-note over Evaluator
-  Replay guard: check last_processed_ms in deviation-state hash.
-  If event.timestamp_ms <= last_processed_ms: skip (out-of-order replay).
-end note
-
-Evaluator -> DevState : HGET deviation-state:{entity_id} last_processed_ms
-DevState --> Evaluator : $last_processed_ms (or nil)
+Evaluator -> DevState : check last_processed_ms (replay guard)
+DevState --> Evaluator : stored value or nil
 
 alt event.timestamp_ms <= last_processed_ms
   Evaluator -> Evaluator : skip — out-of-order or duplicate replay
 end
 
 alt status = OUT_OF_RANGE
-  Evaluator -> DevState : HINCRBY deviation-state:{entity_id} count 1\nHSET last_processed_ms $timestamp_ms\n(HSET episode_start_ms $timestamp_ms ON FIRST increment)
+  Evaluator -> DevState : increment count; update last_processed_ms;\nset episode_start_ms on first OUT_OF_RANGE;\nrefresh safety TTL (DEVIATION_STATE_TTL_MS)
   DevState --> Evaluator : updated count
 
-  Evaluator -> DevState : EXPIRE deviation-state:{entity_id}\nDEVIATION_STATE_TTL_MS (default: 24h)
+  alt count >= DEVIATION_SUSTAINED_PINGS AND alert_emitted == 0
+    Evaluator -> Alerts : publish ROUTE_DEVIATION alert\n{ alert_id, entity_id, current_position,\n  deviation_metres, nearest_segment_index,\n  sustained_cycles, episode_start_ms }
 
-  alt count >= DEVIATION_SUSTAINED_PINGS
-    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, deviation_metres,\n  nearest_segment_index, sustained_cycles,\n  episode_start_ms }
-    Alerts -> API : consume alert
-    API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
-    note over API
-      Idempotent write - safe under Kafka replay.
-      Scope filter applied before push:
-      entity position + type must match
-      the operator's saved workspace scope.
+    note over Evaluator
+      alert_emitted set to 1 after emission.
+      Subsequent OUT_OF_RANGE pings within the same
+      episode increment count but do not re-emit.
+      One alert per deviation episode.
     end note
+
+    Alerts -> API : consume alert
+    API -> TSDB : persist alert (idempotent on replay)
     API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
-    Dashboard --> Operator : route deviation alert displayed\nstatus: NEW
-  else count < DEVIATION_SUSTAINED_PINGS
-    Evaluator -> Evaluator : no alert yet - transient deviation
+    Dashboard --> Operator : route deviation alert displayed
+  else count < DEVIATION_SUSTAINED_PINGS or already emitted
+    Evaluator -> Evaluator : no alert — threshold not crossed\nor already emitted for this episode
   end
 
 else status = IN_RANGE
   Evaluator -> DevState : DEL deviation-state:{entity_id}
   note over Evaluator
-    State reset.
-    No alert emitted on IN_RANGE.
+    Episode reset. No alert emitted on IN_RANGE.
+    Next OUT_OF_RANGE starts a new episode.
   end note
 end
 

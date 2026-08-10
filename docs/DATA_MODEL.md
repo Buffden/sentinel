@@ -32,10 +32,10 @@ Primary write target for every normalised position ping. Partitioned by Timescal
 - Index on `(geo_cell, observed_at DESC)` — serves regional time-window queries
 
 **Design notes:**
-- `observed_at` is the TimescaleDB partition column. It must be TIMESTAMPTZ — TimescaleDB cannot partition on BIGINT. `timestamp_ms` is kept as source metadata and the idempotency key component; it is not the partition column.
+- `observed_at` is the TimescaleDB partition column. Sentinel uses TIMESTAMPTZ for clearer time semantics and convenient time-oriented querying — `to_timestamp(timestamp_ms / 1000.0)` computed at ingest. `timestamp_ms` is kept as source metadata and the idempotency key component.
 - `geo_cell` is a query index column, not a partition dimension. TimescaleDB partitions on time only (`observed_at`); geo_cell narrows queries within a chunk. See ADR-006.
 - `geo_cell` is computed by the position consumer using the H3 library before the insert. The database never derives it.
-- Daily chunks are chosen for the expected write rate (1–10 pings/s across hundreds to thousands of entities). POC-03 validates this choice.
+- Daily chunks are chosen for the expected write rate (1–10 pings/s across hundreds to thousands of entities). Validate and tune during implementation if observed chunk sizes diverge significantly.
 - Retention is 30 days. Older data has no active query pattern in v1.
 
 ---
@@ -202,7 +202,7 @@ In v1, `KNOWN_ASSOCIATE` edges are seeded manually. No service creates them at r
 
 ## Redis
 
-Redis holds high-frequency ephemeral state. All keys and their lifecycle are defined here and in CLAUDE.md. See ADR-004.
+Redis holds high-frequency ephemeral state. All keys and their lifecycle are defined here. See ADR-004.
 
 ---
 
@@ -229,13 +229,13 @@ Current position and liveness state for each tracked entity.
 Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is a sorted set of `entity_id` members with score = `last_seen_ms`.
 
 - **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from prior hash value)
-- **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - SIGNAL_LOSS_THRESHOLD_MS)} +inf` for same-cell + k-ring(1) cells (7 cells); returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
+- **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - LIVE_PROXIMITY_MAX_AGE_MS)} +inf` for the entity's cell and all cells within the computed k-ring; returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
 - **TTL:** None — stale members age out logically via the `ZRANGEBYSCORE` lower-bound score filter. Members from permanently disappeared entities are never returned.
 
 **Design notes:**
-- Using a sorted set (score = `last_seen_ms`) replaces the plain SET. A plain SET accumulates members from permanently disappeared entities with no way to age them out — "overwritten naturally as entities move cells" was incorrect. Entities that stop broadcasting never trigger a `ZREM`. The score filter makes staleness implicit without requiring explicit cleanup.
-- k-ring(1) at H3 resolution 5 covers 7 cells (~1764 km²). This only guarantees no misses when `PROXIMITY_THRESHOLD_METRES < 9850m` (H3 resolution-5 average edge length ~9.85 km). If the threshold is larger, increase k-ring size. For v1, document this constraint in CLAUDE.md.
-- H3 resolution 5 matches the `geo_cell` field already computed by the Position Consumer — no new computation required.
+- Using a sorted set (score = `last_seen_ms`) replaces the plain SET. A plain SET accumulates members from permanently disappeared entities with no way to age them out — entities that stop broadcasting never trigger a `ZREM`. The score filter makes staleness implicit without requiring explicit cleanup.
+- `LIVE_PROXIMITY_MAX_AGE_MS` is the freshness threshold for proximity candidate lookup — independent of `SIGNAL_LOSS_THRESHOLD_MS`. Tune during implementation based on expected ping frequency and acceptable detection latency.
+- The k-ring radius is computed from `PROXIMITY_THRESHOLD_METRES` and the H3 cell edge length at `LIVE_H3_RESOLUTION` — not hardcoded. Validate the required radius during implementation.
 
 ---
 
@@ -267,8 +267,9 @@ Short-lived record of a recently resolved signal loss episode. Written by the Po
 | `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this episode |
 
 - **Writer:** Position consumer — written atomically before deleting `alert-state:{entity_id}` when the entity resumes
-- **Reader:** Alert Evaluator — checked when a `proximity.candidates` event arrives; if present and proximity timestamp falls within the correlation window, emit COMPOSITE and supersede the referenced SIGNAL_LOSS alert
-- **TTL:** `COMPOSITE_CORRELATION_WINDOW_MS` — expires automatically; after expiry a proximity event with the same entity produces UNSCHEDULED_PROXIMITY only (no composite)
+- **Reader:** Alert Evaluator — checked when a `proximity.candidates` event arrives; if present and proximity `episode_start_ms` falls within the correlation window of `resumed_at_ms`, emit COMPOSITE and supersede the referenced SIGNAL_LOSS alert
+- **Consumed by:** Alert Evaluator — DELs this key after successfully emitting a COMPOSITE, consuming the correlation opportunity; subsequent proximity events for the same entity find no `recent-loss` and produce UNSCHEDULED_PROXIMITY as independent incidents
+- **TTL:** `COMPOSITE_CORRELATION_WINDOW_MS` — expires automatically if no qualifying proximity arrives; after expiry the opportunity is gone and proximity produces UNSCHEDULED_PROXIMITY only
 
 ---
 

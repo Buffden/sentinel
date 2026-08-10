@@ -14,9 +14,11 @@ As an operator, I want to receive an alert when two entities with no prior relat
 ## Acceptance Criteria
 
 - The system detects when two entities come within `PROXIMITY_THRESHOLD_METRES` of each other
-- An alert is emitted only if the two entities have no prior recorded relationship (no existing KNOWN_ASSOCIATE edge in the graph)
-- The alert includes both entity IDs, the pair key, the episode start time and location, and the distance at first detection (`distance_at_detection`)
-- Routine proximity events between known-associated entities (e.g. regular flight paths crossing) do not produce alerts
+- An alert is emitted only if the two entities have no prior recorded relationship (no `KNOWN_ASSOCIATE` edge in the graph)
+- Sustained closeness does not repeatedly alert — one alert per continuous encounter, regardless of how long the encounter lasts
+- If publication fails temporarily at the start of an encounter, the same encounter remains retryable; no duplicate alerts are produced on retry
+- Expected proximity between known-associated entities is retained as graph evidence but does not produce an alert
+- The alert includes both entity IDs, the encounter start location, and the distance at first detection
 
 ---
 
@@ -26,13 +28,13 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
 
-On each `position.normalized` event, the correlation worker reads the H3 k-ring (radius computed from `PROXIMITY_THRESHOLD_METRES` and `LIVE_H3_RESOLUTION`) from `geo-cell:{h3_cell_id}` sorted sets using `ZRANGEBYSCORE` to get only fresh candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. For each candidate within `PROXIMITY_THRESHOLD_METRES`, the pair is canonicalized (`min(a,b):max(a,b)`). If no active `proximity-episode:{pair_key}` exists, the worker queries Neo4j for a prior relationship, writes a `PROXIMITY_EVENT` edge (idempotency key: `{pair_key}:{episode_start_ms}`), and — for unscheduled pairs only — publishes ONE `proximity.candidates` event to Kafka per episode. Subsequent pings within the episode refresh the episode TTL without publishing again. The Alert Evaluator consumes `proximity.candidates` (one per episode), emits the alert, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
+The Correlation Worker reads a spatially scoped set of candidate entity positions from the Redis geo-cell index (maintained by the Position Consumer) and computes distances. For each pair within threshold: if no active episode exists, the worker checks Neo4j for a prior relationship. Known associates receive a Neo4j edge for evidence but no alert. Unscheduled pairs receive a Neo4j edge and a single `proximity.candidates` event for this encounter. Subsequent pings within the encounter refresh the episode without publishing again. See `DATA_MODEL.md` for the proximity-episode state model and the retry mechanism (`candidate_published` flag).
 
 ### Graph Update
 
 ![Graph Update](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/graph-update.svg)
 
-The correlation worker writes the proximity event as an edge in Neo4j using MERGE (idempotent under Kafka replay), then also publishes a `proximity.candidates` event to Kafka for unscheduled pairs.
+All close pairs write a `PROXIMITY_EVENT` edge to Neo4j (idempotent under replay). Unscheduled pairs additionally publish one `proximity.candidates` event to Kafka per encounter. The Alert Evaluator consumes this event and emits the alert. See `ARCHITECTURE.md` for service responsibilities.
 
 ---
 
@@ -40,4 +42,4 @@ The correlation worker writes the proximity event as an edge in Neo4j using MERG
 
 Justifies: [ADR-003 - Neo4j for Entity Relationship Graph](../../adr/ADR-003-neo4j-entity-graph.md)
 
-"No prior relationship" is a graph absence query - checking whether an edge exists between two entity nodes. In a relational model this requires a self-join on a proximity events table, which becomes expensive as entity count grows. In Neo4j, it is a single Cypher traversal starting from an entity node, checking for the absence of a KNOWN_ASSOCIATE edge. The graph model also stores prior proximity events as PROXIMITY_EVENT edges with timestamp and location properties, making the relationship history queryable directly.
+"No prior relationship" is a graph absence query — checking whether a `KNOWN_ASSOCIATE` edge exists between two entity nodes. In a relational model this requires a self-join on a proximity events table that grows expensive as entity count increases. In Neo4j it is a single Cypher traversal from an entity node. The graph also stores proximity evidence as `PROXIMITY_EVENT` edges with episode metadata, making relationship history directly queryable from the investigation panel.

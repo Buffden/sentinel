@@ -24,11 +24,11 @@ Use TimescaleDB (PostgreSQL extension) as the position history store. The hypert
 
 ## Reasoning
 
-**Query shape matches hypertable sharding.** TimescaleDB's hypertables partition data automatically by time. Combined with a geo-cell prefix on the partition key, queries for "entities in region R during window T1–T2" hit a small, predictable set of chunks rather than scanning the full table.
+**Query shape matches hypertable sharding.** TimescaleDB's hypertables partition data automatically by time. Within each time chunk, a `geo_cell` index narrows spatial queries — queries for "entities in region R during window T1–T2" use chunk exclusion on time and index scanning on geo_cell. `geo_cell` is an indexed column, not a partition dimension.
 
 **SQL with geospatial extensions.** PostGIS integrates directly with TimescaleDB, giving full geospatial query capability (bounding-box filters, distance calculations) without a separate geo-indexing service.
 
-**`observed_at` as the partition column.** TimescaleDB requires a TIMESTAMPTZ column to partition on — it cannot partition on BIGINT. `observed_at` is computed at ingest as `to_timestamp(timestamp_ms / 1000.0)`. `timestamp_ms` is kept as source metadata and the idempotency key component. A pre-bucketed `time_bucket` column stored alongside the data would be redundant — TimescaleDB's `time_bucket()` function operates on `observed_at` at query time.
+**`observed_at` as the partition column.** Sentinel partitions on `observed_at TIMESTAMPTZ` for clearer time semantics and convenient time-oriented querying. `observed_at` is computed at ingest as `to_timestamp(timestamp_ms / 1000.0)`. `timestamp_ms` is kept as source metadata and the idempotency key component. A pre-bucketed `time_bucket` column stored alongside the data would be redundant — TimescaleDB's `time_bucket()` function operates on `observed_at` at query time.
 
 **Route deviation uses reference routes, not continuous aggregates.** The `route_baseline` continuous aggregate was originally planned here but dropped. Averaging lat/lon per entity per 1-hour bucket does not produce a meaningful route corridor — the average of A→B→C positions lands somewhere in the middle of the route. Statistical route modeling is deferred to future work. Route deviation in v1 uses a static `reference_routes` table seeded from the synthetic generator's known route definition, giving deterministic and injectable anomalies.
 

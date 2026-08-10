@@ -59,8 +59,7 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 - [ ] On each event:
   - Look up entity in `route_references` table — if no row: skip (real ADS-B/AIS with no assigned route)
   - Fetch `route_reference_points` for that `route_id`
-  - Find the nearest waypoint by Haversine distance
-  - Find the nearest route **segment** (not nearest waypoint) by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]); if the perpendicular foot falls outside the segment, use the distance to the nearer endpoint
+  - Find the nearest route segment by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]); if the perpendicular foot falls outside the segment, use the distance to the nearer endpoint
   - If `deviation_metres > corridor_threshold_metres`: publish `OUT_OF_RANGE` to `deviation.candidates` with `nearest_segment_index` (index of segment start) and `deviation_metres`
   - Otherwise: publish `IN_RANGE` to `deviation.candidates` (every in-range ping — stateless; no `BACK_IN_RANGE`)
 - [ ] Does not write to Redis, Neo4j, or the `alerts` topic

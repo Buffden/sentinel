@@ -50,7 +50,8 @@ docker compose up -d        # Start all backing services
 
 ### Naming
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
-- Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere. All timestamps are source event time, not processing time.
+- Idempotency: all durable/replay-sensitive writes have deterministic idempotency semantics. Position writes use `{entity_id}:{timestamp_ms}` (source event time); pair-based writes use `{min(a,b)}:{max(a,b)}:{episode_start_ms}`; alert writes use `{entity_id}:{alert_type}:{window_start_ms}`. See DATA_MODEL.md for each store's mechanism.
+- Event time vs processing time: episode anchors (`episode_start_ms`), correlation window anchors (`resumed_at_ms`, `dark_since_ms`), replay guards (`last_processed_ms`), and deterministic identifiers (`alert_id`, `idempotency_key`) use source event time. Purely operational/audit timestamps (`detected_at` when persisting an alert, `created_at`, `updated_at`) may use processing time. See DATA_MODEL.md for per-field details.
 - Kafka topics: `{source}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
 - Redis keys and channels: see `docs/DATA_MODEL.md` — Redis section is the canonical reference for key schemas, TTLs, writers, and readers
 

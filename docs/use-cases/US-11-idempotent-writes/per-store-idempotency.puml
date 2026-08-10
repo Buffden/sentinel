@@ -60,7 +60,7 @@ end note
 
 CorrWorker -> CorrWorker : pair_key = min(a,b) + ':' + max(a,b)\nidempotency_key = pair_key + ':' + episode_start_ms
 
-CorrWorker -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $key\n}]->(b)\nON CREATE SET e.episode_start_ms = $episode_start_ms,\n  e.distance_at_detection = $dist, e.lat = $lat, e.lon = $lon\nON MATCH SET e.last_seen_ms = $now_ms
+CorrWorker -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $key\n}]->(b)\nON CREATE SET e.episode_start_ms = $episode_start_ms,\n  e.distance_at_detection = $dist, e.lat = $lat, e.lon = $lon\nON MATCH SET e.last_seen_ms = $event_timestamp_ms
 
 note right of Neo4j
   MERGE matches on idempotency_key.

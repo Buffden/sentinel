@@ -22,15 +22,14 @@ A Node.js service that reads the live position stream, writes proximity evidence
   - For each pair within `PROXIMITY_THRESHOLD_METRES`:
     - **Canonicalize pair:** `pair_key = min(entity_id, candidate_id) + ':' + max(entity_id, candidate_id)`
     - `HGETALL proximity-episode:{pair_key}` — if key exists (active episode):
-      - `HSET proximity-episode:{pair_key} last_seen_ms {now}` + refresh TTL
-      - Optionally update Neo4j edge `min_distance_metres` if this ping is closer
-      - Skip: do NOT publish another `proximity.candidates` event
+      - If `candidate_published == 0` (crash recovery — Neo4j written but Kafka publish failed): retry steps 4–5 below before refreshing TTL
+      - If `candidate_published == 1`: `HSET proximity-episode:{pair_key} last_seen_ms {event.timestamp_ms}` + refresh TTL; optionally update Neo4j edge `min_distance_metres` if this ping is closer; do NOT publish another `proximity.candidates` event
     - If no active episode:
       - Query Neo4j for a `KNOWN_ASSOCIATE` edge between the two entities
       - If none (unscheduled new episode):
-        1. `episode_start_ms = now`
+        1. `episode_start_ms = event.timestamp_ms` (source event time — not wall clock)
         2. **Write Neo4j first:** `MERGE PROXIMITY_EVENT` with `idempotency_key = {pair_key}:{episode_start_ms}`, `episode_start_ms`, `lat`, `lon`, `distance_at_detection`
-        3. If Neo4j succeeds: `HSET proximity-episode:{pair_key} episode_start_ms {episode_start_ms} last_seen_ms {now} candidate_published 0` + `EXPIRE PROXIMITY_EPISODE_GAP_MS / 1000`
+        3. If Neo4j succeeds: `HSET proximity-episode:{pair_key} episode_start_ms {episode_start_ms} last_seen_ms {event.timestamp_ms} candidate_published 0` + `EXPIRE PROXIMITY_EPISODE_GAP_MS / 1000`
         4. Publish `proximity.candidates` to Kafka: `{ pair_key, entity_a_id: min, entity_b_id: max, episode_start_ms, lat, lon, distance_at_detection }`
         5. If Kafka publish succeeds: `HSET proximity-episode:{pair_key} candidate_published 1`
         6. If Kafka publish fails: leave `candidate_published=0`; on the next ping for this pair, re-attempt the publish before refreshing TTL

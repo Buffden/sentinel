@@ -17,16 +17,17 @@ Kafka -> Consumer : consume event\n{ entity_id, lat, lon, timestamp_ms }
 Consumer -> Consumer : compute H3 cell IDs:\nhistory_cell = h3.latLngToCell(lat, lon, HISTORY_H3_RESOLUTION)\nlive_cell    = h3.latLngToCell(lat, lon, LIVE_H3_RESOLUTION)
 
 note over Consumer
-  HISTORY_H3_RESOLUTION (e.g. resolution 5, ~252 km²):
+  HISTORY_H3_RESOLUTION — configurable:
     used for TimescaleDB geo_cell index column.
     Larger cells = fewer distinct values = better index selectivity
     for bounding-box queries over historical windows.
-  LIVE_H3_RESOLUTION (e.g. resolution 7, ~5 km²):
-    used for Redis sorted sets in the Correlation Worker.
+  LIVE_H3_RESOLUTION — configurable, tuned independently:
+    used for Redis sorted sets (geo-cell proximity index).
     Smaller cells = tighter spatial locality
     for proximity k-ring expansion.
-  If HISTORY_H3_RESOLUTION == LIVE_H3_RESOLUTION,
-  only one cell ID is computed (same value reused).
+  If both resolutions are equal, only one cell ID is computed.
+  Tune both during implementation based on entity density
+  and PROXIMITY_THRESHOLD_METRES.
 end note
 
 Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- history_geo_cell (HISTORY_H3_RESOLUTION)\n  observed_at,     -- to_timestamp(timestamp_ms/1000.0)\n  timestamp_ms,    -- source fidelity + logical idempotency key\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, observed_at) DO NOTHING
@@ -38,7 +39,7 @@ note over TSDB
   TimescaleDB chunk exclusion applies to the time dimension only.
 end note
 
-Consumer -> GeoCell : ZADD geo-cell:{live_cell} $now_ms $entity_id
+Consumer -> GeoCell : ZADD geo-cell:{live_cell} $timestamp_ms $entity_id
 note over GeoCell
   Score = last_seen_ms.
   Correlation Worker queries with ZRANGEBYSCORE

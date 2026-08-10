@@ -1,5 +1,5 @@
 @startuml signal-correlation
-title US-06: Signal Correlation - Proximity candidate triggers supersession of existing SIGNAL_LOSS
+title US-06: Signal Correlation - Proximity candidate triggers composite if signal loss found; one composite per episode
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,64 +9,78 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nalert-state:{id}\n(hash)" as AlertState
-database "Redis\nrecent-loss:{id}\n(hash)" as RecentLoss
+database "Redis\nalert-state:{id}" as AlertState
+database "Redis\nrecent-loss:{id}" as RecentLoss
 database "Neo4j\nentity graph" as Neo4j
 
 note over Evaluator
   Runs on Kafka consume from proximity.candidates.
   Only the elected leader evaluates.
-  SIGNAL_LOSS is already emitted immediately on detection.
+  SIGNAL_LOSS was already emitted when entity went dark.
   If proximity arrives within the correlation window,
   the SIGNAL_LOSS is superseded — not suppressed.
+  Each signal-loss episode can produce at most one COMPOSITE.
 end note
 
-ProxKafka -> Evaluator : consume proximity.candidates event\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, timestamp_ms, lat, lon, distance_at_detection }
+ProxKafka -> Evaluator : consume proximity.candidates event\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
 
 note over Evaluator
-  Proximity candidate: unscheduled pair detected
-  by the Correlation Worker.
-  Known associates already filtered upstream.
   Check each entity for an active or recent signal loss.
+  Known associates already filtered upstream.
 end note
 
 Evaluator -> AlertState : HGETALL alert-state:{entity_a_id}
-AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id } or nil
+AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id, composite_issued } or nil
 
 Evaluator -> AlertState : HGETALL alert-state:{entity_b_id}
-AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id } or nil
+AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id, composite_issued } or nil
 
-alt active signal loss on entity A or B (alert-state present)
+alt active signal loss found AND composite_issued == 0
   note over Evaluator
-    Entity is currently dark. alert-state hash provides:
-    - dark_since_ms: start of the signal loss window
-    - signal_loss_alert_id: ID of the emitted SIGNAL_LOSS alert to supersede
+    Entity is currently dark and no composite issued yet.
+    alert-state provides dark_since_ms and signal_loss_alert_id.
+    Check that proximity episode_start_ms falls
+    within COMPOSITE_CORRELATION_WINDOW_MS of dark_since_ms.
   end note
-else no active signal loss - check recent-loss window
+
+  Evaluator -> Neo4j : targeted lookup for proximity episode context
+  Neo4j --> Evaluator : episode context confirmed
+
+  Evaluator -> AlertState : set composite_issued = 1
+  Evaluator -> Evaluator : -> composite emission\n(see composite-emission diagram)
+
+else no active signal loss — check recent-loss window
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_a_id}
-  RecentLoss --> Evaluator : { dark_since_ms, signal_loss_alert_id } or nil (TTL = COMPOSITE_CORRELATION_WINDOW_MS)
+  RecentLoss --> Evaluator : { dark_since_ms, resumed_at_ms, signal_loss_alert_id }\nor nil (expires after COMPOSITE_CORRELATION_WINDOW_MS)
 
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_b_id}
-  RecentLoss --> Evaluator : { dark_since_ms, signal_loss_alert_id } or nil
+  RecentLoss --> Evaluator : { dark_since_ms, resumed_at_ms, signal_loss_alert_id } or nil
 
   note over RecentLoss
     Entity resumed broadcasting but was dark recently.
     Position Consumer wrote recent-loss before deleting alert-state.
-    Still eligible for composite if within COMPOSITE_CORRELATION_WINDOW_MS.
-  end note
-end
-
-alt dark_since_ms found and episode_start_ms within loss window
-  Evaluator -> Neo4j : MATCH (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $pair_key+':'+$episode_start_ms\n}]->(b)\nRETURN e
-  Neo4j --> Evaluator : edge context { episode_start_ms, distance_at_detection }
-
-  note over Evaluator
-    Both signals confirmed.
-    Supersede the SIGNAL_LOSS and emit COMPOSITE.
-    See composite-emission diagram for the atomic transaction.
+    Key expires after COMPOSITE_CORRELATION_WINDOW_MS.
+    Its presence means the correlation opportunity is still open.
   end note
 
-  Evaluator -> Evaluator : -> atomic supersession transaction\n(composite-emission diagram)
+  alt recent-loss found AND episode_start_ms within window of resumed_at_ms
+    Evaluator -> Neo4j : targeted lookup for proximity episode context
+    Neo4j --> Evaluator : episode context confirmed
+
+    Evaluator -> RecentLoss : DEL recent-loss:{entity_id}
+
+    note over RecentLoss
+      DEL consumes the correlation opportunity.
+      Subsequent proximity events for this entity
+      find no recent-loss and produce UNSCHEDULED_PROXIMITY
+      as independent incidents — not further composites.
+    end note
+
+    Evaluator -> Evaluator : -> composite emission\n(see composite-emission diagram)
+
+  else no qualifying signal loss for either entity
+    Evaluator -> Evaluator : emit UNSCHEDULED_PROXIMITY alert
+  end
 end
 
 @enduml

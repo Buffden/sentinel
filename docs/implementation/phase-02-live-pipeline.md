@@ -45,7 +45,7 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
 - [ ] **Timestamp guard:** before writing, `HGET entity:live:{entity_id} last_seen_ms`; only proceed if `incoming.timestamp_ms >= stored value` (prevents replay or out-of-order delivery from regressing Redis state)
 - [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} live_geo_cell {live_geo_cell} entity_type {entity_type}` + TTL = 24h (stores `live_geo_cell` so the Correlation Worker can use the correct resolution for geo-cell lookups)
 - [ ] Update geo-cell spatial index using `live_geo_cell`: `ZREM geo-cell:{previous_live_geo_cell} {entity_id}` + `ZADD geo-cell:{new_live_geo_cell} {last_seen_ms} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
-- [ ] On entity resume after signal loss (first write after `alert-state` exists): write `recent-loss:{entity_id}` hash (`dark_since_ms`, `resumed_at_ms=now`, `signal_loss_alert_id`) with TTL = `COMPOSITE_CORRELATION_WINDOW_MS`; then `DEL alert-state:{entity_id}`
+- [ ] On entity resume after signal loss (first write after `alert-state` exists): write `recent-loss:{entity_id}` hash (`dark_since_ms`, `resumed_at_ms = event.timestamp_ms`, `signal_loss_alert_id`) with TTL = `COMPOSITE_CORRELATION_WINDOW_MS`; then `DEL alert-state:{entity_id}` — use source event time for `resumed_at_ms` so composite correlation windows are consistent regardless of processing latency
 - [ ] `PUBLISH position-updates {normalised_event_json}` after every write
 - [ ] `PRODUCE position.normalized` — consumed by Correlation Worker later
 - [ ] `Dockerfile` + added to `docker-compose.yml`

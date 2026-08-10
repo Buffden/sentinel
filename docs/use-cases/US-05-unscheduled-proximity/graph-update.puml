@@ -1,5 +1,5 @@
 @startuml graph-update
-title US-05: Graph Update - Proximity Event Written to Neo4j and proximity.candidates Published
+title US-05: Graph Update - Proximity Event Written to Neo4j; candidate published for unscheduled pairs
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,42 +11,41 @@ participant "Correlation\nWorker" as Correlation
 database "Neo4j\nentity graph" as Neo4j
 queue "Kafka\nproximity.candidates" as ProxKafka
 
-Correlation -> Neo4j : MERGE (a:Entity {id: $id_a})\nMERGE (b:Entity {id: $id_b})
-
-note over Neo4j
-  MERGE creates the node if absent,
-  matches it if already present.
-  Entity nodes are never duplicated.
-end note
+Correlation -> Neo4j : MERGE Entity nodes for both entities\n(creates if absent, matches if present)
 
 note over Correlation
   pair_key = min(entity_a_id, entity_b_id) + ':' + max(entity_a_id, entity_b_id)
-  episode_start_ms = from proximity-episode hash (set when episode began)
+  episode_start_ms = position event's timestamp_ms (source event time)
   idempotency_key = {pair_key}:{episode_start_ms}
-  One edge per proximity episode, not one per ping.
+  One edge per proximity episode.
 end note
 
-Correlation -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $pair_key + ':' + $episode_start_ms\n}]->(b)\nON CREATE SET\n  e.episode_start_ms = $episode_start_ms,\n  e.last_seen_ms = $now_ms,\n  e.distance_at_detection = $distance,\n  e.lat = $lat,\n  e.lon = $lon\nON MATCH SET\n  e.last_seen_ms = $now_ms,\n  e.min_distance_metres = CASE\n    WHEN $distance < e.min_distance_metres\n    THEN $distance ELSE e.min_distance_metres END
+Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\nidempotency_key = {idempotency_key}\nON CREATE: set episode_start_ms, distance_at_detection, lat, lon\nON MATCH: update last_seen_ms, min_distance_metres if closer
 
 note over Neo4j
   Idempotency key = {pair_key}:{episode_start_ms}.
   Replaying the same Kafka event matches the existing edge — no duplicate.
-  ON MATCH updates keep last_seen_ms and min_distance_metres current
-  during an ongoing episode.
+  ON MATCH updates keep last_seen_ms and min_distance_metres
+  current during an ongoing episode.
   Safe to replay from any offset.
 end note
 
-Neo4j --> Correlation : edge created or updated (no-op on idempotent replay)
+Neo4j --> Correlation : edge created or updated
 
-Correlation -> ProxKafka : publish proximity.candidates\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, timestamp_ms,\n  lat, lon, distance_at_detection }
+note over Correlation
+  Neo4j write applies to ALL close pairs
+  (unscheduled and known associates).
+  Kafka publish below applies to unscheduled pairs only.
+end note
+
+Correlation -> ProxKafka : publish proximity.candidates\n(unscheduled pairs only)\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
 
 note over ProxKafka
-  Published only on episode start (not on each ping).
-  Published only for unscheduled pairs
-  (no KNOWN_ASSOCIATE edge).
+  Published only on episode start — not on each ping.
+  Published only when no KNOWN_ASSOCIATE edge exists.
   Known associates: Neo4j edge written, no Kafka event.
-  Alert Evaluator consumes this topic
-  to emit UNSCHEDULED_PROXIMITY and COMPOSITE alerts.
+  Alert Evaluator consumes this topic to emit
+  UNSCHEDULED_PROXIMITY and COMPOSITE alerts.
   Short retention (1h) — stale candidates have no value.
 end note
 

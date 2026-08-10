@@ -23,11 +23,11 @@ As an operator, I want to receive an alert when an entity's current track diverg
 
 ## Flow Diagrams
 
-### Baseline Computation
+### Reference Route Setup
 
-![Baseline Computation](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/baseline-computation.svg)
+![Reference Route Setup](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/baseline-computation.svg)
 
-Position history written to TimescaleDB is rolled up into a continuous aggregate that materialises the expected route per entity per time bucket.
+At startup, the synthetic load generator seeds reference routes into TimescaleDB. Each synthetic entity has one assigned route: a header record with a corridor threshold and an ordered list of waypoints defining the expected path. Real ADS-B/AIS entities have no assigned route and are skipped by the Deviation Detector.
 
 ### Deviation Detection
 

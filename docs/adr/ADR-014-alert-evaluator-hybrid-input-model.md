@@ -41,20 +41,7 @@ A new Node.js service, `services/deviation-detector/`, is introduced with a sing
 | Reads from TimescaleDB | `route_reference_points` (via `route_references`) — reference route segments for the incoming entity (synthetic entities only); see ADR-015 |
 | Publishes to | `deviation.candidates` |
 
-**Event schema on `deviation.candidates`:**
-
-```json
-{
-  "entity_id":              "string",
-  "timestamp_ms":           "number",
-  "status":                 "OUT_OF_RANGE | IN_RANGE",
-  "current_position":       { "lat": "number", "lon": "number" },
-  "nearest_segment_index":  "number",
-  "deviation_metres":       "number"
-}
-```
-
-`nearest_segment_index` (index of the first waypoint of the nearest route segment) and `deviation_metres` (minimum perpendicular distance to that segment) are omitted on `IN_RANGE` events. `BACK_IN_RANGE` does not exist — every in-range ping emits `IN_RANGE`.
+The `deviation.candidates` event schema is defined in `DATA_MODEL.md` (Kafka Event Schemas section).
 
 **Contract:**
 

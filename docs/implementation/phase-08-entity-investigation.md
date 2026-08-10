@@ -15,7 +15,7 @@ Operators can click any entity or alert and open an evidence panel that assemble
 
 - [ ] `GET /entities/:entity_id` — fetch current live state from `entity:live:{entity_id}` Redis hash
 - [ ] `GET /entities/:entity_id/history` — fetch position track from `position_history` (TimescaleDB), bounded by time range query params
-- [ ] `GET /entities/:entity_id/alerts` — fetch alert history for entity from `alerts` table, sorted by `detected_at DESC`
+- [ ] `GET /entities/:entity_id/alerts` — fetch alert history for entity from `alerts` table where `entity_id = $1 OR counterparty_entity_id = $1`, sorted by `detected_at DESC`; this ensures proximity/composite alerts appear for both participating entities
 - [ ] `GET /alerts/:alert_id/evidence` — assemble evidence panel in parallel:
   - Redis: `HGETALL entity:live:{entity_id}` — is the entity still in the anomalous state right now?
   - TimescaleDB: `SELECT * FROM alerts WHERE alert_id = $1` — full alert record and payload

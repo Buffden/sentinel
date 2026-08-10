@@ -53,8 +53,10 @@ Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically 
   - Primary key on `(route_id, sequence_no)`
   - Both tables seeded from synthetic generator route definition at startup
 - [ ] `alerts` table
-  - Columns: `alert_id` (PK), `entity_id`, `entity_type`, `alert_type`, `priority`, `status` (NEW | ACKNOWLEDGED | RESOLVED | SUPERSEDED), `superseded_by` (nullable FK → alerts.alert_id), `payload` (JSONB), `detected_at`, `updated_at`, `acknowledged_at`, `acknowledged_by`, `resolved_at`, `resolved_by`
-  - Index on `(entity_id, detected_at DESC)` — investigation panel
+  - Columns: `alert_id` (PK), `entity_id`, `counterparty_entity_id` (nullable — second participant for UNSCHEDULED_PROXIMITY and COMPOSITE), `entity_type`, `alert_type`, `priority`, `status` (NEW | ACKNOWLEDGED | RESOLVED | SUPERSEDED), `superseded_by` (nullable FK → alerts.alert_id), `payload` (JSONB), `detected_at`, `updated_at`, `acknowledged_at`, `acknowledged_by`, `resolved_at`, `resolved_by`
+  - Full schema in DATA_MODEL.md
+  - Index on `(entity_id, detected_at DESC)` — find alerts by primary entity
+  - Index on `(counterparty_entity_id, detected_at DESC)` — find alerts by counterparty (proximity/composite)
   - Index on `(status, detected_at DESC)` — operator alert feed
   - Index on `(alert_type, detected_at DESC)` — alert type filter
 - [ ] `users` table
@@ -66,8 +68,8 @@ Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically 
 ### Neo4j Schema
 
 - [ ] Uniqueness constraint on `Entity` nodes: `entity_id`
-- [ ] Index on `PROXIMITY_EVENT` edges: `idempotency_key`
-- [ ] Index on `PROXIMITY_EVENT` edges: `timestamp_ms`
+- [ ] Index on `PROXIMITY_EVENT` edges: `idempotency_key` — supports MERGE deduplication and lookup by episode
+- [ ] Index on `PROXIMITY_EVENT` edges: `episode_start_ms` — supports investigation time-range queries
 
 ## Done When
 
