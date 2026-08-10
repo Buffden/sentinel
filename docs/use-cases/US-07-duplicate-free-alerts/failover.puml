@@ -1,5 +1,5 @@
 @startuml failover
-title US-07: Failover - Follower Takes Over When Leader Crashes
+title US-07: Failover - Leader crash, clean shutdown (compare-before-DEL), and follower takeover
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -12,16 +12,21 @@ participant "Evaluator\nInstance B\n(follower)" as B
 database "Redis\nalert-evaluator:leader" as Redis
 queue "Kafka\nalerts" as Kafka
 
+== Normal operation - compare-and-renew ==
+
 A -> Kafka : emitting alerts normally
-A -> Redis : renewing lease (heartbeat)
+A -> Redis : SET alert-evaluator:leader $instance_a XX PX $TTL_MS\n(compare-and-renew: SET only if key exists AND value unchanged)
+Redis --> A : OK (lease renewed)
 
 note over A
-  Instance A crashes.
-  Lease renewal stops.
-  TTL counts down.
+  Compare-and-renew prevents a lagging slow instance
+  from extending a lease it no longer owns.
+  SET XX fails if the key has been acquired by a new leader.
 end note
 
-A ->x A : crash
+== Scenario 1: Leader crash (ungraceful) ==
+
+A ->x A : crash — lease renewal stops — TTL counts down
 
 loop follower polling
   B -> Redis : GET alert-evaluator:leader
@@ -30,21 +35,40 @@ end
 
 note over Redis
   TTL expires.
-  Key is automatically deleted.
+  Key is automatically deleted by Redis.
 end note
 
 Redis -> Redis : key expired and deleted
 
 B -> Redis : SET alert-evaluator:leader $instance_b NX PX $TTL_MS
-Redis --> B : OK (lease acquired - Instance B is now leader)
+Redis --> B : OK (lease acquired — Instance B is now leader)
 
 note over B
   Failover complete within one TTL window.
   No manual intervention required.
-  No duplicate alerts emitted during transition
-  as B was not evaluating while A held the lease.
+  No duplicate alerts: B was not evaluating while A held the lease.
+  Deterministic alert_id + ON CONFLICT DO NOTHING handles
+  the case where A published to Kafka before crashing
+  but did not commit the Kafka offset — B re-processes safely.
 end note
 
 B -> Kafka : emit alerts (new leader)
+
+== Scenario 2: Clean shutdown (compare-before-DEL) ==
+
+note over A
+  Instance A is shutting down gracefully.
+  Must NOT delete the lease if a new leader
+  has already acquired it (race window).
+end note
+
+A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen DEL('alert-evaluator:leader') end
+Redis --> A : 1 (deleted own lease) or 0 (new leader holds it — skip DEL)
+
+note over A
+  Atomic compare-before-DEL via Lua script.
+  If B already acquired the lease, DEL is skipped.
+  B continues uninterrupted.
+end note
 
 @enduml

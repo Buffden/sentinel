@@ -45,4 +45,6 @@ Shows why a naive check-then-emit pattern fails: two instances checking simultan
 
 Justifies: [ADR-005 - Leader Election for Alert Evaluator](../../adr/ADR-005-leader-election-alert-evaluator.md)
 
-Deduplication cannot be solved at the application level without coordination. A naive check-then-emit pattern (check Redis for "has this alert been sent", then emit if not) introduces a check-then-act race condition: two instances checking simultaneously both see "not emitted" and both emit. Leader election removes the race by ensuring only one instance is ever the active writer at any time. Follower instances remain on standby and take over if the leader fails, without any gap in evaluation.
+Deduplication cannot be solved at the application level without coordination. A naive check-then-emit pattern introduces a check-then-act race condition: two instances checking simultaneously both see "not emitted" and both emit. Leader election removes the race by ensuring only one instance is ever the active writer at any time. Follower instances remain on standby and take over if the leader fails.
+
+Lease release safety is critical: when the leader shuts down, it must compare ownership before deleting the lease key (compare-before-DEL) so it cannot accidentally delete a lease a new leader has already acquired during a concurrent failover. Lease renewal is ownership-safe: compare-and-renew (`SET XX PX`) extends only when the instance still holds the key.

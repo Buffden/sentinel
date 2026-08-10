@@ -19,12 +19,17 @@ Prove that leader election, alert state management, and entity TTL expiry all wo
 
 ## Validate
 
-- Two Node.js processes both attempt to acquire the `alert-evaluator:leader` key simultaneously - exactly one wins (US-07)
+- Two Node.js processes both attempt to acquire the `alert-evaluator:leader` key simultaneously — exactly one wins (US-07)
 - When the leader process is killed, the TTL expires and the follower acquires the lease within one TTL window (US-07)
-- Lease renewal works: a live leader keeps the key alive across multiple TTL windows
-- Alert state key `alert-state:{entity_id}` (value = `dark_since_ms`) prevents re-emission across multiple evaluation cycles while the entity stays dark, and is correctly deleted by the position consumer (not the evaluator) when the entity comes back online (US-03)
-- Entity live key `entity:live:{entity_id}` expires automatically after **24h** (safety-net TTL — not used for alert detection or dashboard cleanup; validates that ghost keys do not accumulate permanently)
-- Race condition test: 10 simultaneous lease acquisition attempts result in exactly 1 winner (US-07)
+- Lease renewal works: a live leader keeps the key alive across multiple TTL windows using compare-and-renew (`SET XX PX`)
+- Lease renewal correctly fails when the key has been acquired by a new leader (prevents a lagging slow leader from extending a stale lease)
+- Lease release on clean shutdown uses compare-before-DEL (Lua script): does NOT delete the key if a new leader has already acquired it
+- **Leadership transition scenario:** messages arrive on `proximity.candidates` during the gap between the old leader stopping consumption and the new leader starting; verify the new leader processes them and emits exactly one alert per event, not zero or two
+- **Crash-after-process scenario:** leader processes an event and publishes to Kafka `alerts` but crashes before committing the Kafka offset; new leader re-processes the event; verify `ON CONFLICT DO NOTHING` prevents duplicate alert insertion
+- **Lease loss mid-evaluation:** leader starts evaluating a signal loss batch, lease expires before the batch completes; verify the leader stops and the new leader re-evaluates without duplicate alerts
+- Alert state key `alert-state:{entity_id}` (hash: `dark_since_ms`, `signal_loss_alert_id`) prevents re-emission across evaluation cycles; deleted by position consumer (not evaluator) when entity resumes (US-03)
+- Entity live key `entity:live:{entity_id}` expires automatically after **24h** (safety-net TTL — not used for alert detection; validates ghost keys do not accumulate permanently)
+- Race condition test: 10 simultaneous lease acquisition attempts result in exactly 1 winner
 
 ---
 
@@ -32,6 +37,9 @@ Prove that leader election, alert state management, and entity TTL expiry all wo
 
 - Race condition test passes: 10 simultaneous acquisition attempts result in exactly 1 winner
 - Failover test passes: leader killed, follower takes over within configured TTL
+- Compare-before-DEL test passes: slow-shutting leader does NOT delete the new leader's lease
+- Compare-and-renew test passes: slow leader fails renewal after failover; does NOT extend the new leader's lease
+- Leadership transition test: no event lost, no duplicate alert during leader changeover
 - TTL value is chosen and documented with reasoning (trade-off: shorter TTL = faster failover but more renewal overhead)
 - Alert suppression test passes: simulated evaluation loop emits exactly 1 alert for a signal loss event that spans 10 evaluation cycles
 - Entity expiry test passes: key disappears automatically after the configured TTL with no delete call
