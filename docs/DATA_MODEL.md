@@ -191,7 +191,7 @@ Current position and liveness state for each tracked entity.
 | `last_seen_ms` | String (int) | Unix ms of the last received ping from source telemetry |
 
 - **Writer:** Position consumer on every normalised ping
-- **Readers:** Alert evaluator (scheduled scan for signal loss detection), API (initial map load, investigation panel, scope geo-check)
+- **Readers:** Alert evaluator (scheduled scan for signal loss detection), Correlation Worker (pairwise distance computation), API (initial map load, investigation panel, scope geo-check)
 - **TTL:** `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only; not used for alert detection
 
 ---
@@ -247,7 +247,7 @@ Broadcast channel for live position events. Every normalised ping is published h
 
 ## Kafka Event Schemas
 
-TypeScript field definitions for these schemas live in a shared internal package imported by the ingestion poller, position consumer, and API. See ADR-013.
+TypeScript field definitions for these schemas live in a shared internal package imported by the ingestion poller, position consumer, correlation worker, deviation detector, alert evaluator, and API. See ADR-013.
 
 ---
 
