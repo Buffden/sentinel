@@ -18,7 +18,7 @@ The store needs to handle high ingest throughput, efficient time-range queries, 
 
 ## Decision
 
-Use TimescaleDB (PostgreSQL extension) as the position history store, sharded on a composite key of geo-cell and time-bucket.
+Use TimescaleDB (PostgreSQL extension) as the position history store. The hypertable is partitioned by `observed_at TIMESTAMPTZ` (daily chunks). `geo_cell` is an indexed query column, not a partition dimension.
 
 ---
 
@@ -28,7 +28,9 @@ Use TimescaleDB (PostgreSQL extension) as the position history store, sharded on
 
 **SQL with geospatial extensions.** PostGIS integrates directly with TimescaleDB, giving full geospatial query capability (bounding-box filters, distance calculations) without a separate geo-indexing service.
 
-**Continuous aggregates.** TimescaleDB supports materialised time-bucket rollups. The `route_baseline` continuous aggregate is defined over `position_history`, materialising the average track per entity per time bucket (1-hour buckets, 30-day look-back window). This serves route deviation detection (US-04) without scanning raw position rows on every evaluation cycle. The aggregate is refreshed automatically by TimescaleDB in the background — no service owns or writes to it directly.
+**`observed_at` as the partition column.** TimescaleDB requires a TIMESTAMPTZ column to partition on — it cannot partition on BIGINT. `observed_at` is computed at ingest as `to_timestamp(timestamp_ms / 1000.0)`. `timestamp_ms` is kept as source metadata and the idempotency key component. A pre-bucketed `time_bucket` column stored alongside the data would be redundant — TimescaleDB's `time_bucket()` function operates on `observed_at` at query time.
+
+**Route deviation uses reference routes, not continuous aggregates.** The `route_baseline` continuous aggregate was originally planned here but dropped. Averaging lat/lon per entity per 1-hour bucket does not produce a meaningful route corridor — the average of A→B→C positions lands somewhere in the middle of the route. Statistical route modeling is deferred to future work. Route deviation in v1 uses a static `reference_routes` table seeded from the synthetic generator's known route definition, giving deterministic and injectable anomalies.
 
 **Operational familiarity.** PostgreSQL tooling (psql, pg_dump, standard JDBC/pgx drivers) is widely understood. Cassandra requires a separate mental model and operational runbook.
 
@@ -54,5 +56,6 @@ Use TimescaleDB (PostgreSQL extension) as the position history store, sharded on
 ## Consequences
 
 - TimescaleDB runs as a PostgreSQL extension  - Docker image is `timescale/timescaledb-ha`
-- Geo-cell sharding key design is a separate decision  - see ADR-006
-- The `route_baseline` continuous aggregate is defined in the schema migration alongside `position_history`. Its schema and bucket configuration are documented in DATA_MODEL.md
+- Geo-cell is an indexed query column on `position_history` — not a partition dimension. The hypertable partitions on `observed_at` only. See ADR-006 for geo-cell design rationale.
+- `route_references` and `route_reference_points` tables replace the `route_baseline` continuous aggregate. Their schema is documented in DATA_MODEL.md and ADR-015. Seeded from the synthetic generator at startup.
+- `observed_at` and `timestamp_ms` are both stored. `observed_at` is the partition/query column; `timestamp_ms` is the idempotency key component and source fidelity record.

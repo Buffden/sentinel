@@ -22,14 +22,15 @@ end note
 
 H3 --> Caller : [ "8a2a1072b59ffff", "8a2a1072b4fffff", ... ]
 
-Caller -> TSDB : SELECT entity_id, lat, lon, timestamp_ms\nFROM position_history\nWHERE geo_cell IN ($cell_ids)\nAND time_bucket BETWEEN $t1 AND $t2
+Caller -> TSDB : SELECT entity_id, lat, lon, observed_at\nFROM position_history\nWHERE geo_cell IN ($cell_ids)\nAND observed_at BETWEEN $t1 AND $t2
 
 note over TSDB
-  Chunk exclusion applies:
-  only chunks matching the geo_cell
-  and time_bucket range are scanned.
-  Unrelated spatial regions and
-  time windows are never touched.
+  Hypertable chunk exclusion applies to observed_at.
+  Only chunks whose time range overlaps [$t1, $t2] are scanned.
+  geo_cell IN ($cell_ids) index filter further narrows rows
+  within the selected chunks.
+  geo_cell is an indexed column, not a partition dimension.
+  Unrelated time windows are excluded by chunk pruning alone.
 end note
 
 TSDB --> Caller : position rows for entities\nin region R during window T
