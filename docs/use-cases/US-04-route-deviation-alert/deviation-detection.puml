@@ -9,10 +9,10 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nposition.normalized" as NormKafka
 participant "Deviation\nDetector" as Detector
-database "TimescaleDB\nroute_baseline" as Baseline
+database "TimescaleDB\nroute_reference_points" as RoutePoints
 queue "Kafka\ndeviation.candidates" as DevCandKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\ndeviation-counter:{id}" as DevState
+database "Redis\ndeviation-state:{id}\n(hash)" as DevState
 queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
 database "TimescaleDB\nalerts table" as TSDB
@@ -21,32 +21,50 @@ actor Operator
 
 NormKafka -> Detector : consume position event\n{ entity_id, lat, lon, timestamp_ms }
 
-Detector -> Baseline : SELECT avg_lat, avg_lon, stddev_metres\nWHERE entity_id = ? AND time_bucket = current_bucket
-Baseline --> Detector : expected position range
+Detector -> RoutePoints : SELECT sequence_index, lat, lon, tolerance_metres\nFROM route_reference_points\nJOIN route_references USING (route_id)\nWHERE entity_id = $entity_id
+RoutePoints --> Detector : ordered waypoint list\n(or empty if no reference route)
 
-Detector -> Detector : compute Haversine distance\nbetween current and baseline position
+alt no reference route found
+  Detector -> Detector : skip — entity has no reference route\nno event published
+end
 
-alt distance > ROUTE_DEVIATION_THRESHOLD_METRES
-  Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, baseline_position, deviation_metres }
-else back within threshold after out-of-range sequence
-  Detector -> DevCandKafka : publish BACK_IN_RANGE\n{ entity_id, timestamp_ms, status: BACK_IN_RANGE,\n  current_position }
+Detector -> Detector : find nearest waypoint\ncompute Haversine distance to each waypoint
+
+alt distance to nearest > waypoint.tolerance_metres
+  Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, deviation_metres,\n  nearest_waypoint_index }
+else within threshold
+  Detector -> DevCandKafka : publish IN_RANGE\n{ entity_id, timestamp_ms, status: IN_RANGE,\n  current_position }
 end
 
 note over Detector
+  Stateless: no counter, no alert suppression.
   Detector owns comparison only.
-  It does not apply DEVIATION_SUSTAINED_PINGS.
-  Counter and suppression logic belong
+  Counter and alert emission belong
   to the Alert Evaluator (ADR-014).
 end note
 
 DevCandKafka -> Evaluator : consume deviation.candidates event
 
-alt status = OUT_OF_RANGE
-  Evaluator -> DevState : INCR deviation-counter:{entity_id}
-  DevState --> Evaluator : counter value
+note over Evaluator
+  Replay guard: check last_processed_ms in deviation-state hash.
+  If event.timestamp_ms <= last_processed_ms: skip (out-of-order replay).
+end note
 
-  alt counter >= DEVIATION_SUSTAINED_PINGS
-    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres, sustained_cycles }
+Evaluator -> DevState : HGET deviation-state:{entity_id} last_processed_ms
+DevState --> Evaluator : $last_processed_ms (or nil)
+
+alt event.timestamp_ms <= last_processed_ms
+  Evaluator -> Evaluator : skip — out-of-order or duplicate replay
+end
+
+alt status = OUT_OF_RANGE
+  Evaluator -> DevState : HINCRBY deviation-state:{entity_id} count 1\nHSET last_processed_ms $timestamp_ms\n(HSET episode_start_ms $timestamp_ms ON FIRST increment)
+  DevState --> Evaluator : updated count
+
+  Evaluator -> DevState : EXPIRE deviation-state:{entity_id}\n2 × SIGNAL_LOSS_THRESHOLD_MS
+
+  alt count >= DEVIATION_SUSTAINED_PINGS
+    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, deviation_metres,\n  nearest_waypoint_index, sustained_cycles,\n  episode_start_ms }
     Alerts -> API : consume alert
     API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
     note over API
@@ -57,15 +75,15 @@ alt status = OUT_OF_RANGE
     end note
     API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
     Dashboard --> Operator : route deviation alert displayed\nstatus: NEW
-  else counter < DEVIATION_SUSTAINED_PINGS
+  else count < DEVIATION_SUSTAINED_PINGS
     Evaluator -> Evaluator : no alert yet - transient deviation
   end
 
-else status = BACK_IN_RANGE
-  Evaluator -> DevState : DEL deviation-counter:{entity_id}
+else status = IN_RANGE
+  Evaluator -> DevState : DEL deviation-state:{entity_id}
   note over Evaluator
-    Counter reset.
-    No alert emitted on BACK_IN_RANGE.
+    State reset.
+    No alert emitted on IN_RANGE.
   end note
 end
 
