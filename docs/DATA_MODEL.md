@@ -227,7 +227,7 @@ Current position and liveness state for each tracked entity.
 
 ### `geo-cell:{h3_cell_id}` (sorted set)
 
-Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is a sorted set of `entity_id` members with score = `last_seen_ms`.
+Spatial index for live proximity candidate scoping. One key per occupied H3 cell at `LIVE_H3_RESOLUTION`; value is a sorted set of `entity_id` members with score = `last_seen_ms`.
 
 - **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from `live_geo_cell` field in `entity:live:{entity_id}` hash before it is overwritten)
 - **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - LIVE_PROXIMITY_MAX_AGE_MS)} +inf` for the entity's cell and all cells within the computed k-ring; returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
@@ -246,7 +246,7 @@ In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a 
 
 | Field | Type | Description |
 |---|---|---|
-| `dark_since_ms` | String (int) | Unix ms when the entity was first detected as dark |
+| `dark_since_ms` | String (int) | Unix ms of the entity's last received ping — copied from `entity:live:{entity_id}.last_seen_ms` at detection time; anchors the composite correlation window in source event time |
 | `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this dark episode |
 | `composite_issued` | String (`0` or `1`) | Whether a COMPOSITE alert has been issued for this signal-loss episode — prevents issuing a second COMPOSITE if a subsequent proximity event arrives for the same episode |
 

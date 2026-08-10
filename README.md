@@ -1,8 +1,9 @@
 # Sentinel
 
-> **Status: Architecture and planning phase — implementation in progress.**
+> **Status: Architecture and planning complete — implementation not started.**
 > No services have been built yet. `docker compose up -d` will not work until Phase 01 is complete.
-> See [`docs/implementation/`](docs/implementation/) for the phased build plan.
+>
+> **Build order:** Phase 01 Infra + Schema → Phase 02 Live Pipeline → Phase 03 Auth + Workspace → Phase 04 Alert Pipeline → Phase 05 Correlation Worker → Phase 06 Composite Alerts → Phase 07 Alert Lifecycle → Phase 08 Entity Investigation → Phase 09 Observability
 
 A real-time geospatial entity-tracking and anomaly-detection platform. Sentinel ingests live positional telemetry from aircraft (ADS-B) and vessels (AIS), correlates entities across time and space, and surfaces meaningful anomalies  - signal loss, route deviation, unexpected proximity between previously unrelated entities  - on a live map dashboard.
 
@@ -113,7 +114,7 @@ cd sentinel
 docker compose up -d
 ```
 
-> Service-specific startup instructions will be added to each service's README as phases are completed. See [`docs/implementation/`](docs/implementation/) for the build plan.
+> Service-specific startup instructions will be added to each service's README as phases are completed.
 
 ---
 
