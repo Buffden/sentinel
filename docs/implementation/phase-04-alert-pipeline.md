@@ -54,7 +54,10 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 
 - [ ] Consumer group: `api`; consume `alerts` topic
 - [ ] `INSERT INTO alerts ... ON CONFLICT (alert_id) DO NOTHING` — idempotent
-- [ ] After insert: push alert to scoped WebSocket connections
+- [ ] After insert: `PUBLISH alert-events {alert_json}` to Redis pub/sub
+  - Do not push directly to WebSocket from the consuming instance — only one instance receives each Kafka alert, but all instances hold WebSocket connections
+- [ ] On startup: subscribe to Redis `alert-events` channel (alongside `position-updates`)
+- [ ] On `alert-events` message: fan out to scope-matched WebSocket connections
   - Scope filter: `scope.geo_region` bounds + `scope.entity_types` + `scope.alert_types`
 - [ ] `GET /alerts` — list alerts with filters: `status`, `entity_id`, `alert_type`; paginated; sorted by `detected_at DESC`
 - [ ] `GET /alerts/:alert_id` — single alert detail including full `payload` JSONB

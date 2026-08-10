@@ -59,6 +59,7 @@ docker compose up -d        # Start all backing services
   - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
   - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
   - `position-updates` - Redis pub/sub channel; position consumer publishes every normalised position event here after writing to the hash; all API instances subscribe and fan out to scoped WebSocket connections
+  - `alert-events` - Redis pub/sub channel; the API instance that consumes an alert from Kafka publishes it here after writing to TimescaleDB; all API instances subscribe and fan out to scope-matched WebSocket connections — mirrors `position-updates` to solve the Kafka consumer group fan-out problem (only one instance receives each Kafka alert, but all instances must be able to push it to their WebSocket connections)
 
 ### Code style
 - Prefer explicit over clever  - this code will be read in an interview setting
@@ -72,7 +73,7 @@ docker compose up -d        # Start all backing services
 
 ### Service contracts
 
-- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; scopes proximity candidates to the incoming entity's H3 cell + k-ring(1) neighbours by reading `geo-cell:{h3_cell_id}` sets from Redis (not a full `entity:live:*` scan); fetches candidate positions from `entity:live:{entity_id}`; writes PROXIMITY_EVENT edges to Neo4j; publishes unscheduled proximity pairs to `proximity.candidates` (see ADR-014) — does not write to TimescaleDB or Redis
+- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; scopes proximity candidates to the incoming entity's H3 cell + k-ring(1) neighbours by reading `geo-cell:{h3_cell_id}` sets from Redis (not a full `entity:live:*` scan); fetches candidate positions from `entity:live:{entity_id}`; **write order: Neo4j MERGE first, then Kafka publish** — if Neo4j fails, skip Kafka publish; if Kafka publish fails after retries, log and continue (the Neo4j edge is durable; re-detection occurs on next position ping); does not write to TimescaleDB or Redis
 - Deviation detector Kafka consumer group: `deviation-detector`; consumes `position.normalized`; reads `route_baseline` from TimescaleDB; publishes `OUT_OF_RANGE` / `BACK_IN_RANGE` events to `deviation.candidates` — does not write to Redis, Neo4j, or the `alerts` topic
 
 ### Commits

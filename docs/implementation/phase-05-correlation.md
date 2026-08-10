@@ -20,7 +20,10 @@ A Node.js service that reads the live position stream, writes proximity evidence
   - Compute Haversine distances between the incoming entity and each candidate
   - For each pair within `PROXIMITY_THRESHOLD_METRES`:
     - Query Neo4j for a `KNOWN_ASSOCIATE` edge between the two entities
-    - If none: `MERGE` a `PROXIMITY_EVENT` edge with `idempotency_key`, `timestamp_ms`, `lat`, `lon`, `distance_metres`; then publish a `proximity.candidates` event to Kafka (see ADR-014)
+    - If none:
+      1. `MERGE` a `PROXIMITY_EVENT` edge in Neo4j with `idempotency_key`, `timestamp_ms`, `lat`, `lon`, `distance_metres` — **write Neo4j first**
+      2. If Neo4j succeeds: publish `proximity.candidates` event to Kafka (see ADR-014)
+      3. If Kafka publish fails: retry with exponential backoff (3 attempts); on failure log and continue — do not crash; the Neo4j edge is durable and re-detection will occur on the next position ping
     - If `KNOWN_ASSOCIATE` exists: write Neo4j edge only — do not publish to `proximity.candidates`
   - `MERGE Entity` nodes if they don't exist yet
 - [ ] Does not write to TimescaleDB or Redis

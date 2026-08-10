@@ -67,7 +67,7 @@ This document defines the service boundaries, component contracts, data flow, an
 
 - Does not write to TimescaleDB or Redis.
 - Proximity candidates are scoped using H3: on each `position.normalized` event, reads `geo-cell:{geo_cell}` and its k-ring(1) neighbours (7 cells total at resolution 5, covering ~1764 km²) to get candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. This replaces a full `entity:live:*` keyspace scan — comparison is O(cell density) rather than O(total entities).
-- On detecting an unscheduled proximity pair: writes a `PROXIMITY_EVENT` edge to Neo4j AND publishes to `proximity.candidates`. Both happen on the same event — the Neo4j write is the durable record; the Kafka publish is the real-time signal to the Alert Evaluator.
+- On detecting an unscheduled proximity pair: **Neo4j MERGE first, then Kafka publish.** If Neo4j fails, do not publish to Kafka — no alert for missing evidence. If Neo4j succeeds and Kafka publish fails, retry with exponential backoff (up to 3 attempts); if all retries fail, log and continue. The Neo4j edge is the durable record; re-detection is expected on the next `position.normalized` event from either entity. An outbox pattern would eliminate the failure window but adds infrastructure complexity not justified in v1. Explicitly accepted failure mode: a proximity alert may be delayed by one ping interval if Kafka is transiently unavailable after a successful Neo4j write.
 - On detecting a pair with a `KNOWN_ASSOCIATE` edge: writes the Neo4j edge only, does not publish to `proximity.candidates`.
 - Edge writes use MERGE with an idempotency key to ensure replay does not create duplicate edges.
 - Does not emit alerts. Does not evaluate composite anomaly rules.
@@ -135,7 +135,9 @@ This document defines the service boundaries, component contracts, data flow, an
 | --- | --- |
 | Consumes | `alerts` (consumer group: `api`) |
 | Reads from Redis | `entity:live:{entity_id}` hash (initial map load, investigation panel) |
-| Subscribes to Redis | `position-updates` pub/sub channel (live WebSocket fan-out) |
+| Subscribes to Redis | `position-updates` pub/sub channel (live position WebSocket fan-out) |
+| Subscribes to Redis | `alert-events` pub/sub channel (alert WebSocket fan-out — all instances subscribe) |
+| Publishes to Redis | `alert-events` — the instance that consumes an alert from Kafka publishes it here after writing to TimescaleDB, so all instances can push to their WebSocket connections |
 | Reads from TimescaleDB | `position_history`, `alerts`, `user_workspaces`, `users` |
 | Reads from Neo4j | `PROXIMITY_EVENT`, `KNOWN_ASSOCIATE` edges (investigation pivot) |
 | Writes to TimescaleDB | `alerts` (INSERT ON CONFLICT DO NOTHING on Kafka consume), `users`, `user_workspaces` |
@@ -143,11 +145,12 @@ This document defines the service boundaries, component contracts, data flow, an
 
 **Contract:**
 
-- Sole consumer of the `alerts` Kafka topic. Writes initial alert records to the `alerts` table with status `NEW`.
+- Sole consumer of the `alerts` Kafka topic. Writes initial alert records to the `alerts` table with status `NEW`, then publishes the alert to the `alert-events` Redis pub/sub channel.
 - All routes and WebSocket upgrades require a valid JWT. `POST /auth/google` is the only unauthenticated endpoint.
-- Subscribes to `position-updates` on startup. Fans each event to all WebSocket connections whose saved scope matches the event's entity and position.
-- Scope filtering is applied server-side per connection — the dashboard receives only events matching its configured geo region and entity type filter.
-- Does not write to Neo4j or Redis (reads only, except for `position-updates` subscription management).
+- Subscribes to `position-updates` and `alert-events` on startup. Fans each event to all WebSocket connections whose saved scope matches.
+- Scope filtering is applied server-side per connection — the dashboard receives only events matching its configured geo region, entity type, and alert type filters.
+- Alert fan-out uses `alert-events` pub/sub rather than direct WebSocket push from the Kafka-consuming instance. Without this, only the one API instance that received the Kafka partition would push the alert — other instances with matching WebSocket connections would never deliver it.
+- Does not write to Neo4j. Writes to Redis only via `alert-events` pub/sub publish (not a persistent key write).
 - In-memory WebSocket connection map is rebuilt on restart — scope is reloaded from `user_workspaces` on each new WebSocket upgrade.
 
 ---
@@ -226,6 +229,7 @@ This document defines the service boundaries, component contracts, data flow, an
 | `deviation-counter:{entity_id}` | Alert Evaluator | Alert Evaluator | INCR/DEL per evaluation cycle |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease; renewed on each heartbeat |
 | `position-updates` (pub/sub) | Position Consumer | API | Broadcast channel; every normalised position event |
+| `alert-events` (pub/sub) | API (consuming instance) | API (all instances) | Broadcast channel; every alert after TimescaleDB write; all instances fan out to scope-matched WebSocket connections |
 
 ---
 
@@ -256,7 +260,9 @@ Alert Evaluator (leader-elected)
   ├─ reads Redis (entity:live:* scan → signal loss detection)
   ├─ reads TimescaleDB (position_history → last known position for signal loss payload)
   ├─ reads Neo4j (composite alert context — targeted lookup only)
-  └─► alerts ──► API ──► TimescaleDB (alerts table) + WebSocket (scoped)
+  └─► alerts ──► API (one instance, Kafka consumer group)
+                    ├─► TimescaleDB (alerts table, idempotent)
+                    └─► Redis pub/sub alert-events ──► all API instances ──► WebSocket (scoped)
 
 Dashboard ◄──► API (REST + WebSocket)
                ├─ reads Redis (entity:live:* for initial map load)

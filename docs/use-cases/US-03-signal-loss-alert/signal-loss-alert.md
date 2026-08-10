@@ -32,7 +32,7 @@ The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live
 
 ![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
 
-The alert is consumed from Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), then pushed over WebSocket only to operators whose saved scope matches the entity's position, type, and alert type.
+The API instance that consumes the alert from Kafka writes it to the `alerts` table in TimescaleDB (idempotent on replay), then publishes it to the `alert-events` Redis pub/sub channel. All API instances subscribe to `alert-events` and fan out to scope-matched WebSocket connections. This mirrors the `position-updates` pattern and solves the fan-out problem: the Kafka consumer group `api` delivers each alert to exactly one instance, but WebSocket connections are local per instance — without the Redis broadcast, users on non-consuming instances would never receive the push.
 
 ### Alert Suppression
 

@@ -259,6 +259,19 @@ Broadcast channel for live position events. Every normalised ping is published h
 
 ---
 
+### `alert-events` (pub/sub channel)
+
+Broadcast channel for alert events. Published by the API instance that consumed the alert from Kafka, after writing to the `alerts` TimescaleDB table. All API instances subscribe and fan out to scope-matched WebSocket connections.
+
+- **Publisher:** API (the Kafka-consuming instance)
+- **Subscribers:** All API instances — fan out to scope-matched WebSocket connections
+
+**Why this exists:** The `alerts` Kafka topic is consumed by consumer group `api`, so Kafka assigns each alert to exactly one API instance. WebSocket connections are local to each instance. Without this channel, users connected to non-consuming instances would never receive alert pushes. This mirrors the `position-updates` pattern.
+
+**Message fields:** full alert event — `alert_id`, `entity_id`, `entity_type`, `alert_type`, `priority`, `detected_at_ms`, `payload`
+
+---
+
 ## Kafka Event Schemas
 
 TypeScript field definitions for these schemas live in a shared internal package imported by the ingestion poller, position consumer, correlation worker, deviation detector, alert evaluator, and API. See ADR-013.
