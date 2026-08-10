@@ -7,7 +7,7 @@
 
 ## Context
 
-The ingestion layer must receive positional telemetry from ADS-B and AIS feeds and deliver it to downstream consumers (position store, correlation worker). The feeds are polled on a fixed interval and produce bursty, variable-volume data  - coverage gaps, transponder dropouts, and polling-interval jitter mean the arrival rate is unpredictable.
+The ingestion layer must receive positional telemetry from ADS-B and AIS feeds and deliver it to the position consumer via Kafka. The feeds are polled on a fixed interval and produce bursty, variable-volume data  - coverage gaps, transponder dropouts, and polling-interval jitter mean the arrival rate is unpredictable.
 
 Two approaches were considered:
 
@@ -31,7 +31,7 @@ Use Kafka as the message broker between the ingestion poller and all downstream 
 
 **Absorbing bursts.** ADS-B/AIS feeds can spike when a poller catches up after a gap. Kafka acts as a temporal buffer, letting consumers process at their own pace without back-pressure propagating to the producer.
 
-**Fan-out without coordination.** Multiple consumers (position consumer, correlation worker) read the same topic independently. With direct HTTP, the poller would need to know about and call every consumer. With Kafka, new consumers can be added without changing the poller.
+**Fan-out without coordination.** The position consumer reads `adsb.raw` and `ais.raw`; the normalised output (`position.normalized`) is independently consumed by the correlation worker and deviation detector. With direct HTTP, the poller would need to know about and call every downstream service. With Kafka, new consumers can be added at any stage of the pipeline without changing the upstream producer.
 
 **Replay.** Kafka's log retention means a consumer can replay events from a past offset  - useful for backfilling Neo4j after a correlation worker restart, or re-running a corrected anomaly rule.
 
