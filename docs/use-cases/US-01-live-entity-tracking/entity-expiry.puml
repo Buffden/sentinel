@@ -19,7 +19,7 @@ actor Operator
 Feed -> Poller : position pings arriving normally
 Poller -> Kafka : publish to adsb.raw / ais.raw
 Kafka -> Consumer : consume event
-Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, last_seen_ms }\nEXPIRE = SIGNAL_LOSS_THRESHOLD_MS
+Consumer -> Redis : HSET entity:live:XYZ123\n{ lat, lon, last_seen_ms }\nEXPIRE = 24h (safety-net; longer than SIGNAL_LOSS_THRESHOLD_MS\nso evaluator scan always finds the key)
 Consumer -> Redis : PUBLISH position-updates\n{ entity_id: XYZ123, lat, lon, last_seen_ms }
 API --> Dashboard : push { entity_id: XYZ123, lat, lon, last_seen_ms }
 
@@ -54,16 +54,12 @@ end note
 Dashboard --> Operator : entity XYZ123 fades and is removed from map
 
 note over Dashboard, Operator
-  Entity disappears automatically when
-  it stops broadcasting - driven by
-  the same TTL value on both sides:
-  Redis expires the key server-side,
-  dashboard expires the entity client-side.
-  TTL drives dashboard ghost cleanup only.
-  Signal loss detection (US-03) is driven
-  by last_seen_ms in the hash, scanned by
-  the alert evaluator on a schedule -
-  not by TTL expiry.
+  Two separate cleanup mechanisms with different timings:
+  - Dashboard: removes marker when now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS (client-side timer)
+  - Redis: expires key after 24h (server-side safety-net to prevent permanent ghost keys)
+  These are NOT the same value. The Redis TTL is longer by design —
+  the key must still exist when the alert evaluator scans it (US-03).
+  Signal loss detection is driven by last_seen_ms, not TTL expiry.
 end note
 
 @enduml

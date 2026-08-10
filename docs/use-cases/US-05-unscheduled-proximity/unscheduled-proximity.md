@@ -26,7 +26,7 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
 
-The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, writes a PROXIMITY_EVENT edge to Neo4j, and — for unscheduled pairs only — publishes a `proximity.candidates` event to Kafka. The Alert Evaluator consumes `proximity.candidates`, emits the alert to the `alerts` topic, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
+On each `position.normalized` event, the correlation worker reads the H3 k-ring(1) of the incoming entity's `geo_cell` (7 cells at resolution 5, ~1764 km² coverage) from `geo-cell:{h3_cell_id}` Redis sets to get candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. This scopes proximity comparisons to geographically relevant neighbours — not a full O(n²) pairwise scan. For each candidate within `PROXIMITY_THRESHOLD_METRES`, the worker queries Neo4j for a prior relationship, writes a PROXIMITY_EVENT edge, and — for unscheduled pairs only — publishes a `proximity.candidates` event to Kafka. The Alert Evaluator consumes `proximity.candidates`, emits the alert to the `alerts` topic, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
 
 ### Graph Update
 

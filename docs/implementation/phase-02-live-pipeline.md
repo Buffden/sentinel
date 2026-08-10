@@ -34,7 +34,8 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
   - `entity_id`, `entity_type`, `timestamp_ms`, `lat`, `lon`, `altitude`, `source`, `time_bucket`, `geo_cell` (H3 resolution 5)
 - [ ] Malformed events → `adsb.dlq` with rejection reason — never dropped, never crash the consumer
 - [ ] `INSERT INTO position_history ... ON CONFLICT DO NOTHING` (idempotency key: `{entity_id}:{timestamp_ms}`)
-- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon}` + TTL = `SIGNAL_LOSS_THRESHOLD_MS`
+- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} geo_cell {geo_cell} entity_type {entity_type}` + TTL = 24h (safety-net; key must outlive `SIGNAL_LOSS_THRESHOLD_MS` so the alert evaluator can scan it — see US-03)
+- [ ] Update geo-cell spatial index: `SREM geo-cell:{previous_geo_cell} {entity_id}` + `SADD geo-cell:{new_geo_cell} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
 - [ ] On entity resume after signal loss: `DEL alert-state:{entity_id}`
 - [ ] `PUBLISH position-updates {normalised_event_json}` after every write
 - [ ] `PRODUCE position.normalized` — consumed by Correlation Worker later

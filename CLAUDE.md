@@ -53,7 +53,8 @@ docker compose up -d        # Start all backing services
 - Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
 - Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
 - Redis keys and channels:
-  - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` (drives dashboard ghost cleanup only, not alert detection)
+  - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; **TTL = 24h** (safety-net only — prevents permanent ghost keys if an entity disappears before the alert evaluator detects it; dashboard cleanup is client-side via `last_seen_ms` comparison; signal loss detection is driven by `last_seen_ms`, not TTL expiry — the key must outlive `SIGNAL_LOSS_THRESHOLD_MS` or the evaluator can never scan it)
+  - `geo-cell:{h3_cell_id}` - Redis set of entity_ids currently in that H3 cell (resolution 5); written by position consumer on each position update (remove from old cell, add to new cell); read by correlation worker to scope proximity candidates to same-cell + k-ring(1) neighbours instead of comparing all entities pairwise
   - `alert-state:{entity_id}` - in-loop alert suppression flag; value = `dark_since_ms` (Unix ms when entity went dark); **no TTL** — written by alert evaluator on first emission, deleted explicitly by position consumer when entity resumes broadcasting; used by composite alert evaluator (US-06) to retrieve the loss window start; distinct from the durable dedup in the `alerts` table (TimescaleDB)
   - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
   - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
@@ -70,7 +71,8 @@ docker compose up -d        # Start all backing services
 - Alert evaluator failures must not result in duplicate alerts  - leader election handles this, not application-level dedup hacks
 
 ### Service contracts
-- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; writes PROXIMITY_EVENT edges to Neo4j; publishes unscheduled proximity pairs to `proximity.candidates` (see ADR-014) — does not write to TimescaleDB or Redis
+
+- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; scopes proximity candidates to the incoming entity's H3 cell + k-ring(1) neighbours by reading `geo-cell:{h3_cell_id}` sets from Redis (not a full `entity:live:*` scan); fetches candidate positions from `entity:live:{entity_id}`; writes PROXIMITY_EVENT edges to Neo4j; publishes unscheduled proximity pairs to `proximity.candidates` (see ADR-014) — does not write to TimescaleDB or Redis
 - Deviation detector Kafka consumer group: `deviation-detector`; consumes `position.normalized`; reads `route_baseline` from TimescaleDB; publishes `OUT_OF_RANGE` / `BACK_IN_RANGE` events to `deviation.candidates` — does not write to Redis, Neo4j, or the `alerts` topic
 
 ### Commits

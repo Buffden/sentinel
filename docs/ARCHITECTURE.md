@@ -36,7 +36,8 @@ This document defines the service boundaries, component contracts, data flow, an
 | Consumes | `adsb.raw`, `ais.raw` (consumer group: `position-consumer`) |
 | Publishes to | `position.normalized`, `adsb.dlq`, `ais.dlq` |
 | Writes to TimescaleDB | `position_history` (INSERT ON CONFLICT DO NOTHING) |
-| Writes to Redis | `entity:live:{entity_id}` hash (HSET with `last_seen_ms`, lat, lon; TTL = `SIGNAL_LOSS_THRESHOLD_MS`) |
+| Writes to Redis | `entity:live:{entity_id}` hash (HSET with `last_seen_ms`, lat, lon; TTL = 24h safety-net) |
+| Writes to Redis | `geo-cell:{h3_cell_id}` set — SREM old cell, SADD new cell on each position update; enables O(cell-density) proximity scoping in the Correlation Worker |
 | Publishes to Redis | `position-updates` pub/sub channel (every normalised event) |
 | Deletes from Redis | `alert-state:{entity_id}` — when entity resumes broadcasting after a signal loss |
 
@@ -57,13 +58,15 @@ This document defines the service boundaries, component contracts, data flow, an
 | Direction | What |
 | --- | --- |
 | Consumes | `position.normalized` (consumer group: `correlation-worker`) |
-| Reads from Redis | `entity:live:*` hashes — all current entity positions, needed for pairwise distance computation |
+| Reads from Redis | `geo-cell:{h3_cell_id}` sets — entity_ids in the incoming entity's H3 cell + k-ring(1) neighbours (7 cells); scopes proximity candidates without scanning all live entities |
+| Reads from Redis | `entity:live:{entity_id}` hashes — positions of the candidate entities identified via geo-cell lookup |
 | Writes to Neo4j | `PROXIMITY_EVENT` edges via MERGE (idempotent) |
 | Publishes to | `proximity.candidates` — unscheduled proximity pairs, pre-filtered to exclude known associates |
 
 **Contract:**
 
 - Does not write to TimescaleDB or Redis.
+- Proximity candidates are scoped using H3: on each `position.normalized` event, reads `geo-cell:{geo_cell}` and its k-ring(1) neighbours (7 cells total at resolution 5, covering ~1764 km²) to get candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. This replaces a full `entity:live:*` keyspace scan — comparison is O(cell density) rather than O(total entities).
 - On detecting an unscheduled proximity pair: writes a `PROXIMITY_EVENT` edge to Neo4j AND publishes to `proximity.candidates`. Both happen on the same event — the Neo4j write is the durable record; the Kafka publish is the real-time signal to the Alert Evaluator.
 - On detecting a pair with a `KNOWN_ASSOCIATE` edge: writes the Neo4j edge only, does not publish to `proximity.candidates`.
 - Edge writes use MERGE with an idempotency key to ensure replay does not create duplicate edges.
@@ -217,7 +220,8 @@ This document defines the service boundaries, component contracts, data flow, an
 
 | Key / Channel | Writer | Reader | Notes |
 | --- | --- | --- | --- |
-| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only |
+| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = 24h (safety-net only — key must outlive `SIGNAL_LOSS_THRESHOLD_MS` so the evaluator can scan it; dashboard cleanup is client-side) |
+| `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Set of entity_ids in that H3 cell; updated on every position write (SREM old cell, SADD new cell); no TTL — membership is current as long as positions arrive |
 | `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Value = `dark_since_ms`; no TTL; deleted by Position Consumer on entity resume |
 | `deviation-counter:{entity_id}` | Alert Evaluator | Alert Evaluator | INCR/DEL per evaluation cycle |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease; renewed on each heartbeat |
@@ -233,11 +237,13 @@ External Feeds
                                 │
                          Position Consumer
                           ├─► TimescaleDB (position_history)
-                          ├─► Redis (entity:live:{id}, last_seen_ms)
+                          ├─► Redis (entity:live:{id}, last_seen_ms; TTL=24h)
+                          ├─► Redis (geo-cell:{h3_cell_id} sets — SREM old, SADD new)
                           ├─► Redis pub/sub (position-updates) ──► API ──► WebSocket (scoped)
                           ├─► adsb.dlq / ais.dlq (malformed)
                           └─► position.normalized
                                     ├─► Correlation Worker
+                                    │     ├─ reads Redis geo-cell:{id} + entity:live:{id} (H3 cell scoped)
                                     │     ├─► Neo4j (PROXIMITY_EVENT edges)
                                     │     └─► proximity.candidates
                                     └─► Deviation Detector

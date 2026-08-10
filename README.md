@@ -1,5 +1,9 @@
 # Sentinel
 
+> **Status: Architecture and planning phase — implementation in progress.**
+> No services have been built yet. `docker compose up -d` will not work until Phase 01 is complete.
+> See [`docs/implementation/`](docs/implementation/) for the phased build plan.
+
 A real-time geospatial entity-tracking and anomaly-detection platform. Sentinel ingests live positional telemetry from aircraft (ADS-B) and vessels (AIS), correlates entities across time and space, and surfaces meaningful anomalies  - signal loss, route deviation, unexpected proximity between previously unrelated entities  - on a live map dashboard.
 
 Built to exercise the full surface area of distributed systems design: high-throughput streaming ingestion, polyglot persistence chosen per access pattern, graph-based correlation, and symptom-driven alerting  - all against real, unreliable, public telemetry rather than synthetic data.
@@ -97,12 +101,14 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 
 ## Getting Started
 
+> Implementation has not started yet. These instructions will work once Phase 01 and Phase 02 are complete.
+
 ```bash
 # Clone the repo
 git clone https://github.com/<your-username>/sentinel.git
 cd sentinel
 
-# Start all services
+# Start all services (requires Phase 01 complete)
 docker compose up -d
 
 # Start the ingestion poller (uses recorded data by default, no live API key needed)

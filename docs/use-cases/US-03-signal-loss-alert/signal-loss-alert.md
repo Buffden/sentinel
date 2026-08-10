@@ -26,7 +26,7 @@ As an operator, I want to receive an alert when an entity's transponder goes dar
 
 ![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry — the TTL is used only for dashboard ghost cleanup (US-01).
+The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry. The key carries a 24h TTL (safety-net only) — it is deliberately longer than `SIGNAL_LOSS_THRESHOLD_MS` so the key cannot expire between scan cycles before the evaluator has a chance to inspect `last_seen_ms`. Dashboard ghost cleanup is separate and client-side (US-01).
 
 ### Alert Delivery
 

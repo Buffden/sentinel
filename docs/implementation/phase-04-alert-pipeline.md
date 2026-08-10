@@ -20,7 +20,7 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 
 **Signal Loss (US-03)**
 - [ ] Scheduled scan every `SIGNAL_LOSS_SCAN_INTERVAL_MS` (10s)
-- [ ] `SCAN entity:live:*` + `HGETALL` each key — read `last_seen_ms`
+- [ ] `SCAN entity:live:*` + `HGETALL` each key — read `last_seen_ms` (key TTL is 24h, so the key is guaranteed to still exist when the evaluator scans it — see ADR-004)
 - [ ] If `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS`:
   - `GET alert-state:{entity_id}` — if key absent: emit alert, set key
   - If key present: skip — already active

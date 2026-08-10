@@ -13,8 +13,11 @@ A Node.js service that reads the live position stream, writes proximity evidence
 - [ ] Scaffold Node.js + TypeScript service under `services/correlation-worker/`
 - [ ] Consumer group: `correlation-worker`; consume `position.normalized`
 - [ ] On each event:
-  - `HGETALL entity:live:*` — fetch all current positions from Redis
-  - Compute pairwise Haversine distances between incoming entity and all others
+  - Extract `geo_cell` from the incoming `position.normalized` event
+  - Compute H3 k-ring(1) of `geo_cell` — returns the cell itself plus its 6 immediate neighbours (7 cells total, ~1764 km² coverage at resolution 5)
+  - `SUNION geo-cell:{cell}` for each of the 7 cells → set of candidate entity_ids (excludes the incoming entity itself)
+  - `HGETALL entity:live:{entity_id}` for each candidate — fetch position of each candidate only
+  - Compute Haversine distances between the incoming entity and each candidate
   - For each pair within `PROXIMITY_THRESHOLD_METRES`:
     - Query Neo4j for a `KNOWN_ASSOCIATE` edge between the two entities
     - If none: `MERGE` a `PROXIMITY_EVENT` edge with `idempotency_key`, `timestamp_ms`, `lat`, `lon`, `distance_metres`; then publish a `proximity.candidates` event to Kafka (see ADR-014)

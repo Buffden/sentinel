@@ -23,7 +23,7 @@ Prove that leader election, alert state management, and entity TTL expiry all wo
 - When the leader process is killed, the TTL expires and the follower acquires the lease within one TTL window (US-07)
 - Lease renewal works: a live leader keeps the key alive across multiple TTL windows
 - Alert state key `alert-state:{entity_id}` (value = `dark_since_ms`) prevents re-emission across multiple evaluation cycles while the entity stays dark, and is correctly deleted by the position consumer (not the evaluator) when the entity comes back online (US-03)
-- Entity live key `entity:live:{entity_id}` expires automatically after `SIGNAL_LOSS_THRESHOLD_MS` with no explicit delete (US-01)
+- Entity live key `entity:live:{entity_id}` expires automatically after **24h** (safety-net TTL — not used for alert detection or dashboard cleanup; validates that ghost keys do not accumulate permanently)
 - Race condition test: 10 simultaneous lease acquisition attempts result in exactly 1 winner (US-07)
 
 ---

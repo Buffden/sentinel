@@ -191,8 +191,22 @@ Current position and liveness state for each tracked entity.
 | `last_seen_ms` | String (int) | Unix ms of the last received ping from source telemetry |
 
 - **Writer:** Position consumer on every normalised ping
-- **Readers:** Alert evaluator (scheduled scan for signal loss detection), Correlation Worker (pairwise distance computation), API (initial map load, investigation panel, scope geo-check)
-- **TTL:** `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only; not used for alert detection
+- **Readers:** Alert evaluator (scheduled scan for signal loss detection), Correlation Worker (position fetch for H3-scoped proximity candidates), API (initial map load, investigation panel, scope geo-check)
+- **TTL:** 24h — safety-net only; prevents permanent ghost keys if an entity disappears before the evaluator detects it. The key must outlive `SIGNAL_LOSS_THRESHOLD_MS` or the evaluator's scan finds nothing to inspect. Dashboard cleanup is client-side via `last_seen_ms` comparison.
+
+---
+
+### `geo-cell:{h3_cell_id}` (set)
+
+Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is the set of entity_ids currently in that cell.
+
+- **Writer:** Position consumer — on each normalised ping: `SREM geo-cell:{old_geo_cell} {entity_id}` then `SADD geo-cell:{new_geo_cell} {entity_id}` (old cell tracked via prior hash value)
+- **Reader:** Correlation Worker — reads same-cell + k-ring(1) sets (7 cells, ~1764 km² coverage) to get candidate entity_ids before fetching their positions from `entity:live:*`
+- **TTL:** None — set membership reflects the current ping stream; stale entries are overwritten naturally as entities move between cells. A periodic cleanup pass may be needed in production but is out of scope for v1.
+
+**Design notes:**
+- Replaces a full `entity:live:*` keyspace scan in the Correlation Worker. Without this index, proximity detection requires O(n) Redis reads and O(n²) Haversine comparisons. With it, comparisons are bounded by cell density — typically a small fraction of total tracked entities.
+- H3 resolution 5 (~252 km² per cell) matches the `geo_cell` field already computed by the Position Consumer and stored in `position_history`. No new computation is needed — the cell is read directly from the `position.normalized` event.
 
 ---
 
