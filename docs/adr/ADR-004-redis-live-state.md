@@ -7,7 +7,7 @@
 
 ## Context
 
-The dashboard and alert evaluator both need the current position of every tracked entity with the lowest possible read latency. This is the highest-frequency read in the system  - every map refresh and every alert evaluation reads current state for potentially thousands of entities.
+The dashboard, alert evaluator, and correlation worker all need the current position of every tracked entity with the lowest possible read latency. This is the highest-frequency read in the system  - every map refresh, every alert evaluation, and every proximity computation reads current state for potentially thousands of entities.
 
 The source of truth for position history is TimescaleDB, but querying it for the latest row per entity on every dashboard tick is expensive and adds unnecessary load to the primary store.
 
