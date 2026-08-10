@@ -6,7 +6,7 @@
 
 A real-time geospatial entity-tracking and anomaly-detection platform. Sentinel ingests live positional telemetry from aircraft (ADS-B) and vessels (AIS), correlates entities across time and space, and surfaces meaningful anomalies  - signal loss, route deviation, unexpected proximity between previously unrelated entities  - on a live map dashboard.
 
-Built to exercise the full surface area of distributed systems design: high-throughput streaming ingestion, polyglot persistence chosen per access pattern, graph-based correlation, and symptom-driven alerting  - all against real, unreliable, public telemetry rather than synthetic data.
+Built to exercise the full surface area of distributed systems design: high-throughput streaming ingestion, polyglot persistence chosen per access pattern, graph-based correlation, and symptom-driven alerting. Ingests real public telemetry (ADS-B, AIS); synthetic data drives controllable anomaly injection for demos.
 
 ---
 
@@ -27,7 +27,7 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 | Decision | Choice | Why |
 | --- | --- | --- |
 | Ingestion buffer | Kafka (MSK on AWS, Redpanda locally) | absorbs bursty feeds; decouples producers from consumers |
-| Position history | TimescaleDB | geo-cell + time-bucket sharding matches the query shape |
+| Position history | TimescaleDB | time-based partitioning on `observed_at`; `geo_cell` is a spatial index column, not a partition dimension |
 | Entity graph | Neo4j | proximity queries are traversals, not table scans |
 | Live state | Redis | highest-frequency read; cache, not source of truth |
 | Alert coordination | Leader election | prevents duplicate emission under horizontal scale |
@@ -42,8 +42,8 @@ Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/
 | Layer | Technology |
 | --- | --- |
 | Data ingestion | Node.js poller → Kafka (Redpanda locally, MSK on AWS) |
-| Stream processing | Position Consumer (normalise + persist), Correlation Worker (proximity graph), Deviation Detector (baseline comparison) |
-| Position store | TimescaleDB (geo-cell + time-bucket sharding) |
+| Stream processing | Position Consumer (normalise + persist), Correlation Worker (proximity graph), Deviation Detector (reference route comparison) |
+| Position store | TimescaleDB |
 | Correlation graph | Neo4j |
 | Live state cache | Redis |
 | Alert evaluation | Leader-elected Alert Evaluator — hybrid inputs: scheduled Redis scan (signal loss) + `deviation.candidates` + `proximity.candidates` |
@@ -70,7 +70,7 @@ This project is a non-commercial portfolio and learning exercise. All data sourc
 | Anomaly | Description |
 | --- | --- |
 | **Signal loss** | Entity goes dark beyond configurable threshold (AIS/ADS-B transponder off) |
-| **Route deviation** | Current track diverges from established historical baseline by more than threshold distance |
+| **Route deviation** | Current track diverges from the entity's assigned reference route by more than the corridor threshold (synthetic entities only in v1) |
 | **Unscheduled proximity** | Two entities with no prior relationship converge at an unexpected location |
 | **Composite** | Signal loss followed by proximity to a previously unrelated entity  - elevated to a single correlated alert |
 
@@ -96,6 +96,7 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 | ADR-012 | Workspace scope and server-side alert filtering |
 | ADR-013 | Node.js for the ingestion poller |
 | ADR-014 | Hybrid input model for the Alert Evaluator (Deviation Detector + stream-based inputs) |
+| ADR-015 | v1 reference route model for deviation detection |
 
 ---
 
@@ -110,15 +111,9 @@ cd sentinel
 
 # Start all services (requires Phase 01 complete)
 docker compose up -d
-
-# Start the ingestion poller (uses recorded data by default, no live API key needed)
-cd ingestion && npm install && npm run start:replay
-
-# Open the dashboard
-open http://localhost:4200
 ```
 
-> To use live ADS-B data, set `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `.env` (OpenSky uses OAuth2 client credentials). See `.env.example`.
+> Service-specific startup instructions will be added to each service's README as phases are completed. See [`docs/implementation/`](docs/implementation/) for the build plan.
 
 ---
 

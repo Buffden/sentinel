@@ -20,7 +20,8 @@ This document defines the service boundaries, component contracts, data flow, an
 | Writes to stores | — |
 
 **Contract:**
-- Publishes raw event bytes as received. No parsing, no field extraction, no DLQ routing.
+- Publishes raw event bytes as received. No domain parsing, no alert logic, no DLQ routing.
+- The poller may decode a response envelope and split it into per-entity records before publishing — this is envelope handling, not normalisation. Field extraction, type coercion, and validation are the Position Consumer's responsibility.
 - Does not know about downstream consumers. The Kafka topic is the only coupling point.
 - Polls on a fixed interval. Rate limit compliance is the poller's responsibility.
 
@@ -78,7 +79,7 @@ This document defines the service boundaries, component contracts, data flow, an
 - **H3 resolutions:** `LIVE_H3_RESOLUTION` (used for Redis `geo-cell:*` sorted sets) and `HISTORY_H3_RESOLUTION` (used for TimescaleDB `geo_cell` column) are separate configuration values. The Correlation Worker uses `LIVE_H3_RESOLUTION` for geo-cell lookups. They may differ; validate the right values in POC-03.
 - **Episode model:** on first detection of a proximity pair within threshold: (1) Neo4j MERGE edge (idempotency key: `{pair_key}:{episode_start_ms}`); (2) create `proximity-episode:{pair_key}` hash with `candidate_published=0`; (3) publish ONE `proximity.candidates` event to Kafka; (4) set `candidate_published=1`. On subsequent pings within the same episode: if `candidate_published=1`, update `last_seen_ms` + refresh TTL; do NOT publish another event. If `candidate_published=0` (crash recovery — Neo4j written but Kafka publish failed), retry the Kafka publish.
 - On detecting a new unscheduled episode: **Neo4j MERGE first, then set `candidate_published=0`, then Kafka publish, then set `candidate_published=1`.** If Neo4j fails, do not create the episode hash or publish to Kafka. If Kafka publish fails: set `candidate_published=0`, retry on next ping. Accepted failure mode: alert may be delayed by one ping interval.
-- On detecting a pair with a `KNOWN_ASSOCIATE` edge: write Neo4j edge only, do not create proximity-episode, do not publish to `proximity.candidates`.
+- On detecting a pair with a `KNOWN_ASSOCIATE` edge: write Neo4j MERGE edge + create/refresh `proximity-episode` hash (TTL only — no `candidate_published`), do not publish to `proximity.candidates`. The episode hash prevents redundant Neo4j writes on every subsequent ping within the encounter.
 - Edge writes use MERGE with an idempotency key to ensure replay does not create duplicate edges.
 - Does not emit alerts. Does not evaluate composite anomaly rules.
 
@@ -119,7 +120,7 @@ This document defines the service boundaries, component contracts, data flow, an
 | Reads from TimescaleDB | `position_history` — last known position before signal loss, included in alert payload |
 | Reads from Neo4j | `KNOWN_ASSOCIATE` and `PROXIMITY_EVENT` edges — composite alert context only (targeted lookup per entity pair, not a scan) |
 | Publishes to | `alerts` |
-| Writes to Redis | `alert-state:{entity_id}` hash on first signal loss emission: `{ dark_since_ms, signal_loss_alert_id }`; no TTL |
+| Writes to Redis | `alert-state:{entity_id}` hash on first signal loss emission: `{ dark_since_ms, signal_loss_alert_id, composite_issued: 0 }`; no TTL; `composite_issued` set to `1` when a COMPOSITE alert is issued for this episode |
 | Writes to Redis | `deviation-state:{entity_id}` hash — HINCRBY count on `OUT_OF_RANGE`; DEL on `IN_RANGE`; safety TTL = `DEVIATION_STATE_TTL_MS` (default: 24h; decoupled from signal-loss timing) |
 | Holds Redis lease | `alert-evaluator:leader` (SET NX PX pattern; Lua compare-and-expire on heartbeat; compare-before-DEL on release) |
 
@@ -128,7 +129,7 @@ This document defines the service boundaries, component contracts, data flow, an
 - **Leader election and Kafka:** only the current lease holder creates and joins the `alert-evaluator` Kafka consumer group. Followers do not join — an unpolled member triggers group rebalances. On lease acquisition: create consumer, subscribe, start polling. On lease loss: (1) stop accepting new work; (2) stop/pause Kafka; (3) wait for or cancel in-flight evaluation; (4) close consumer; (5) return to follower poll loop. **Lease renewal** uses a Lua compare-and-expire script: `if GET(key) == instance_id then PEXPIRE(key, LEADER_TTL_MS)` — `SET XX PX` is not safe for renewal because it overwrites the value without checking the current holder; a slow old leader could accidentally extend a lease already held by a new leader. **Lease release** uses compare-before-DEL: `if GET(key) == instance_id then DEL(key)`.
 - Signal loss detection is a scheduled Redis scan — the evaluator reads `last_seen_ms` from `entity:live:*` directly. This is intentional: signal loss is an absence of events and cannot be driven by a Kafka stream (ADR-014).
 - **Route deviation:** inputs arrive via `deviation.candidates` with status `OUT_OF_RANGE` or `IN_RANGE`. Replay guard: ignore event if `timestamp_ms <= deviation-state:{entity_id}.last_processed_ms`. State in `deviation-state:{entity_id}` (hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`). On `OUT_OF_RANGE`: HINCRBY count; if count==1 set episode_start_ms; if count >= DEVIATION_SUSTAINED_PINGS and alert_emitted==0: emit ROUTE_DEVIATION, set alert_emitted=1; update last_processed_ms. On `IN_RANGE`: DEL.
-- **Proximity (supersession model):** inputs arrive via `proximity.candidates` (one per new episode). SIGNAL_LOSS is already emitted immediately when detected — never held back. When proximity arrives, check `alert-state:{entity_id}` (entity still dark) OR `recent-loss:{entity_id}` (entity was dark, has since resumed) for both entities. If a matching signal loss is found within the correlation window: emit COMPOSITE with `supersedes_alert_ids`; if not: emit UNSCHEDULED_PROXIMITY.
+- **Proximity (supersession model):** inputs arrive via `proximity.candidates` (one per new episode). SIGNAL_LOSS is already emitted immediately when detected — never held back. When proximity arrives, check `alert-state:{entity_id}` (entity still dark) OR `recent-loss:{entity_id}` (entity was dark, has since resumed) for both entities. If a matching signal loss is found within the correlation window and `composite_issued==0`: emit COMPOSITE with `supersedes_alert_ids`, set `composite_issued=1`; if not: emit UNSCHEDULED_PROXIMITY. The `composite_issued` flag prevents a second COMPOSITE from being emitted if further proximity events arrive for the same signal-loss episode.
 - The API handles composite supersession atomically: INSERT COMPOSITE + UPDATE SIGNAL_LOSS to SUPERSEDED in one transaction; broadcast both via `alert-events` (ALERT_CREATED for composite, ALERT_SUPERSEDED for the old alert).
 - Neo4j is queried only when assembling composite alert context — targeted lookup on a specific entity pair. Not a scan.
 - Reads `position_history` only to fetch last known position for the signal loss alert payload. Does not read route reference tables.
@@ -239,10 +240,10 @@ This document defines the service boundaries, component contracts, data flow, an
 | --- | --- | --- | --- |
 | `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = 24h (safety-net only — key must outlive `SIGNAL_LOSS_THRESHOLD_MS` so the evaluator can scan it; dashboard cleanup is client-side) |
 | `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Sorted set; score = `last_seen_ms`; ZRANGEBYSCORE filters to fresh members; stale members age out logically via score filter |
-| `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker | Proximity episode state; hash with `episode_start_ms`, `last_seen_ms`, `candidate_published`; TTL = PROXIMITY_EPISODE_GAP_MS; canonical pair = `min(a,b):max(a,b)` |
+| `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker | Proximity episode state for all pairs (including known associates); hash with `episode_start_ms`, `last_seen_ms`, `candidate_published` (unscheduled only); TTL = PROXIMITY_EPISODE_GAP_MS; canonical pair = `min(a,b):max(a,b)` |
 | `recent-loss:{entity_id}` | Position Consumer | Alert Evaluator | Short-lived signal loss record; hash with `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`; TTL = COMPOSITE_CORRELATION_WINDOW_MS; enables composite after entity resumes |
 | `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`; safety TTL = `DEVIATION_STATE_TTL_MS` (default: 24h); DEL on IN_RANGE |
-| `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator, Correlation Worker | Hash: `dark_since_ms`, `signal_loss_alert_id`; no TTL; deleted by Position Consumer (after writing recent-loss) on entity resume |
+| `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator, Correlation Worker | Hash: `dark_since_ms`, `signal_loss_alert_id`, `composite_issued`; no TTL; deleted by Position Consumer (after writing recent-loss) on entity resume |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease (acquire); Lua compare-and-expire on heartbeat (ownership-safe renewal); compare-before-DEL on release |
 | `position-updates` (pub/sub) | Position Consumer | API | Broadcast channel; every normalised position event |
 | `alert-events` (pub/sub) | API (consuming instance) | API (all instances) | Broadcast channel; every alert after TimescaleDB write; all instances fan out to scope-matched WebSocket connections |

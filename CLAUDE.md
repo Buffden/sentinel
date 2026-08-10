@@ -50,18 +50,9 @@ docker compose up -d        # Start all backing services
 
 ### Naming
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
-- Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
-- Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
-- Redis keys and channels:
-  - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; **TTL = 24h** (safety-net only — prevents permanent ghost keys if an entity disappears before the alert evaluator detects it; dashboard cleanup is client-side via `last_seen_ms` comparison; signal loss detection is driven by `last_seen_ms`, not TTL expiry — the key must outlive `SIGNAL_LOSS_THRESHOLD_MS` or the evaluator can never scan it)
-  - `geo-cell:{h3_cell_id}` - Redis **sorted set**; score = `last_seen_ms`; written by position consumer (`ZREM` old cell, `ZADD` new cell with score) using `LIVE_H3_RESOLUTION`; read by correlation worker via `ZRANGEBYSCORE` to get only fresh members in same-cell + computed k-ring cells; stale members age out via score filter — no explicit cleanup needed. **k-ring size** computed from `PROXIMITY_THRESHOLD_METRES` and cell edge length at `LIVE_H3_RESOLUTION` (not hardcoded k-ring(1)). Two separate resolution configs: `LIVE_H3_RESOLUTION` (for this Redis key) and `HISTORY_H3_RESOLUTION` (for TimescaleDB `geo_cell` column); validated by POC-03.
-  - `proximity-episode:{pair_key}` - proximity episode state; hash with fields `episode_start_ms`, `last_seen_ms`, `candidate_published` (0/1 — tracks whether Kafka publish succeeded; enables retry recovery); TTL = `PROXIMITY_EPISODE_GAP_MS` (refreshed on each within-threshold ping); canonical pair = `min(a,b):max(a,b)`; written by correlation worker on first detection in a new episode; subsequent pings update `last_seen_ms` and refresh TTL instead of publishing a new candidate
-  - `recent-loss:{entity_id}` - hash; TTL = `COMPOSITE_CORRELATION_WINDOW_MS`; written by position consumer when entity resumes after signal loss (before DEL of `alert-state`); fields: `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`; read by alert evaluator when proximity arrives to check for composite supersession opportunity
-  - `deviation-state:{entity_id}` - hash; fields: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`; written by alert evaluator; safety TTL = `DEVIATION_STATE_TTL_MS` (default: 24h; decoupled from signal-loss timing so deviation state survives brief dark periods); DEL on `IN_RANGE` event; `last_processed_ms` is the replay guard — ignore events with `timestamp_ms <= last_processed_ms`
-  - `alert-state:{entity_id}` - hash; fields: `dark_since_ms`, `signal_loss_alert_id`; **no TTL** — written by alert evaluator on first signal loss emission; deleted by position consumer after writing `recent-loss`; read by alert evaluator (suppression) and correlation worker (composite check for active dark entity)
-  - `alert-evaluator:leader` - leader election lease key; SET NX PX (acquire); Lua compare-and-expire on heartbeat (`if GET == instance_id then PEXPIRE` — `SET XX PX` is NOT safe for renewal because it overwrites the value without checking the current holder); compare-before-DEL on release (`if GET == instance_id then DEL`)
-  - `position-updates` - Redis pub/sub channel; position consumer publishes every normalised position event here after writing to the hash; all API instances subscribe and fan out to scoped WebSocket connections
-  - `alert-events` - Redis pub/sub channel; typed envelope `{ type: ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED, payload: {...} }`; the API instance that acted on the event publishes here; all API instances subscribe and fan out to scope-matched WebSocket connections — solves the Kafka consumer group fan-out problem
+- Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere. All timestamps are source event time, not processing time.
+- Kafka topics: `{source}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
+- Redis keys and channels: see `docs/DATA_MODEL.md` — Redis section is the canonical reference for key schemas, TTLs, writers, and readers
 
 ### Code style
 - Prefer explicit over clever  - this code will be read in an interview setting
@@ -75,9 +66,10 @@ docker compose up -d        # Start all backing services
 
 ### Service contracts
 
-- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; scopes proximity candidates using H3 `ZRANGEBYSCORE` on `geo-cell:*` sorted sets at `LIVE_H3_RESOLUTION`; canonical pair = `min(a,b):max(a,b)` everywhere; checks `proximity-episode:{pair}` — if active episode exists, update `last_seen_ms` + refresh TTL + skip publish; if new episode: **write order: Neo4j MERGE first then Kafka publish**; writes `proximity-episode:{pair}` hash (TTL = PROXIMITY_EPISODE_GAP_MS); does not write to TimescaleDB
-- Deviation detector Kafka consumer group: `deviation-detector`; consumes `position.normalized`; reads `route_reference_points` (via `route_references`) from TimescaleDB; **stateless** — emits `OUT_OF_RANGE` or `IN_RANGE` on every eligible ping (no transition tracking); skips entities with no reference route (real ADS-B/AIS); does not write to Redis, Neo4j, or the `alerts` topic; see ADR-015
-- **Two replay modes:** (A) Crash recovery — consumer resumes from last committed offset; normal processing allowed. (B) Historical backfill — explicit separate consumer group or `--mode=backfill` flag; must disable ephemeral side effects (Redis live-state writes, `position-updates` pub/sub, deviation/proximity candidates, alerts) as appropriate for the store being rebuilt. Never use arbitrary full historical replay to re-warm Redis live state — prefer latest-row-per-entity from TimescaleDB or a bounded recent Kafka tail.
+See `docs/ARCHITECTURE.md` — service I/O tables, contracts, and data flow are the canonical reference. Key invariants:
+- Canonical pair ordering: `min(entity_a_id, entity_b_id):{max(entity_a_id, entity_b_id)}` everywhere (episode hash, Neo4j idempotency key, Kafka event)
+- All `timestamp_ms` values are source event times — never processing time
+- **Two replay modes:** (A) Crash recovery — consumer resumes from last committed offset; normal processing. (B) Historical backfill — separate consumer group; suppress ephemeral side effects (Redis writes, pub/sub, deviation/proximity candidates, alerts). Never replay full history to re-warm Redis live state — prefer latest-row-per-entity from TimescaleDB or a bounded Kafka tail.
 
 ### Commits
 - Commit message format: `<scope>: <what and why>`  - e.g. `ingestion: add DLQ for malformed AIS events`

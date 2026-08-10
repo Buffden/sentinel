@@ -17,7 +17,7 @@ Primary write target for every normalised position ping. Partitioned by Timescal
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `entity_id` | TEXT | No | Entity identifier — ICAO hex for aircraft, MMSI for vessels |
-| `entity_type` | TEXT | No | `aircraft` or `vessel` or `synthetic` |
+| `entity_type` | TEXT | No | `aircraft` or `vessel` — synthetic entities are classified by what they represent (aircraft or vessel), not by their source |
 | `observed_at` | TIMESTAMPTZ | No | Canonical hypertable time column — `to_timestamp(timestamp_ms / 1000.0)` computed at ingest; TimescaleDB partitions on this column |
 | `timestamp_ms` | BIGINT | No | Unix ms from source telemetry; idempotency key component; preserved as source metadata |
 | `geo_cell` | TEXT | No | H3 cell ID at resolution 5 (~252 km² per cell); computed at ingest from lat/lon |
@@ -88,6 +88,7 @@ Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypert
 |---|---|---|---|
 | `alert_id` | TEXT | No | Primary key — format: `{entity_id}:{alert_type}:{window_start_ms}` |
 | `entity_id` | TEXT | No | The entity the alert is about |
+| `counterparty_entity_id` | TEXT | Yes | The second entity for multi-entity alerts (`UNSCHEDULED_PROXIMITY`, `COMPOSITE`); NULL for single-entity alerts (`SIGNAL_LOSS`, `ROUTE_DEVIATION`) |
 | `entity_type` | TEXT | No | `aircraft` or `vessel` |
 | `alert_type` | TEXT | No | `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, or `COMPOSITE` |
 | `priority` | TEXT | No | `STANDARD` or `ELEVATED` (COMPOSITE alerts are always ELEVATED) |
@@ -103,7 +104,8 @@ Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypert
 
 **Constraints and indexes:**
 - Primary key on `alert_id`
-- Index on `(entity_id, detected_at DESC)` — investigation panel queries
+- Index on `(entity_id, detected_at DESC)` — investigation panel queries (find alerts by primary entity)
+- Index on `(counterparty_entity_id, detected_at DESC)` — find multi-entity alerts involving a given counterparty
 - Index on `(status, detected_at DESC)` — operator alert feed filtered by status
 - Index on `(alert_type, detected_at DESC)` — alert type filter
 
@@ -245,9 +247,10 @@ In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a 
 |---|---|---|
 | `dark_since_ms` | String (int) | Unix ms when the entity was first detected as dark |
 | `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this dark episode |
+| `composite_issued` | String (`0` or `1`) | Whether a COMPOSITE alert has been issued for this signal-loss episode — prevents issuing a second COMPOSITE if a subsequent proximity event arrives for the same episode |
 
-- **Writer:** Alert evaluator on first signal loss emission
-- **Reader:** Alert evaluator (suppression check), Correlation Worker (composite supersession — checks for active dark entity when proximity arrives)
+- **Writer:** Alert evaluator on first signal loss emission; sets `composite_issued=1` when a COMPOSITE is issued
+- **Reader:** Alert evaluator (suppression check, composite idempotency), Correlation Worker (composite supersession — checks for active dark entity when proximity arrives)
 - **TTL:** None — key lives indefinitely
 - **Deleted by:** Position consumer — before deleting, writes `recent-loss:{entity_id}` (see below) so the correlation window survives the entity coming back online; then DEL this key
 
@@ -302,16 +305,17 @@ Active proximity episode state for a specific entity pair. Defines an encounter 
 | `candidate_published` | String (`0` or `1`) | Whether a `proximity.candidates` event has been successfully published for this episode — set to `0` immediately after creating the hash (before Kafka publish), updated to `1` after successful publish; if `0` on next ping, triggers a re-publish retry |
 
 - **Canonical pair key:** `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}` — alphabetically ordered; symmetric regardless of which entity triggered detection
-- **Writer:** Correlation Worker — created on first proximity detection for the pair; `last_seen_ms` updated on each subsequent ping within the episode
-- **Reader:** Correlation Worker — checked before publishing to `proximity.candidates`; if episode exists and `candidate_published=1`, refresh TTL and update `last_seen_ms` instead of publishing a new candidate; if `candidate_published=0`, retry the Kafka publish
+- **Writer:** Correlation Worker — created on first proximity detection for any pair (including KNOWN_ASSOCIATE pairs); `last_seen_ms` updated on each subsequent ping within the episode
+- **Reader:** Correlation Worker — checked on every proximity detection; if episode exists, refresh TTL and update `last_seen_ms` only; for unscheduled pairs, also check `candidate_published` (0 = retry Kafka publish; 1 = skip)
 - **TTL:** `PROXIMITY_EPISODE_GAP_MS` — refreshed on each within-threshold detection; when it expires the pair is treated as a new episode on the next detection
 
 **Design notes:**
-- Without this key, every `position.normalized` ping from either entity while they are within threshold triggers another `proximity.candidates` event, producing repeated alerts for one encounter.
+- One episode per continuous encounter, regardless of associate status. KNOWN_ASSOCIATE pairs also get a `proximity-episode` hash so the Correlation Worker avoids redundant Neo4j writes on every ping. The difference: KNOWN_ASSOCIATE episodes never publish to `proximity.candidates` and never set `candidate_published`.
+- Without this key, every `position.normalized` ping from either entity while they are within threshold triggers another `proximity.candidates` event (for unscheduled pairs) or another Neo4j MERGE (for known associates), producing redundant work per ping.
 - The canonical pair ordering (`min:max`) ensures (A,B) and (B,A) map to the same key regardless of which entity's ping arrived first.
-- The `candidate_published` field makes Kafka publish recoverable: if the Correlation Worker creates the episode hash and writes to Neo4j but crashes before Kafka publish succeeds, the next ping for the pair finds `candidate_published=0` and retries the publish. Without this field, a crash between Neo4j write and Kafka publish leaves the pair silently unalerted.
-- Write order: Neo4j MERGE first → set `candidate_published=0` → Kafka publish → set `candidate_published=1`.
-- If the TTL expires and the pair later comes close again, that is a distinct episode with a new `episode_start_ms`. The new episode produces a new Neo4j edge and a new `proximity.candidates` event.
+- The `candidate_published` field makes Kafka publish recoverable (unscheduled pairs only): if the Correlation Worker writes to Neo4j but crashes before Kafka publish succeeds, the next ping for the pair finds `candidate_published=0` and retries the publish.
+- Write order for unscheduled pairs: Neo4j MERGE first → set `candidate_published=0` → Kafka publish → set `candidate_published=1`.
+- If the TTL expires and the pair later comes close again, that is a distinct episode with a new `episode_start_ms`. The new episode produces a new Neo4j edge and (for unscheduled pairs) a new `proximity.candidates` event.
 - Neo4j idempotency key for the edge: `{pair_key}:{episode_start_ms}` — one edge per episode, not one per ping.
 
 ---
@@ -369,6 +373,8 @@ Broadcast channel for alert lifecycle events. Published by the API instance that
 ## Kafka Event Schemas
 
 TypeScript field definitions for these schemas live in a shared internal package imported by the ingestion poller, position consumer, correlation worker, deviation detector, alert evaluator, and API. See ADR-013.
+
+**Event-time invariant:** All `timestamp_ms` values in these schemas are source event times — the timestamp from the originating telemetry or synthetic feed. Processing time (when the event was consumed or written) is never used as an episode/window anchor. `alert_id` generation, episode start times, replay guards, and correlation windows all derive from `timestamp_ms`, not from wall clock at consumption time. This makes all processing replay-safe: reprocessing a Kafka event with the same source timestamp produces the same logical outcome.
 
 ---
 

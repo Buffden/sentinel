@@ -34,7 +34,7 @@ A Node.js service that reads the live position stream, writes proximity evidence
         4. Publish `proximity.candidates` to Kafka: `{ pair_key, entity_a_id: min, entity_b_id: max, episode_start_ms, lat, lon, distance_at_detection }`
         5. If Kafka publish succeeds: `HSET proximity-episode:{pair_key} candidate_published 1`
         6. If Kafka publish fails: leave `candidate_published=0`; on the next ping for this pair, re-attempt the publish before refreshing TTL
-      - If `KNOWN_ASSOCIATE` exists: write Neo4j `PROXIMITY_EVENT` edge (same MERGE with same idempotency key) — do not create proximity-episode, do not publish to `proximity.candidates`. This preserves durable evidence of the encounter in the graph while correctly excluding known associates from alert evaluation.
+      - If `KNOWN_ASSOCIATE` exists: write Neo4j `PROXIMITY_EVENT` edge (same MERGE) + create/refresh `proximity-episode:{pair_key}` hash (TTL only — no `candidate_published`) — do not publish to `proximity.candidates`. The episode hash prevents a Neo4j MERGE on every ping within the encounter.
   - `MERGE Entity` nodes if they don't exist yet
 - [ ] Writes to Redis: `proximity-episode:{pair_key}` hash only; does not write to TimescaleDB
 - [ ] `Dockerfile` + added to `docker-compose.yml`
@@ -45,6 +45,6 @@ A Node.js service that reads the live position stream, writes proximity evidence
 - `PROXIMITY_EVENT` edge appears in Neo4j for both unscheduled pairs AND known associates (all close pairs write the edge; the graph is the durable proximity evidence store)
 - Running the same event twice does not create a duplicate Neo4j edge (MERGE on `idempotency_key` confirmed)
 - `proximity.candidates` Kafka event published once per episode for unscheduled pairs only; no event published for known associates
-- `proximity-episode:{pair_key}` hash exists while entities are within threshold; `candidate_published` field set to `1` after successful Kafka publish; TTL refreshes on each ping; new episode starts after TTL expires
+- `proximity-episode:{pair_key}` hash exists while entities are within threshold for ALL pairs (unscheduled and known associates); `candidate_published` field set to `1` after successful Kafka publish for unscheduled pairs; TTL refreshes on each ping; new episode starts after TTL expires
 - If the service crashes after Neo4j write but before Kafka publish (`candidate_published=0`): next ping triggers retry publish
 - Neo4j browser shows the entity graph growing as entities are seen

@@ -36,7 +36,7 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 - [ ] Query `position_history` for last known position before publishing
 - [ ] Publish: `{ alert_id, alert_type: SIGNAL_LOSS, entity_id, last_known_position: { lat, lon }, dark_since_ms }`
 - [ ] `alert_id`: `{entity_id}:SIGNAL_LOSS:{dark_since_ms}`
-- [ ] `HSET alert-state:{entity_id} dark_since_ms {dark_since_ms} signal_loss_alert_id {alert_id}` (no TTL)
+- [ ] `HSET alert-state:{entity_id} dark_since_ms {dark_since_ms} signal_loss_alert_id {alert_id} composite_issued 0` (no TTL)
 
 **Route Deviation (US-04)**
 - [ ] Consume `deviation.candidates` (consumer group: `alert-evaluator`)

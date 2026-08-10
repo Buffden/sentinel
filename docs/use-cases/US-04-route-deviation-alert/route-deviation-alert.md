@@ -7,7 +7,7 @@
 
 ## Story
 
-As an operator, I want to receive an alert when an entity's current track diverges significantly from its established historical baseline so that I can identify route deviations.
+As an operator, I want to receive an alert when an entity's current track diverges significantly from its assigned reference route so that I can identify route deviations.
 
 ---
 
