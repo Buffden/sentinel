@@ -1,7 +1,5 @@
 # Sentinel
 
-> **Status: Architecture and planning complete — implementation not started.**
-> No services have been built yet. `docker compose up -d` will not work until Phase 01 is complete.
 
 A real-time geospatial entity-tracking and anomaly-detection platform. Sentinel ingests live positional telemetry from aircraft (ADS-B) and vessels (AIS), correlates entities across time and space, and surfaces meaningful anomalies  - signal loss, route deviation, unexpected proximity between previously unrelated entities  - on a live map dashboard.
 
