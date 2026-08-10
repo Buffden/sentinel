@@ -37,7 +37,7 @@ skinparam queue {
 ' --- Row 1: External Feeds ---
 together {
     node "External Feeds" #1e3a2a {
-        component [OpenSky Network\n(ADS-B)] as ADSB #2d5a3d
+        component [OpenSky Network\n(ADS-B · OAuth2)] as ADSB #2d5a3d
         component [AISHub\n(AIS)] as AIS #2d5a3d
     }
 
@@ -76,28 +76,28 @@ together {
     }
 
     node "Deviation Detector" #1a2a3a {
-        component [baseline comparison\ndeviation.candidates publisher] as DEV_DETECTOR #1e3a5a
+        component [reference route comparison\nstateless · deviation.candidates publisher] as DEV_DETECTOR #1e3a5a
     }
 }
 
 ' --- Row 5: Persistence ---
 together {
     node "TimescaleDB" #0c2a3a {
-        database [position history · alerts\nusers · user_workspaces\ngeo-cell + time-bucket sharding] as TSDB #0c4a6e
+        database [position history · alerts\nroute_references · users · workspaces\ntime-partitioned by observed_at\ngeo_cell: index column (not partition)] as TSDB #0c4a6e
     }
 
     node "Neo4j" #0a2a1a {
-        database [entity graph\nproximity relationships] as NEO4J #14532d
+        database [entity graph\nproximity episodes (PROXIMITY_EVENT edges)\nknown associates (KNOWN_ASSOCIATE edges)] as NEO4J #14532d
     }
 
     node "Redis" #3a0a0a {
-        database [live entity state · leader election\nentity:live:{id} · alert-state:{id}\npub/sub · position-updates channel] as REDIS #7f1d1d
+        database [live entity state · leader election\nentity:live:{id} · alert-state:{id} (hash)\nrecent-loss:{id} · proximity-episode:{pair}\ndeviation-state:{id}\npub/sub: position-updates · alert-events] as REDIS #7f1d1d
     }
 }
 
 ' --- Row 6: Alert ---
 node "Alert Layer" #2a1a3a {
-    component [Alert Evaluator\n(leader-elected - single writer)] as ALERT #4c1d95
+    component [Alert Evaluator\n(leader-elected · hybrid inputs)\nsignal-loss via Redis scan\ndeviation + proximity via Kafka\ncomposite via supersession] as ALERT #4c1d95
 }
 
 ' --- Row 7: API ---
@@ -146,7 +146,7 @@ CORR_WORKER  -[#f87171]down-> REDIS
 CORR_WORKER  -[#4ade80]down-> NEO4J
 CORR_WORKER  -[#a78bfa]down-> KAFKA_PROX_CAND
 
-' deviation detector reads route_baseline from TimescaleDB
+' deviation detector reads route_reference_points from TimescaleDB
 DEV_DETECTOR -[#38bdf8]down-> TSDB
 
 ' deviation detector -> deviation.candidates
@@ -167,7 +167,7 @@ KAFKA_ALERTS -[#94a3b8]down-> API
 
 ' API reads from stores and verifies identity with Google
 API         -[#38bdf8]left->  TSDB
-API         <-[#f87171]->     REDIS : "entity state /\nposition-updates"
+API         <-[#f87171]->     REDIS : "entity state /\nposition-updates /\nalert-events"
 API         -[#4ade80]left->  NEO4J
 API         -[#a78bfa]up->    GOOGLE
 
