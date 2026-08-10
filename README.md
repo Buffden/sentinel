@@ -118,7 +118,7 @@ cd ingestion && npm install && npm run start:replay
 open http://localhost:4200
 ```
 
-> To use live ADS-B data, set `OPENSKY_USERNAME` and `OPENSKY_PASSWORD` in `.env`. See `.env.example`.
+> To use live ADS-B data, set `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` in `.env` (OpenSky uses OAuth2 client credentials). See `.env.example`.
 
 ---
 

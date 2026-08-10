@@ -23,7 +23,9 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
 - [ ] Publish each state vector as a message to `adsb.raw`
   - Key: `icao24` (entity_id for aircraft)
   - Value: raw JSON as received — no parsing
-- [ ] Respect OpenSky rate limits; support optional `OPENSKY_USERNAME` / `OPENSKY_PASSWORD` for higher limits
+- [ ] Authenticate via OAuth2 client credentials (`OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET`); cache bearer token and refresh before expiry
+- [ ] Use bounding-box endpoint (`/states/all?lamin=...`) configured via `OPENSKY_BBOX` — cheaper than global `/states/all`
+- [ ] Respect OpenSky rate limits; document credit cost per request
 - [ ] Graceful shutdown — flush in-flight messages before exit
 - [ ] `Dockerfile` + added to `docker-compose.yml`
 
@@ -31,11 +33,16 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
 
 - [ ] Node.js + TypeScript service, consumer group: `position-consumer`
 - [ ] Consume `adsb.raw`; parse each state vector into normalised schema:
-  - `entity_id`, `entity_type`, `timestamp_ms`, `lat`, `lon`, `altitude`, `source`, `time_bucket`, `geo_cell` (H3 resolution 5)
+  - `entity_id`, `entity_type`, `timestamp_ms`, `lat`, `lon`, `altitude`, `source`, `geo_cell` (H3 at `HISTORY_H3_RESOLUTION`; default 5)
+  - Compute `observed_at = to_timestamp(timestamp_ms / 1000.0)` at ingest for the TimescaleDB write
 - [ ] Malformed events → `adsb.dlq` with rejection reason — never dropped, never crash the consumer
-- [ ] `INSERT INTO position_history ... ON CONFLICT DO NOTHING` (idempotency key: `{entity_id}:{timestamp_ms}`)
-- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} geo_cell {geo_cell} entity_type {entity_type}` + TTL = 24h (safety-net; key must outlive `SIGNAL_LOSS_THRESHOLD_MS` so the alert evaluator can scan it — see US-03)
-- [ ] Update geo-cell spatial index: `SREM geo-cell:{previous_geo_cell} {entity_id}` + `SADD geo-cell:{new_geo_cell} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
+  - `time_position` is null → rejection reason `NULL_TIME_POSITION`
+  - `now() - time_position > 15s` at ingest time → rejection reason `STALE_POSITION` (OpenSky's 15-second stale position threshold)
+  - Use `time_position` as `timestamp_ms` — not `time` (server collection time); `time_position` is when the transponder last reported position
+- [ ] `INSERT INTO position_history (entity_id, entity_type, observed_at, timestamp_ms, geo_cell, lat, lon, altitude, source) VALUES (...) ON CONFLICT (entity_id, timestamp_ms) DO NOTHING` (idempotency key: `{entity_id}:{timestamp_ms}`)
+- [ ] **Timestamp guard:** before writing, `HGET entity:live:{entity_id} last_seen_ms`; only proceed if `incoming.timestamp_ms >= stored value` (prevents replay or out-of-order delivery from regressing Redis state)
+- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} geo_cell {geo_cell} entity_type {entity_type}` + TTL = 24h
+- [ ] Update geo-cell spatial index: `ZREM geo-cell:{previous_geo_cell} {entity_id}` + `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
 - [ ] On entity resume after signal loss: `DEL alert-state:{entity_id}`
 - [ ] `PUBLISH position-updates {normalised_event_json}` after every write
 - [ ] `PRODUCE position.normalized` — consumed by Correlation Worker later
