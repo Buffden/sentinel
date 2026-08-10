@@ -15,14 +15,16 @@ Operators can acknowledge and resolve alerts. Status changes are persisted as an
 - [ ] `PATCH /alerts/:alert_id` — update alert status
   - `{ status: ACKNOWLEDGED }` → sets `acknowledged_at = now()`, `acknowledged_by = user_id`
   - `{ status: RESOLVED }` → sets `resolved_at = now()`, `resolved_by = user_id`
-  - Invalid transitions rejected (e.g. RESOLVED → ACKNOWLEDGED not allowed)
-- [ ] After status update: push updated alert state over WebSocket to scoped connections
+  - `SUPERSEDED` is set only by the system (composite alert creation) — rejected if sent by client
+  - Invalid transitions rejected: `SUPERSEDED → ACKNOWLEDGED` not allowed; `RESOLVED → ACKNOWLEDGED` not allowed
+- [ ] After status update: publish `{ type: ALERT_STATUS_CHANGED, payload: updated_alert }` to `alert-events` Redis pub/sub channel — all API instances receive it and push to scoped WebSocket connections
 - [ ] Alert records are never deleted — permanent audit trail
 
 ### Dashboard
 
-- [ ] Acknowledge and Resolve buttons on each alert row in the alert panel
+- [ ] Acknowledge and Resolve buttons on each alert row in the alert panel (not shown for SUPERSEDED alerts)
 - [ ] Status change reflected immediately in the UI on API response
+- [ ] SUPERSEDED alerts shown in history view linked from the COMPOSITE incident (evidence view)
 - [ ] Resolved alerts remain visible in a separate history view
 
 ### Re-detection Behaviour

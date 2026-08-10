@@ -2,35 +2,50 @@
 
 ## Goal
 
-The Alert Evaluator gains two stream-sourced rules: unscheduled proximity (US-05) and composite alerts (US-06). Proximity inputs arrive from the Correlation Worker via `proximity.candidates` — the evaluator no longer polls Neo4j for recent edges. The composite rule correlates a signal loss event with an unscheduled proximity event in the same window and emits a single elevated alert instead of two individual ones.
+The Alert Evaluator gains two stream-sourced rules: unscheduled proximity (US-05) and composite alerts (US-06). Proximity inputs arrive from the Correlation Worker via `proximity.candidates` (one event per episode). The composite rule uses an **alert supersession model**: SIGNAL_LOSS is emitted immediately; if proximity arrives within the correlation window referencing the same entity, the SIGNAL_LOSS is superseded by a COMPOSITE alert at that point.
 
 ## Dependencies
 
-- Phase 04 (alert evaluator running with leader election and `alert-state` keys in Redis)
-- Phase 05 (correlation worker publishing `PROXIMITY_EVENT` edges to Neo4j and `proximity.candidates` events to Kafka)
+- Phase 04 (alert evaluator running with leader election and `alert-state` hashes in Redis)
+- Phase 05 (correlation worker publishing `PROXIMITY_EVENT` edges to Neo4j and `proximity.candidates` events to Kafka — one per episode)
 
 ## Tasks
 
 ### Unscheduled Proximity (US-05)
 
 - [ ] Consume `proximity.candidates` (consumer group: `alert-evaluator`)
-- [ ] On each event: check whether a composite condition exists for the same entity pair (see below) — if so, suppress individual emission
-- [ ] Publish: `{ alert_id, alert_type: UNSCHEDULED_PROXIMITY, entity_a, entity_b, location, distance_metres, timestamp_ms }`
-- [ ] `alert_id`: `{entity_a}:{entity_b}:UNSCHEDULED_PROXIMITY:{window_start_ms}`
+- [ ] On each event, check both `entity_a_id` and `entity_b_id`:
+  - For each entity: check `HGETALL alert-state:{entity_id}` (entity is currently dark) OR `HGETALL recent-loss:{entity_id}` (entity was dark, has since resumed)
+  - If a matching signal loss is found AND `episode_start_ms` falls within `COMPOSITE_CORRELATION_WINDOW_MS` of `dark_since_ms`:
+    - Emit `COMPOSITE` alert (ELEVATED); include `supersedes_alert_ids: [signal_loss_alert_id]`
+    - `alert_id`: `{entity_id}:COMPOSITE:{dark_since_ms}`; do NOT emit UNSCHEDULED_PROXIMITY
+  - If no signal loss correlation found: emit `UNSCHEDULED_PROXIMITY` alert
+- [ ] UNSCHEDULED_PROXIMITY: `{ alert_id, alert_type: UNSCHEDULED_PROXIMITY, pair_key, entity_a_id, entity_b_id, lat, lon, distance_at_detection, episode_start_ms }`
+- [ ] `alert_id` for UNSCHEDULED_PROXIMITY: `{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}`
 
-### Composite Alert (US-06)
+### Composite Alert (US-06) — Supersession Model
 
-- [ ] On each `proximity.candidates` event, check whether the proximity entity has an active `alert-state:{entity_id}` key in Redis (signal loss active)
-  - Read `dark_since_ms` from `alert-state:{entity_id}` (the value of the key)
-  - If the proximity event `timestamp_ms` falls within the signal loss window: both conditions met
-    - Query Neo4j for the full proximity window start time and relationship context (targeted lookup on the specific entity pair — not a scan; see ADR-014)
-    - Emit ONE composite alert — suppress both the individual `SIGNAL_LOSS` and `UNSCHEDULED_PROXIMITY` for this event
-    - Publish: `{ alert_id, alert_type: COMPOSITE, priority: ELEVATED, entity_b (dark entity), entity_a (proximity entity), correlation_window_ms, window_start_ms, location, timestamp_ms }`
-    - `alert_id`: `{entity_id}:COMPOSITE:{window_start_ms}`
+SIGNAL_LOSS is never held back. Composite correlation happens when proximity arrives and finds a matching signal loss episode.
+
+**Position Consumer (Phase 04 extension):**
+- [ ] When entity resumes broadcasting and `alert-state:{entity_id}` exists:
+  - `HSET recent-loss:{entity_id} dark_since_ms {dark_since_ms} resumed_at_ms {now} signal_loss_alert_id {alert_id}` + `EXPIRE COMPOSITE_CORRELATION_WINDOW_MS / 1000`
+  - `DEL alert-state:{entity_id}`
+
+**Alert Evaluator (composite detection):**
+- [ ] COMPOSITE alert: query Neo4j for relationship context (targeted lookup on entity pair)
+- [ ] Publish: `{ alert_id, alert_type: COMPOSITE, priority: ELEVATED, entity_id, signal_loss: { dark_since_ms, last_lat, last_lon }, proximity: { pair_key, entity_b_id, lat, lon, distance_at_detection }, correlation_window_ms, supersedes_alert_ids }`
+
+**API (atomic supersession):**
+- [ ] On COMPOSITE alert from Kafka:
+  - DB transaction: `INSERT INTO alerts (composite)` + `UPDATE alerts SET status = 'SUPERSEDED', superseded_by = {composite_alert_id} WHERE alert_id IN (supersedes_alert_ids)`
+  - Commit; then publish TWO messages to `alert-events`: `{ type: ALERT_CREATED, payload: composite }` and `{ type: ALERT_SUPERSEDED, payload: superseded_signal_loss_alert }`
+- [ ] Dashboard shows COMPOSITE as the active incident; superseded SIGNAL_LOSS appears in the evidence/history view linked from the composite
 
 ## Done When
 
-- `UNSCHEDULED_PROXIMITY` alert emitted when a `proximity.candidates` event arrives for a pair with no active composite condition
-- No alert emitted for a pair with a `KNOWN_ASSOCIATE` edge (filtered upstream by the correlation worker before reaching `proximity.candidates`)
-- When a `proximity.candidates` event arrives for a dark entity: ONE `COMPOSITE` alert on the dashboard, no individual `SIGNAL_LOSS` or `UNSCHEDULED_PROXIMITY` for that event
-- When only one condition is met (signal loss with no proximity, or proximity with no signal loss): individual alert emitted, no composite
+- `UNSCHEDULED_PROXIMITY` alert emitted when proximity arrives with no signal loss correlation
+- No `proximity.candidates` event emitted for `KNOWN_ASSOCIATE` pairs (filtered upstream)
+- When proximity arrives for an active dark entity: COMPOSITE emitted and SIGNAL_LOSS marked SUPERSEDED atomically; dashboard shows COMPOSITE as the active incident
+- When proximity arrives for an entity that was dark but has since resumed (within `COMPOSITE_CORRELATION_WINDOW_MS`): same composite + supersession behaviour via `recent-loss`
+- When only one condition is met: individual alert emitted, no composite

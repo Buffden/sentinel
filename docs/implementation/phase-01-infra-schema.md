@@ -39,17 +39,21 @@ None.
 Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically on first start.
 
 - [ ] `position_history` hypertable
-  - Columns: `entity_id`, `entity_type`, `timestamp_ms`, `time_bucket`, `geo_cell`, `lat`, `lon`, `altitude`, `source`
-  - Partitioned by `timestamp_ms`, daily chunks
-  - Unique constraint on `(entity_id, timestamp_ms)` — idempotency key
-  - Index on `(entity_id, time_bucket)` — single-entity timeline queries
-  - Index on `(geo_cell, time_bucket)` — regional time-window queries
+  - Columns: `entity_id`, `entity_type`, `observed_at` (TIMESTAMPTZ — hypertable partition column), `timestamp_ms` (BIGINT — source metadata + idempotency key), `geo_cell`, `lat`, `lon`, `altitude`, `source`
+  - Partitioned by `observed_at`, daily chunks — TimescaleDB requires TIMESTAMPTZ; `observed_at = to_timestamp(timestamp_ms / 1000.0)` computed at ingest
+  - Unique constraint on `(entity_id, timestamp_ms)` — idempotency key (ADR-007)
+  - Index on `(entity_id, observed_at DESC)` — single-entity timeline queries
+  - Index on `(geo_cell, observed_at DESC)` — regional time-window queries; `geo_cell` is an index column, not a partition dimension (see ADR-006)
   - Retention policy: drop chunks older than 30 days
-- [ ] `route_baseline` continuous aggregate over `position_history`
-  - Columns: `entity_id`, `time_bucket`, `avg_lat`, `avg_lon`, `stddev_metres`, `sample_count`
-  - 1-hour buckets; automated background refresh; 30-day look-back
+- [ ] `route_references` table (route deviation uses deterministic reference routes, not a continuous aggregate — see ADR-015)
+  - Columns: `route_id` (PK), `entity_id`, `route_name`, `corridor_threshold_metres`, `source`, `created_at`
+  - Index on `entity_id`
+- [ ] `route_reference_points` table
+  - Columns: `route_id` (FK → route_references), `sequence_no`, `lat`, `lon`
+  - Primary key on `(route_id, sequence_no)`
+  - Both tables seeded from synthetic generator route definition at startup
 - [ ] `alerts` table
-  - Columns: `alert_id` (PK), `entity_id`, `entity_type`, `alert_type`, `priority`, `status`, `payload` (JSONB), `detected_at`, `updated_at`, `acknowledged_at`, `acknowledged_by`, `resolved_at`, `resolved_by`
+  - Columns: `alert_id` (PK), `entity_id`, `entity_type`, `alert_type`, `priority`, `status` (NEW | ACKNOWLEDGED | RESOLVED | SUPERSEDED), `superseded_by` (nullable FK → alerts.alert_id), `payload` (JSONB), `detected_at`, `updated_at`, `acknowledged_at`, `acknowledged_by`, `resolved_at`, `resolved_by`
   - Index on `(entity_id, detected_at DESC)` — investigation panel
   - Index on `(status, detected_at DESC)` — operator alert feed
   - Index on `(alert_type, detected_at DESC)` — alert type filter
@@ -69,8 +73,8 @@ Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically 
 
 - `docker compose up -d` starts all services without errors
 - All 8 Kafka topics exist in Redpanda Console (`adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`, `position.normalized`, `deviation.candidates`, `proximity.candidates`, `alerts`)
-- TimescaleDB accepts a `psql` connection; all tables exist with correct columns
-- `route_baseline` continuous aggregate is registered
+- TimescaleDB accepts a `psql` connection; all tables exist with correct columns (`position_history`, `route_references`, `route_reference_points`, `alerts`, `users`, `user_workspaces`)
+- No `route_baseline` continuous aggregate — route deviation uses `route_reference_points`
 - Neo4j uniqueness constraint on `Entity.entity_id` is in place
 - Redis responds to `PING`
 - `docker compose down -v` cleanly tears everything down
