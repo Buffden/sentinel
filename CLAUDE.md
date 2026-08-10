@@ -117,6 +117,16 @@ If a `LEARNING_MODE.md` file exists at the repo root, read it before starting an
 
 ---
 
+## Implementation planning
+
+There is intentionally no permanent `docs/implementation/` plan.
+
+Before starting implementation work, read `IMPLEMENTATION_WORKFLOW.md` and follow its just-in-time planning, checkpoint, hands-on learning, failure-testing, and verification workflow.
+
+Do not recreate the deleted implementation-plan directory.
+
+---
+
 ## Key documents
 
 | File | Purpose |
