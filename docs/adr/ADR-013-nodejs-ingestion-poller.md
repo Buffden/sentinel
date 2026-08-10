@@ -28,7 +28,7 @@ Use Node.js for the ingestion poller.
 
 **Shared Kafka client config.** Both the poller and the API use the same Kafka broker. A shared `kafkaClient` factory and topic constant definitions avoid duplicating connection config and reduce the surface area for misconfiguration.
 
-**Shared TypeScript types.** The `position.normalized` event schema must be consistent between the poller (producer) and the position consumer (consumer). A shared types package enforces this at compile time.
+**Shared TypeScript types.** The raw event schemas (`adsb.raw`, `ais.raw`) must be parseable by the position consumer, and the `position.normalized` schema must be consistent across all services that produce or consume it. A shared types package enforces both contracts at compile time — the poller produces raw events; the position consumer normalises them and produces `position.normalized`.
 
 **Async I/O is a natural fit.** The poller's work is network I/O — HTTP requests to external feeds, Kafka produce calls. Node's event loop handles this efficiently without threads.
 
