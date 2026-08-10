@@ -28,9 +28,9 @@ This folder defines what Sentinel does from the perspective of its users and the
 | ID | Title | ADR | Diagrams |
 |---|---|---|---|
 | [US-03](US-03-signal-loss-alert/signal-loss-alert.md) | Signal loss alert | ADR-002 | detection, alert delivery, alert suppression |
-| [US-04](US-04-route-deviation-alert/route-deviation-alert.md) | Route deviation alert | ADR-002 | baseline computation, deviation detection, transient vs sustained |
-| [US-05](US-05-unscheduled-proximity/unscheduled-proximity.md) | Unscheduled proximity alert | ADR-003 | proximity detection, graph update |
-| [US-06](US-06-composite-alert/composite-alert.md) | Composite correlated alert | ADR-003 | signal correlation, composite emission, single signal path |
+| [US-04](US-04-route-deviation-alert/route-deviation-alert.md) | Route deviation alert | ADR-002, ADR-014 | baseline computation, deviation detection, transient vs sustained |
+| [US-05](US-05-unscheduled-proximity/unscheduled-proximity.md) | Unscheduled proximity alert | ADR-003, ADR-014 | proximity detection, graph update |
+| [US-06](US-06-composite-alert/composite-alert.md) | Composite correlated alert | ADR-003, ADR-014 | signal correlation, composite emission, single signal path |
 | [US-07](US-07-duplicate-free-alerts/duplicate-free-alerts.md) | Duplicate-free alert emission | ADR-005 | leader election, failover, race condition without election |
 | [US-13](US-13-alert-lifecycle/alert-lifecycle.md) | Alert lifecycle management | ADR-010 | state transitions, acknowledge flow, resolve and reopen |
 

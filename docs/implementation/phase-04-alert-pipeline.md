@@ -30,12 +30,24 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 - [ ] `SET alert-state:{entity_id} {dark_since_ms}` (no TTL)
 
 **Route Deviation (US-04)**
-- [ ] On each cycle, for each live entity:
-  - Compare current position (from Redis) against `route_baseline` for the current time bucket
-  - `INCR deviation-counter:{entity_id}` if outside threshold; `DEL` when back within range
-  - Emit alert only after `DEVIATION_SUSTAINED_PINGS` consecutive out-of-baseline pings
-- [ ] Publish: `{ alert_id, alert_type: ROUTE_DEVIATION, entity_id, current_position, baseline_position, deviation_metres }`
+- [ ] Consume `deviation.candidates` (consumer group: `alert-evaluator`)
+- [ ] On `OUT_OF_RANGE` event: `INCR deviation-counter:{entity_id}`; if counter >= `DEVIATION_SUSTAINED_PINGS`, emit alert
+- [ ] On `BACK_IN_RANGE` event: `DEL deviation-counter:{entity_id}` — counter reset, no alert
+- [ ] Publish: `{ alert_id, alert_type: ROUTE_DEVIATION, entity_id, current_position, baseline_position, deviation_metres, sustained_cycles }`
 - [ ] `alert_id`: `{entity_id}:ROUTE_DEVIATION:{window_start_ms}`
+- [ ] `Dockerfile` + added to `docker-compose.yml`
+
+### Deviation Detector (`services/deviation-detector/`)
+
+- [ ] Scaffold Node.js + TypeScript service under `services/deviation-detector/`
+- [ ] Consumer group: `deviation-detector`; consume `position.normalized`
+- [ ] On each event:
+  - Query `route_baseline` in TimescaleDB for `(entity_id, current_time_bucket)`
+  - Compute Haversine distance between incoming position and `(avg_lat, avg_lon)` from baseline
+  - If distance > `ROUTE_DEVIATION_THRESHOLD_METRES`: publish `OUT_OF_RANGE` event to `deviation.candidates`
+  - If entity was previously out-of-range and is now back within threshold: publish `BACK_IN_RANGE` event to `deviation.candidates`
+  - If entity has no baseline (new entity, < 30 days history): skip — no event published
+- [ ] Does not write to Redis, Neo4j, or the `alerts` topic
 - [ ] `Dockerfile` + added to `docker-compose.yml`
 
 ### API — Alert Consumer + REST

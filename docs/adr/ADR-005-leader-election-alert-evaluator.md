@@ -7,7 +7,7 @@
 
 ## Context
 
-The alert evaluator is a stateful worker that reads from Neo4j and Redis, evaluates composite anomaly rules, and emits alerts. If multiple instances of the alert evaluator run simultaneously, they may each independently evaluate the same event and emit duplicate alerts  - or worse, emit conflicting alerts for the same entity at the same time.
+The alert evaluator is a stateful worker that consumes Kafka topics (`deviation.candidates`, `proximity.candidates`), runs a scheduled Redis scan for signal loss, reads from Neo4j for composite alert context, reads/writes Redis state keys (`alert-state`, `deviation-counter`), and emits alerts. If multiple instances of the alert evaluator run simultaneously, they may each independently evaluate the same event and emit duplicate alerts  - or worse, emit conflicting alerts for the same entity at the same time.
 
 The system must prevent duplicate alert emission without reducing the evaluator to a single non-redundant process.
 

@@ -26,13 +26,13 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
 
-The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, and writes a PROXIMITY_EVENT edge to Neo4j when none exists. The Alert Evaluator then queries Neo4j, emits the alert to Kafka, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
+The correlation worker detects two entities within the distance threshold, queries Neo4j for a prior relationship, writes a PROXIMITY_EVENT edge to Neo4j, and — for unscheduled pairs only — publishes a `proximity.candidates` event to Kafka. The Alert Evaluator consumes `proximity.candidates`, emits the alert to the `alerts` topic, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
 
 ### Graph Update
 
 ![Graph Update](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/graph-update.svg)
 
-The correlation worker writes the proximity event as an edge in Neo4j using MERGE, ensuring the write is idempotent under Kafka replay.
+The correlation worker writes the proximity event as an edge in Neo4j using MERGE (idempotent under Kafka replay), then also publishes a `proximity.candidates` event to Kafka for unscheduled pairs.
 
 ---
 

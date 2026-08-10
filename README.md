@@ -90,6 +90,7 @@ Significant design choices are documented in `/docs/adr/` with alternatives cons
 | ADR-011 | Google OAuth 2.0 for operator authentication |
 | ADR-012 | Workspace scope and server-side alert filtering |
 | ADR-013 | Node.js for the ingestion poller |
+| ADR-014 | Hybrid input model for the Alert Evaluator (Deviation Detector + stream-based inputs) |
 
 ---
 

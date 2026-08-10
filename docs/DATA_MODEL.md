@@ -54,7 +54,7 @@ A TimescaleDB continuous aggregate materialised from `position_history`. Compute
 **Design notes:**
 - Look-back window: **30 days**. An entity needs at least 30 days of position history for a meaningful baseline. New entities produce no route deviation alerts until sufficient history accumulates.
 - Refresh policy: every hour, covering up to the last 30 days.
-- The alert evaluator queries by `(entity_id, time_bucket)` and reads `stddev_metres` directly to compare against `ROUTE_DEVIATION_THRESHOLD_METRES`. POC-03 validates the computation approach.
+- The Deviation Detector queries by `(entity_id, time_bucket)` and reads `avg_lat`, `avg_lon`, `stddev_metres` to compare the incoming position against the expected route. See ADR-014.
 
 ---
 
@@ -215,7 +215,7 @@ In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a 
 
 Consecutive out-of-baseline ping count for sustained route deviation detection (US-04).
 
-- **Writer:** Alert evaluator — INCR each cycle the entity is outside baseline; DEL when back within baseline or after alert emitted
+- **Writer:** Alert evaluator — INCR on each `OUT_OF_RANGE` event from `deviation.candidates`; DEL on `BACK_IN_RANGE` event
 - **Reader:** Alert evaluator only
 - **TTL:** None — managed explicitly by the evaluator
 
@@ -259,7 +259,7 @@ Raw bytes from the source feed, unparsed. No schema constraint imposed by Sentin
 
 ### `position.normalized`
 
-Published by the position consumer. Consumed by the correlation worker.
+Published by the position consumer. Consumed by the correlation worker and deviation detector.
 
 | Field | Type | Description |
 |---|---|---|
@@ -271,6 +271,36 @@ Published by the position consumer. Consumed by the correlation worker.
 | `altitude` | number \| null | Metres; null for vessels |
 | `source` | string | `adsb`, `ais`, or `synthetic` |
 | `geo_cell` | string | H3 cell ID at resolution 5; computed by position consumer |
+
+---
+
+### `deviation.candidates`
+
+Published by the deviation detector. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; durable facts remain in `position_history` and `route_baseline`). See ADR-014.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `entity_id` | string | ICAO hex or MMSI |
+| `timestamp_ms` | number | Unix ms of the position ping |
+| `status` | string | `OUT_OF_RANGE` or `BACK_IN_RANGE` |
+| `current_position` | object | `{ lat, lon }` — position at time of event |
+| `baseline_position` | object | `{ avg_lat, avg_lon }` — expected position from `route_baseline`; omitted on `BACK_IN_RANGE` |
+| `deviation_metres` | number | Distance between current and baseline position; omitted on `BACK_IN_RANGE` |
+
+---
+
+### `proximity.candidates`
+
+Published by the correlation worker for unscheduled proximity pairs (no `KNOWN_ASSOCIATE` edge). Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; the durable edge remains in Neo4j). See ADR-014.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `entity_a_id` | string | First entity ICAO hex or MMSI |
+| `entity_b_id` | string | Second entity ICAO hex or MMSI |
+| `timestamp_ms` | number | Unix ms when proximity was detected |
+| `lat` | number | Latitude of the midpoint between the two entities |
+| `lon` | number | Longitude of the midpoint |
+| `distance_metres` | number | Distance between the two entities at detection time |
 
 ---
 

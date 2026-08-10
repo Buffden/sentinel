@@ -1,5 +1,5 @@
 @startuml signal-correlation
-title US-06: Signal Correlation - Two Weak Signals Joined via Neo4j
+title US-06: Signal Correlation - Two Weak Signals Joined via proximity.candidates + Redis
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,16 +7,27 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
+queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nalert-state:{id}" as AlertState
 database "Neo4j\nentity graph" as Neo4j
 
 note over Evaluator
-  Runs on each evaluation cycle.
+  Runs on Kafka consume from proximity.candidates.
   Only the elected leader emits alerts.
 end note
 
-Evaluator -> AlertState : GET alert-state:{entity_b}
+ProxKafka -> Evaluator : consume proximity.candidates event\n{ entity_a_id, entity_b_id, timestamp_ms, lat, lon, distance_metres }
+
+note over Evaluator
+  Proximity candidate: unscheduled pair detected
+  by the Correlation Worker.
+  Known associates already filtered upstream -
+  they never appear here.
+  This is weak signal 2.
+end note
+
+Evaluator -> AlertState : GET alert-state:{entity_b_id}
 AlertState --> Evaluator : $dark_since_ms (SIGNAL_LOSS alert active - Entity B is dark)
 
 note over Evaluator
@@ -25,24 +36,28 @@ note over Evaluator
   Not actionable on its own.
 end note
 
-Evaluator -> Neo4j : MATCH (b:Entity {id: $id_b})-[e:PROXIMITY_EVENT]->(a:Entity)\nWHERE e.timestamp_ms > $dark_since_ms\nAND NOT (b)-[:KNOWN_ASSOCIATE]-(a)\nRETURN a, e
+Evaluator -> Evaluator : check: does proximity timestamp_ms\nfall within the signal loss window?
 
-note over Neo4j
-  Multi-hop graph traversal:
-  find all entities that came near
-  Entity B after it went dark,
-  with no prior KNOWN_ASSOCIATE edge.
-  Single Cypher pattern match.
-end note
+alt proximity within loss window
+  Evaluator -> Neo4j : MATCH (b:Entity {id: $id_b})-[e:PROXIMITY_EVENT]->(a:Entity {id: $id_a})\nWHERE e.timestamp_ms = $timestamp_ms\nRETURN e
 
-Neo4j --> Evaluator : Entity A, proximity event { lat, lon, timestamp_ms, distance_metres }
+  note over Neo4j
+    Targeted lookup on a specific entity pair.
+    Not a scan for recent edges -
+    the candidate arrived via Kafka.
+    Neo4j is queried only for relationship context
+    needed to assemble the composite alert payload.
+  end note
 
-note over Evaluator
-  Weak signal 2: proximity to unrelated entity
-  within the signal loss window.
-  Together they form a composite pattern.
-end note
+  Neo4j --> Evaluator : proximity event details { lat, lon, timestamp_ms, distance_metres }
 
-Evaluator -> Evaluator : correlate signals\n-> COMPOSITE alert at elevated priority
+  note over Evaluator
+    Both weak signals confirmed.
+    Together they form a composite pattern.
+    Emit ONE composite alert at elevated priority.
+  end note
+
+  Evaluator -> Evaluator : correlate signals\n-> COMPOSITE alert at elevated priority
+end
 
 @enduml

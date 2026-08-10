@@ -28,8 +28,11 @@ None.
   - `adsb.raw`, `ais.raw` — raw ingestion
   - `adsb.dlq`, `ais.dlq` — dead letter queues
   - `position.normalized` — normalised position stream
+  - `deviation.candidates` — per-entity out-of-baseline status events (Deviation Detector → Alert Evaluator)
+  - `proximity.candidates` — unscheduled proximity pairs (Correlation Worker → Alert Evaluator)
   - `alerts` — alert events
 - [ ] Set `retention.ms` on all topics — consumers must be able to replay missed events after a crash (US-08, US-10); align with 30-day TimescaleDB retention window
+- [ ] Set short retention (1h) on `deviation.candidates` and `proximity.candidates` — stale derived signals have no replay value; underlying facts remain durable in TimescaleDB and Neo4j (see ADR-014)
 
 ### TimescaleDB Schema
 
@@ -65,7 +68,7 @@ Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically 
 ## Done When
 
 - `docker compose up -d` starts all services without errors
-- All 6 Kafka topics exist in Redpanda Console
+- All 8 Kafka topics exist in Redpanda Console (`adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`, `position.normalized`, `deviation.candidates`, `proximity.candidates`, `alerts`)
 - TimescaleDB accepts a `psql` connection; all tables exist with correct columns
 - `route_baseline` continuous aggregate is registered
 - Neo4j uniqueness constraint on `Entity.entity_id` is in place
