@@ -22,7 +22,7 @@ end note
 Kafka -> Consumer : deliver event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
 Consumer -> Consumer : key = "ABC123:1700000000000"
 Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING
-Consumer -> Redis : HSET entity:live:ABC123
+Consumer -> Redis : HGET entity:live:ABC123 last_seen_ms -> nil\nHSET entity:live:ABC123 { lat, lon, last_seen_ms: 1700000000000 }
 Consumer -> Kafka : commit offset
 
 note over Kafka
@@ -34,12 +34,14 @@ end note
 Kafka -> Consumer : redeliver same event\n{ entity_id: "ABC123", timestamp_ms: 1700000000000, lat: 51.5, lon: -0.1 }
 Consumer -> Consumer : key = "ABC123:1700000000000" (identical)
 Consumer -> TSDB : INSERT ... ON CONFLICT DO NOTHING -> no-op
-Consumer -> Redis : HSET entity:live:ABC123 -> no-op
+Consumer -> Redis : HGET entity:live:ABC123 last_seen_ms -> 1700000000000\ntimestamp_ms (1700000000000) <= stored (1700000000000): skip HSET
 Consumer -> Kafka : commit offset
 
 note over TSDB, Redis
   Both stores in consistent state.
-  No duplicate rows or keys created.
+  TimescaleDB: ON CONFLICT DO NOTHING silently drops duplicate row.
+  Redis: timestamp guard skips the HSET when event timestamp
+  is not newer than stored last_seen_ms — prevents value regression.
   No coordination between instances required.
   The Correlation Worker applies the same guarantee
   when writing PROXIMITY_EVENT edges to Neo4j
