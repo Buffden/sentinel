@@ -38,10 +38,11 @@ Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/
 | Layer | Technology |
 | --- | --- |
 | Data ingestion | Node.js poller → Kafka (Redpanda locally, MSK on AWS) |
+| Stream processing | Position Consumer (normalise + persist), Correlation Worker (proximity graph), Deviation Detector (baseline comparison) |
 | Position store | TimescaleDB (geo-cell + time-bucket sharding) |
 | Correlation graph | Neo4j |
 | Live state cache | Redis |
-| Alert evaluation | Leader-elected worker service |
+| Alert evaluation | Leader-elected Alert Evaluator — hybrid inputs: scheduled Redis scan (signal loss) + `deviation.candidates` + `proximity.candidates` |
 | API | Express (Node.js) - REST + WebSocket |
 | Operator auth | Google OAuth 2.0 + JWT (identity required for per-user workspace) |
 | Dashboard | Angular + Leaflet |
