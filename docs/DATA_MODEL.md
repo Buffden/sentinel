@@ -27,7 +27,7 @@ Primary write target for every normalised position ping. Partitioned by Timescal
 | `source` | TEXT | No | `adsb`, `ais`, or `synthetic` |
 
 **Constraints and indexes:**
-- Unique constraint on `(entity_id, timestamp_ms)` — `ON CONFLICT DO NOTHING` makes every insert idempotent (ADR-007)
+- Unique constraint on `(entity_id, observed_at)` — `ON CONFLICT DO NOTHING` makes every insert idempotent (ADR-007). TimescaleDB requires the partition column (`observed_at`) in every unique constraint on a hypertable. `timestamp_ms` is the logical idempotency key; `observed_at = to_timestamp(timestamp_ms / 1000.0)` is deterministically derived from it, so the constraint is equivalent in practice.
 - Index on `(entity_id, observed_at DESC)` — serves single-entity timeline queries
 - Index on `(geo_cell, observed_at DESC)` — serves regional time-window queries
 
@@ -40,27 +40,43 @@ Primary write target for every normalised position ping. Partitioned by Timescal
 
 ---
 
-### `reference_routes` (plain table)
+### `route_references` (plain table)
 
-Static reference routes for synthetic entities. Seeded from the synthetic generator's route definition at startup. Only synthetic entities have reference routes — real ADS-B and AIS entities do not have route deviation detection in v1 (statistical baseline from averaged history does not produce a meaningful route corridor; see doc-gaps.md decision #11).
+Route header records for synthetic entities. Seeded from the synthetic generator at startup. Only synthetic entities have reference routes — real ADS-B and AIS entities do not have route deviation detection in v1. See ADR-015.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
+| `route_id` | TEXT | No | Primary key — unique route identifier |
 | `entity_id` | TEXT | No | Synthetic entity identifier |
-| `sequence_number` | INTEGER | No | Waypoint order along the route |
-| `lat` | DOUBLE PRECISION | No | Waypoint latitude |
-| `lon` | DOUBLE PRECISION | No | Waypoint longitude |
-| `tolerance_metres` | REAL | No | Acceptable lateral deviation from this waypoint before OUT_OF_RANGE is emitted |
-| `description` | TEXT | Yes | Human-readable waypoint label |
+| `route_name` | TEXT | No | Human-readable route label |
+| `corridor_threshold_metres` | REAL | No | Acceptable lateral deviation from the route before `OUT_OF_RANGE` is emitted |
+| `source` | TEXT | No | `synthetic` or `manual` |
+| `created_at` | TIMESTAMPTZ | No | Creation timestamp |
 
 **Constraints and indexes:**
-- Primary key on `(entity_id, sequence_number)`
-- Index on `entity_id` — Deviation Detector fetches the full route for an entity by ID
+- Primary key on `route_id`
+- Index on `entity_id` — Deviation Detector fetches the route for an entity by ID
+
+---
+
+### `route_reference_points` (plain table)
+
+Ordered waypoints for each route. The Deviation Detector fetches all points for a route and computes the minimum perpendicular distance from the current position to each route segment (point[i] → point[i+1]).
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `route_id` | TEXT | No | FK → `route_references.route_id` |
+| `sequence_no` | INTEGER | No | Waypoint order (0-based) — adjacent pairs define route segments |
+| `lat` | DOUBLE PRECISION | No | Waypoint latitude |
+| `lon` | DOUBLE PRECISION | No | Waypoint longitude |
+
+**Constraints and indexes:**
+- Primary key on `(route_id, sequence_no)`
 
 **Design notes:**
-- The Deviation Detector fetches the reference route for the entity, finds the nearest waypoint to the incoming position, and computes Haversine distance. If distance > `tolerance_metres` for that waypoint: `OUT_OF_RANGE`. Otherwise: `IN_RANGE`.
+- The Deviation Detector fetches the full waypoint list, then for each ping finds the nearest route **segment** (not nearest waypoint) by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]). If the perpendicular foot falls outside the segment, the distance is the minimum of the two endpoint distances.
 - Route deviation detection is **synthetic-only in v1**. Real entities produce no deviation alerts. This eliminates the 30-day cold-start problem of statistical baselines and gives deterministic, injectable anomalies for demos.
-- The `route_baseline` continuous aggregate originally planned here was dropped. Averaging lat/lon per hour does not produce a meaningful route corridor — the average of A→B→C positions lands somewhere in the middle of the route, not on it. Statistical route modeling is deferred to future work.
+- The `route_baseline` continuous aggregate originally planned here was dropped — averaging lat/lon per hour does not produce a meaningful route corridor.
 
 ---
 
@@ -129,7 +145,7 @@ One row per operator. Holds the operator's saved scope for server-side alert fil
 | `geo_region.name` | string | Named region (e.g. `France`) |
 | `geo_region.bounds` | object | `min_lat`, `max_lat`, `min_lon`, `max_lon` |
 | `entity_types` | string[] | `aircraft`, `vessel`, or both |
-| `alert_types` | string[] | Subset of `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, `COMPOSITE` |
+| `alert_types` | string[] | Subset of `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, `COMPOSITE` — must use `UNSCHEDULED_PROXIMITY` (not `PROXIMITY`) to match the canonical `alert_type` enum |
 
 ---
 
@@ -266,7 +282,7 @@ Route deviation episode state for sustained deviation detection (US-04). Owns al
 
 - **Writer:** Alert evaluator — on `OUT_OF_RANGE`: guard `timestamp_ms > last_processed_ms`; `HINCRBY count 1`; set `episode_start_ms` on count==1; set `alert_emitted=1` after emitting; update `last_processed_ms`; on `IN_RANGE`: DEL
 - **Reader:** Alert evaluator only
-- **TTL:** Safety TTL of `2 × SIGNAL_LOSS_THRESHOLD_MS` — prevents abandoned state if the entity goes dark or the Deviation Detector stops publishing; the evaluator also deletes explicitly on `IN_RANGE`
+- **TTL:** Safety TTL of `DEVIATION_STATE_TTL_MS` (default: 24h) — prevents abandoned state if the entity goes dark or the Deviation Detector stops publishing; decoupled from signal-loss timing so deviation state survives brief gaps; the evaluator also deletes explicitly on `IN_RANGE`
 
 **Design notes:**
 - The Deviation Detector is stateless — it emits `OUT_OF_RANGE` or `IN_RANGE` on **every** eligible ping, not just on transitions. `BACK_IN_RANGE` does not exist; the Detector simply classifies each ping. Episode state lives entirely here.
@@ -283,15 +299,18 @@ Active proximity episode state for a specific entity pair. Defines an encounter 
 |---|---|---|
 | `episode_start_ms` | String (int) | Unix ms when this encounter episode began |
 | `last_seen_ms` | String (int) | Unix ms of the most recent position ping that confirmed proximity |
+| `candidate_published` | String (`0` or `1`) | Whether a `proximity.candidates` event has been successfully published for this episode — set to `0` immediately after creating the hash (before Kafka publish), updated to `1` after successful publish; if `0` on next ping, triggers a re-publish retry |
 
 - **Canonical pair key:** `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}` — alphabetically ordered; symmetric regardless of which entity triggered detection
 - **Writer:** Correlation Worker — created on first proximity detection for the pair; `last_seen_ms` updated on each subsequent ping within the episode
-- **Reader:** Correlation Worker — checked before publishing to `proximity.candidates`; if episode exists, refresh TTL and update `last_seen_ms` instead of publishing a new candidate
+- **Reader:** Correlation Worker — checked before publishing to `proximity.candidates`; if episode exists and `candidate_published=1`, refresh TTL and update `last_seen_ms` instead of publishing a new candidate; if `candidate_published=0`, retry the Kafka publish
 - **TTL:** `PROXIMITY_EPISODE_GAP_MS` — refreshed on each within-threshold detection; when it expires the pair is treated as a new episode on the next detection
 
 **Design notes:**
 - Without this key, every `position.normalized` ping from either entity while they are within threshold triggers another `proximity.candidates` event, producing repeated alerts for one encounter.
 - The canonical pair ordering (`min:max`) ensures (A,B) and (B,A) map to the same key regardless of which entity's ping arrived first.
+- The `candidate_published` field makes Kafka publish recoverable: if the Correlation Worker creates the episode hash and writes to Neo4j but crashes before Kafka publish succeeds, the next ping for the pair finds `candidate_published=0` and retries the publish. Without this field, a crash between Neo4j write and Kafka publish leaves the pair silently unalerted.
+- Write order: Neo4j MERGE first → set `candidate_published=0` → Kafka publish → set `candidate_published=1`.
 - If the TTL expires and the pair later comes close again, that is a distinct episode with a new `episode_start_ms`. The new episode produces a new Neo4j edge and a new `proximity.candidates` event.
 - Neo4j idempotency key for the edge: `{pair_key}:{episode_start_ms}` — one edge per episode, not one per ping.
 
@@ -372,7 +391,8 @@ Published by the position consumer. Consumed by the correlation worker and devia
 | `lon` | number | Decimal degrees |
 | `altitude` | number \| null | Metres; null for vessels |
 | `source` | string | `adsb`, `ais`, or `synthetic` |
-| `geo_cell` | string | H3 cell ID at resolution 5; computed by position consumer |
+| `history_geo_cell` | string | H3 cell ID at `HISTORY_H3_RESOLUTION` — written to the `geo_cell` column in `position_history` (TimescaleDB) |
+| `live_geo_cell` | string | H3 cell ID at `LIVE_H3_RESOLUTION` — used as the `geo-cell:*` sorted set key suffix in Redis; may differ from `history_geo_cell` if the two resolutions are configured differently (see ADR-006) |
 
 ---
 
@@ -386,12 +406,12 @@ Published by the deviation detector. Consumed by the alert evaluator. Retention:
 | `timestamp_ms` | number | Unix ms of the position ping |
 | `status` | string | `OUT_OF_RANGE` or `IN_RANGE` — emitted on **every** eligible ping, not just transitions; the Detector is stateless |
 | `current_position` | object | `{ lat, lon }` — position at time of event |
-| `nearest_waypoint_index` | number | Index of the nearest reference route waypoint; omitted on `IN_RANGE` |
-| `deviation_metres` | number | Distance from the nearest waypoint; omitted on `IN_RANGE` |
+| `nearest_segment_index` | number | Index `i` of the first waypoint of the nearest route segment (segment from `route_reference_points[i]` to `route_reference_points[i+1]`); omitted on `IN_RANGE` |
+| `deviation_metres` | number | Minimum perpendicular distance from the current position to the nearest route segment; omitted on `IN_RANGE` |
 
 **Design notes:**
 - `BACK_IN_RANGE` is replaced by `IN_RANGE`. The Detector no longer tracks transition state — it classifies every ping independently. The Alert Evaluator owns episode state via `deviation-state:{entity_id}`.
-- `baseline_position` is removed — route deviation now compares against `reference_routes` waypoints, not a lat/lon average. The nearest waypoint index is included so the evaluator can log which part of the route was deviated from.
+- `baseline_position` is removed — route deviation now compares against `route_reference_points` segments using minimum perpendicular distance (point-to-segment), not a lat/lon average. The nearest segment index is included so the evaluator can log which segment of the route was deviated from.
 
 ---
 
@@ -430,7 +450,7 @@ Published by the alert evaluator. Consumed by the API.
 | Alert type | Payload fields |
 |---|---|
 | `SIGNAL_LOSS` | `dark_since_ms`, `last_lat`, `last_lon` |
-| `ROUTE_DEVIATION` | `current_lat`, `current_lon`, `nearest_waypoint_index`, `deviation_metres`, `sustained_cycles` |
+| `ROUTE_DEVIATION` | `current_lat`, `current_lon`, `nearest_segment_index`, `deviation_metres`, `sustained_cycles` |
 | `UNSCHEDULED_PROXIMITY` | `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`, `episode_start_ms` |
 | `COMPOSITE` | `signal_loss` (nested — `dark_since_ms`, `last_lat`, `last_lon`), `proximity` (nested — `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`), `correlation_window_ms`, `supersedes_alert_ids` (array of alert_ids being superseded) |
 
