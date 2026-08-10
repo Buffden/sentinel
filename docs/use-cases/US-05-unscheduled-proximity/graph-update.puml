@@ -19,26 +19,35 @@ note over Neo4j
   Entity nodes are never duplicated.
 end note
 
-Correlation -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $entity_a + ':' + $timestamp_ms\n}]->(b)\nON CREATE SET e.lat = $lat,\n  e.lon = $lon,\n  e.distance_metres = $distance,\n  e.timestamp_ms = $timestamp_ms
+note over Correlation
+  pair_key = min(entity_a_id, entity_b_id) + ':' + max(entity_a_id, entity_b_id)
+  episode_start_ms = from proximity-episode hash (set when episode began)
+  idempotency_key = {pair_key}:{episode_start_ms}
+  One edge per proximity episode, not one per ping.
+end note
+
+Correlation -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $pair_key + ':' + $episode_start_ms\n}]->(b)\nON CREATE SET\n  e.episode_start_ms = $episode_start_ms,\n  e.last_seen_ms = $now_ms,\n  e.distance_at_detection = $distance,\n  e.lat = $lat,\n  e.lon = $lon\nON MATCH SET\n  e.last_seen_ms = $now_ms,\n  e.min_distance_metres = CASE\n    WHEN $distance < e.min_distance_metres\n    THEN $distance ELSE e.min_distance_metres END
 
 note over Neo4j
-  Idempotency key on the edge.
-  Replaying the same Kafka event
-  produces exactly one edge - never a duplicate.
+  Idempotency key = {pair_key}:{episode_start_ms}.
+  Replaying the same Kafka event matches the existing edge — no duplicate.
+  ON MATCH updates keep last_seen_ms and min_distance_metres current
+  during an ongoing episode.
   Safe to replay from any offset.
 end note
 
-Neo4j --> Correlation : edge created or matched (no-op on replay)
+Neo4j --> Correlation : edge created or updated (no-op on idempotent replay)
 
-Correlation -> ProxKafka : publish proximity.candidates\n{ entity_a_id, entity_b_id, timestamp_ms,\n  lat, lon, distance_metres }
+Correlation -> ProxKafka : publish proximity.candidates\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, timestamp_ms,\n  lat, lon, distance_at_detection }
 
 note over ProxKafka
+  Published only on episode start (not on each ping).
   Published only for unscheduled pairs
   (no KNOWN_ASSOCIATE edge).
   Known associates: Neo4j edge written, no Kafka event.
   Alert Evaluator consumes this topic
   to emit UNSCHEDULED_PROXIMITY and COMPOSITE alerts.
-  Short retention (1h) - stale candidates have no value.
+  Short retention (1h) — stale candidates have no value.
 end note
 
 @enduml

@@ -15,7 +15,7 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 - The system detects when two entities come within `PROXIMITY_THRESHOLD_METRES` of each other
 - An alert is emitted only if the two entities have no prior recorded relationship (no existing KNOWN_ASSOCIATE edge in the graph)
-- The alert includes both entity IDs, the time and location of convergence, and the distance at closest approach
+- The alert includes both entity IDs, the pair key, the episode start time and location, and the distance at first detection (`distance_at_detection`)
 - Routine proximity events between known-associated entities (e.g. regular flight paths crossing) do not produce alerts
 
 ---
@@ -26,7 +26,7 @@ As an operator, I want to receive an alert when two entities with no prior relat
 
 ![Proximity Detection](../../../diagrams/docs/use-cases/US-05-unscheduled-proximity/proximity-detection.svg)
 
-On each `position.normalized` event, the correlation worker reads the H3 k-ring(1) of the incoming entity's `geo_cell` (7 cells at resolution 5, ~1764 km² coverage) from `geo-cell:{h3_cell_id}` Redis sets to get candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. This scopes proximity comparisons to geographically relevant neighbours — not a full O(n²) pairwise scan. For each candidate within `PROXIMITY_THRESHOLD_METRES`, the worker queries Neo4j for a prior relationship, writes a PROXIMITY_EVENT edge, and — for unscheduled pairs only — publishes a `proximity.candidates` event to Kafka. The Alert Evaluator consumes `proximity.candidates`, emits the alert to the `alerts` topic, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
+On each `position.normalized` event, the correlation worker reads the H3 k-ring (radius computed from `PROXIMITY_THRESHOLD_METRES` and `LIVE_H3_RESOLUTION`) from `geo-cell:{h3_cell_id}` sorted sets using `ZRANGEBYSCORE` to get only fresh candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. For each candidate within `PROXIMITY_THRESHOLD_METRES`, the pair is canonicalized (`min(a,b):max(a,b)`). If no active `proximity-episode:{pair_key}` exists, the worker queries Neo4j for a prior relationship, writes a `PROXIMITY_EVENT` edge (idempotency key: `{pair_key}:{episode_start_ms}`), and — for unscheduled pairs only — publishes ONE `proximity.candidates` event to Kafka per episode. Subsequent pings within the episode refresh the episode TTL without publishing again. The Alert Evaluator consumes `proximity.candidates` (one per episode), emits the alert, and the API writes it to the alerts table (status: NEW, idempotent) before pushing to scope-matched WebSocket connections.
 
 ### Graph Update
 
