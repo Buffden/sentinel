@@ -24,6 +24,7 @@ A Node.js service that reads the live position stream, writes proximity evidence
     - `HGETALL proximity-episode:{pair_key}` — if key exists (active episode):
       - If `candidate_published == 0` (crash recovery — Neo4j written but Kafka publish failed): retry steps 4–5 below before refreshing TTL
       - If `candidate_published == 1`: `HSET proximity-episode:{pair_key} last_seen_ms {event.timestamp_ms}` + refresh TTL; optionally update Neo4j edge `min_distance_metres` if this ping is closer; do NOT publish another `proximity.candidates` event
+      - If `candidate_published` field is absent (known-associate episode — field is never set for these): `HSET proximity-episode:{pair_key} last_seen_ms {event.timestamp_ms}` + refresh TTL; do NOT publish to `proximity.candidates`
     - If no active episode:
       - Query Neo4j for a `KNOWN_ASSOCIATE` edge between the two entities
       - If none (unscheduled new episode):

@@ -1,6 +1,6 @@
 # Data Model
 
-Canonical schemas for every store Sentinel uses. This is the reference for schema migrations, POC validation, and service implementation. All field names here are authoritative — use them consistently in code.
+Canonical schemas for every store Sentinel uses. This is the reference for schema migrations and service implementation. All field names here are authoritative — use them consistently in code.
 
 ---
 
@@ -217,6 +217,7 @@ Current position and liveness state for each tracked entity.
 | `altitude` | String (float) | Latest altitude in metres; absent for vessels |
 | `entity_type` | String | `aircraft` or `vessel` |
 | `last_seen_ms` | String (int) | Unix ms of the last received ping from source telemetry |
+| `live_geo_cell` | String | Current H3 cell at `LIVE_H3_RESOLUTION` — used by the Position Consumer to `ZREM` the entity from its previous `geo-cell:*` sorted set when the entity moves cells |
 
 - **Writer:** Position consumer on every normalised ping
 - **Readers:** Alert evaluator (scheduled scan for signal loss detection), Correlation Worker (position fetch for H3-scoped proximity candidates), API (initial map load, investigation panel, scope geo-check)
@@ -228,7 +229,7 @@ Current position and liveness state for each tracked entity.
 
 Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is a sorted set of `entity_id` members with score = `last_seen_ms`.
 
-- **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from prior hash value)
+- **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from `live_geo_cell` field in `entity:live:{entity_id}` hash before it is overwritten)
 - **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - LIVE_PROXIMITY_MAX_AGE_MS)} +inf` for the entity's cell and all cells within the computed k-ring; returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
 - **TTL:** None — stale members age out logically via the `ZRANGEBYSCORE` lower-bound score filter. Members from permanently disappeared entities are never returned.
 

@@ -16,7 +16,7 @@ The Alert Evaluator gains two stream-sourced rules: unscheduled proximity (US-05
 - [ ] Consume `proximity.candidates` (consumer group: `alert-evaluator`)
 - [ ] On each event, check both `entity_a_id` and `entity_b_id`:
   - For each entity: check `HGETALL alert-state:{entity_id}` (entity is currently dark) OR `HGETALL recent-loss:{entity_id}` (entity was dark, has since resumed)
-  - If a matching signal loss is found AND `episode_start_ms` falls within `COMPOSITE_CORRELATION_WINDOW_MS` of `resumed_at_ms` (for `recent-loss`) or within `COMPOSITE_CORRELATION_WINDOW_MS` of `now` (for `alert-state`, entity still dark) AND `composite_issued == 0`:
+  - If a matching signal loss is found AND `composite_issued == 0` (for `recent-loss`: key existence confirms the correlation window is still open — TTL enforces it; for `alert-state`: key existence confirms entity is still dark — no additional window check needed):
     - Emit `COMPOSITE` alert (ELEVATED); include `supersedes_alert_ids: [signal_loss_alert_id]`
     - `alert_id`: `{entity_id}:COMPOSITE:{dark_since_ms}`; `HSET alert-state:{entity_id} composite_issued 1`; do NOT emit UNSCHEDULED_PROXIMITY
   - If no signal loss correlation found: emit `UNSCHEDULED_PROXIMITY` alert
@@ -29,7 +29,7 @@ SIGNAL_LOSS is never held back. Composite correlation happens when proximity arr
 
 **Position Consumer (Phase 04 extension):**
 - [ ] When entity resumes broadcasting and `alert-state:{entity_id}` exists:
-  - `HSET recent-loss:{entity_id} dark_since_ms {dark_since_ms} resumed_at_ms {now} signal_loss_alert_id {alert_id}` + `EXPIRE COMPOSITE_CORRELATION_WINDOW_MS / 1000`
+  - `HSET recent-loss:{entity_id} dark_since_ms {dark_since_ms} resumed_at_ms {event.timestamp_ms} signal_loss_alert_id {alert_id}` + `EXPIRE COMPOSITE_CORRELATION_WINDOW_MS / 1000`
   - `DEL alert-state:{entity_id}`
 
 **Alert Evaluator (composite detection):**
@@ -47,5 +47,5 @@ SIGNAL_LOSS is never held back. Composite correlation happens when proximity arr
 - `UNSCHEDULED_PROXIMITY` alert emitted when proximity arrives with no signal loss correlation
 - No `proximity.candidates` event emitted for `KNOWN_ASSOCIATE` pairs (filtered upstream)
 - When proximity arrives for an active dark entity: COMPOSITE emitted (once — `composite_issued` prevents re-emission) and SIGNAL_LOSS marked SUPERSEDED atomically; dashboard shows COMPOSITE as the active incident
-- When proximity arrives for an entity that was dark but has since resumed (within `COMPOSITE_CORRELATION_WINDOW_MS`): same composite + supersession behaviour via `recent-loss`
+- When proximity arrives for an entity that was dark but has since resumed (within `COMPOSITE_CORRELATION_WINDOW_MS`): same composite + supersession behaviour via `recent-loss`; `DEL recent-loss:{entity_id}` after successful composite emit — each signal-loss episode produces at most one composite
 - When only one condition is met: individual alert emitted, no composite

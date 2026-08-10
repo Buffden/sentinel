@@ -40,7 +40,7 @@ Init script mounted at `/docker-entrypoint-initdb.d/` — applied automatically 
 
 - [ ] `position_history` hypertable
   - Columns: `entity_id`, `entity_type`, `observed_at` (TIMESTAMPTZ — hypertable partition column), `timestamp_ms` (BIGINT — source metadata + idempotency key), `geo_cell`, `lat`, `lon`, `altitude`, `source`
-  - Partitioned by `observed_at`, daily chunks — TimescaleDB requires TIMESTAMPTZ; `observed_at = to_timestamp(timestamp_ms / 1000.0)` computed at ingest
+  - Partitioned by `observed_at`, daily chunks — Sentinel chooses TIMESTAMPTZ for its time semantics and deterministic derivation (`observed_at = to_timestamp(timestamp_ms / 1000.0)` computed at ingest)
   - Unique constraint on `(entity_id, observed_at)` — idempotency constraint (ADR-007); TimescaleDB requires the partition column (`observed_at`) in any unique constraint on a hypertable; `observed_at` is deterministically derived from `timestamp_ms` so the constraint is equivalent in practice
   - Index on `(entity_id, observed_at DESC)` — single-entity timeline queries
   - Index on `(geo_cell, observed_at DESC)` — regional time-window queries; `geo_cell` is an index column, not a partition dimension (see ADR-006)
