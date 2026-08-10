@@ -17,7 +17,7 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 - [ ] On startup: attempt `SET alert-evaluator:leader {instance_id} NX PX {LEADER_TTL_MS}`
   - If acquired: create Kafka consumer, subscribe to `deviation.candidates` + `proximity.candidates`, start evaluation loop
   - If not acquired: do not create or join the Kafka consumer group — idle followers must not join or they trigger rebalances
-- [ ] Leader renews lease on each heartbeat using compare-and-renew: `SET alert-evaluator:leader {instance_id} XX PX {LEADER_TTL_MS}` — only extends if our instance still holds the key
+- [ ] Leader renews lease on each heartbeat using Lua compare-and-expire: `if GET('alert-evaluator:leader') == instance_id then PEXPIRE('alert-evaluator:leader', LEADER_TTL_MS)` — `SET XX PX` is not safe for renewal; it would overwrite the holder value without checking ownership, allowing a slow old leader to steal a lease already acquired by a new leader
 - [ ] On lease loss (renewal fails):
   1. Stop accepting new evaluation work
   2. Stop / pause Kafka consumption
@@ -45,10 +45,10 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
   - `HINCRBY deviation-state:{entity_id} count 1`
   - If count == 1: `HSET deviation-state:{entity_id} episode_start_ms {timestamp_ms} alert_emitted 0`
   - `HSET deviation-state:{entity_id} last_processed_ms {timestamp_ms}`
-  - Apply safety TTL: `EXPIRE deviation-state:{entity_id} {2 × SIGNAL_LOSS_THRESHOLD_MS / 1000}`
+  - Apply safety TTL: `EXPIRE deviation-state:{entity_id} {DEVIATION_STATE_TTL_MS / 1000}` (default: 24h; decoupled from signal-loss timing — see ADR-014)
   - If count >= `DEVIATION_SUSTAINED_PINGS` AND `alert_emitted == 0`: emit alert; `HSET deviation-state:{entity_id} alert_emitted 1`
 - [ ] On `IN_RANGE` event: `DEL deviation-state:{entity_id}` — reset episode; no alert
-- [ ] Publish: `{ alert_id, alert_type: ROUTE_DEVIATION, entity_id, current_position, nearest_waypoint_index, deviation_metres, sustained_cycles }`
+- [ ] Publish: `{ alert_id, alert_type: ROUTE_DEVIATION, entity_id, current_position, nearest_segment_index, deviation_metres, sustained_cycles }`
 - [ ] `alert_id`: `{entity_id}:ROUTE_DEVIATION:{episode_start_ms}`
 - [ ] `Dockerfile` + added to `docker-compose.yml`
 
@@ -60,7 +60,8 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
   - Look up entity in `route_references` table — if no row: skip (real ADS-B/AIS with no assigned route)
   - Fetch `route_reference_points` for that `route_id`
   - Find the nearest waypoint by Haversine distance
-  - If `distance > corridor_threshold_metres`: publish `OUT_OF_RANGE` to `deviation.candidates` with `nearest_waypoint_index` and `deviation_metres`
+  - Find the nearest route **segment** (not nearest waypoint) by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]); if the perpendicular foot falls outside the segment, use the distance to the nearer endpoint
+  - If `deviation_metres > corridor_threshold_metres`: publish `OUT_OF_RANGE` to `deviation.candidates` with `nearest_segment_index` (index of segment start) and `deviation_metres`
   - Otherwise: publish `IN_RANGE` to `deviation.candidates` (every in-range ping — stateless; no `BACK_IN_RANGE`)
 - [ ] Does not write to Redis, Neo4j, or the `alerts` topic
 - [ ] `Dockerfile` + added to `docker-compose.yml`
@@ -68,7 +69,7 @@ The first two anomaly rules are live and visible. An operator on the dashboard s
 ### API — Alert Consumer + REST
 
 - [ ] Consumer group: `api`; consume `alerts` topic
-- [ ] On new SIGNAL_LOSS / ROUTE_DEVIATION / UNSCHEDULED_PROXIMITY alert: `INSERT INTO alerts ... ON CONFLICT (alert_id) DO NOTHING`; publish `{ type: ALERT_CREATED, payload: {...} }` to `alert-events`
+- [ ] On new SIGNAL_LOSS / ROUTE_DEVIATION / UNSCHEDULED_PROXIMITY alert: **commit ordering** — (1) `INSERT INTO alerts ... ON CONFLICT (alert_id) DO NOTHING`; (2) publish `{ type: ALERT_CREATED, payload: {...} }` to `alert-events` (always publish, even if ON CONFLICT no-op — ensures WebSocket delivery after replay); (3) commit Kafka offset. Committing before pub/sub loses the push on crash; dashboard deduplicates by `alert_id`.
 - [ ] On COMPOSITE alert (from Kafka): in one DB transaction — INSERT COMPOSITE alert + UPDATE referenced SIGNAL_LOSS alert to `SUPERSEDED` (set `superseded_by = composite_alert_id`); publish `{ type: ALERT_CREATED, payload: composite }` AND `{ type: ALERT_SUPERSEDED, payload: superseded_alert }` to `alert-events`
 - [ ] On startup: subscribe to Redis `alert-events` channel (alongside `position-updates`)
 - [ ] On `alert-events` message: fan out to scope-matched WebSocket connections

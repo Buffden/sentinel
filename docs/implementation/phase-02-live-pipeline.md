@@ -33,17 +33,19 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
 
 - [ ] Node.js + TypeScript service, consumer group: `position-consumer`
 - [ ] Consume `adsb.raw`; parse each state vector into normalised schema:
-  - `entity_id`, `entity_type`, `timestamp_ms`, `lat`, `lon`, `altitude`, `source`, `geo_cell` (H3 at `HISTORY_H3_RESOLUTION`; default 5)
+  - `entity_id`, `entity_type`, `timestamp_ms`, `lat`, `lon`, `altitude`, `source`
   - Compute `observed_at = to_timestamp(timestamp_ms / 1000.0)` at ingest for the TimescaleDB write
-- [ ] Malformed events → `adsb.dlq` with rejection reason — never dropped, never crash the consumer
-  - `time_position` is null → rejection reason `NULL_TIME_POSITION`
-  - `now() - time_position > 15s` at ingest time → rejection reason `STALE_POSITION` (OpenSky's 15-second stale position threshold)
-  - Use `time_position` as `timestamp_ms` — not `time` (server collection time); `time_position` is when the transponder last reported position
-- [ ] `INSERT INTO position_history (entity_id, entity_type, observed_at, timestamp_ms, geo_cell, lat, lon, altitude, source) VALUES (...) ON CONFLICT (entity_id, timestamp_ms) DO NOTHING` (idempotency key: `{entity_id}:{timestamp_ms}`)
+  - Compute `history_geo_cell` (H3 at `HISTORY_H3_RESOLUTION`; default 5) for the `geo_cell` column in TimescaleDB
+  - Compute `live_geo_cell` (H3 at `LIVE_H3_RESOLUTION`) for the Redis `geo-cell:*` sorted set key; both fields included in the `position.normalized` event (see ADR-006)
+- [ ] Events with null or missing `time_position` (or `latitude`/`longitude`) → skip with metric increment (`states_without_position_total`), never DLQ — null position is a valid OpenSky source state (transponder not yet reporting position), not a parse failure; continue to next state vector
+- [ ] Events where `time_position` is more than `STALE_POSITION_THRESHOLD_MS` old → skip with metric (`states_stale_position_total`); these represent outdated tracks that would mislead staleness detection — do not DLQ (they are parseable; log at debug level)
+- [ ] Use `time_position` as `timestamp_ms` — not `time` (server collection time); `time_position` is when the transponder last reported position
+- [ ] Truly malformed events (unparseable JSON, missing required non-position fields) → `adsb.dlq` with rejection reason — never dropped, never crash the consumer
+- [ ] `INSERT INTO position_history (entity_id, entity_type, observed_at, timestamp_ms, geo_cell, lat, lon, altitude, source) VALUES (...) ON CONFLICT (entity_id, observed_at) DO NOTHING` (idempotency constraint: `(entity_id, observed_at)`; `geo_cell` column receives `history_geo_cell`)
 - [ ] **Timestamp guard:** before writing, `HGET entity:live:{entity_id} last_seen_ms`; only proceed if `incoming.timestamp_ms >= stored value` (prevents replay or out-of-order delivery from regressing Redis state)
-- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} geo_cell {geo_cell} entity_type {entity_type}` + TTL = 24h
-- [ ] Update geo-cell spatial index: `ZREM geo-cell:{previous_geo_cell} {entity_id}` + `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
-- [ ] On entity resume after signal loss: `DEL alert-state:{entity_id}`
+- [ ] `HSET entity:live:{entity_id} last_seen_ms {ms} lat {lat} lon {lon} live_geo_cell {live_geo_cell} entity_type {entity_type}` + TTL = 24h (stores `live_geo_cell` so the Correlation Worker can use the correct resolution for geo-cell lookups)
+- [ ] Update geo-cell spatial index using `live_geo_cell`: `ZREM geo-cell:{previous_live_geo_cell} {entity_id}` + `ZADD geo-cell:{new_live_geo_cell} {last_seen_ms} {entity_id}` (previous cell retrieved from prior hash value via HGET before overwriting)
+- [ ] On entity resume after signal loss (first write after `alert-state` exists): write `recent-loss:{entity_id}` hash (`dark_since_ms`, `resumed_at_ms=now`, `signal_loss_alert_id`) with TTL = `COMPOSITE_CORRELATION_WINDOW_MS`; then `DEL alert-state:{entity_id}`
 - [ ] `PUBLISH position-updates {normalised_event_json}` after every write
 - [ ] `PRODUCE position.normalized` — consumed by Correlation Worker later
 - [ ] `Dockerfile` + added to `docker-compose.yml`

@@ -13,7 +13,7 @@ A Node.js service that reads the live position stream, writes proximity evidence
 - [ ] Scaffold Node.js + TypeScript service under `services/correlation-worker/`
 - [ ] Consumer group: `correlation-worker`; consume `position.normalized`
 - [ ] On each event:
-  - Extract `geo_cell` from the incoming event (computed at `LIVE_H3_RESOLUTION`)
+  - Extract `live_geo_cell` from the incoming event (computed at `LIVE_H3_RESOLUTION` by the Position Consumer; use this field — not `history_geo_cell` — for Redis sorted set lookups)
   - Compute k-ring radius from `PROXIMITY_THRESHOLD_METRES` and cell edge length at `LIVE_H3_RESOLUTION` — do not hardcode k-ring(1)
   - `ZRANGEBYSCORE geo-cell:{cell} {(now - LIVE_PROXIMITY_MAX_AGE_MS)} +inf` for each cell in the k-ring → union of fresh entity_ids
   - Remove the incoming entity_id from candidates
@@ -30,10 +30,11 @@ A Node.js service that reads the live position stream, writes proximity evidence
       - If none (unscheduled new episode):
         1. `episode_start_ms = now`
         2. **Write Neo4j first:** `MERGE PROXIMITY_EVENT` with `idempotency_key = {pair_key}:{episode_start_ms}`, `episode_start_ms`, `lat`, `lon`, `distance_at_detection`
-        3. If Neo4j succeeds: `HSET proximity-episode:{pair_key} episode_start_ms {episode_start_ms} last_seen_ms {now}` + `EXPIRE PROXIMITY_EPISODE_GAP_MS / 1000`
+        3. If Neo4j succeeds: `HSET proximity-episode:{pair_key} episode_start_ms {episode_start_ms} last_seen_ms {now} candidate_published 0` + `EXPIRE PROXIMITY_EPISODE_GAP_MS / 1000`
         4. Publish `proximity.candidates` to Kafka: `{ pair_key, entity_a_id: min, entity_b_id: max, episode_start_ms, lat, lon, distance_at_detection }`
-        5. If Kafka publish fails: retry with exponential backoff (3 attempts); on failure log and continue
-      - If `KNOWN_ASSOCIATE` exists: write Neo4j edge only — do not create episode, do not publish
+        5. If Kafka publish succeeds: `HSET proximity-episode:{pair_key} candidate_published 1`
+        6. If Kafka publish fails: leave `candidate_published=0`; on the next ping for this pair, re-attempt the publish before refreshing TTL
+      - If `KNOWN_ASSOCIATE` exists: write Neo4j `PROXIMITY_EVENT` edge (same MERGE with same idempotency key) — do not create proximity-episode, do not publish to `proximity.candidates`. This preserves durable evidence of the encounter in the graph while correctly excluding known associates from alert evaluation.
   - `MERGE Entity` nodes if they don't exist yet
 - [ ] Writes to Redis: `proximity-episode:{pair_key}` hash only; does not write to TimescaleDB
 - [ ] `Dockerfile` + added to `docker-compose.yml`
@@ -41,18 +42,9 @@ A Node.js service that reads the live position stream, writes proximity evidence
 ## Done When
 
 - Service consumes `position.normalized` without errors
-- `PROXIMITY_EVENT` edge appears in Neo4j when two unrelated entities come within threshold
-- Running the same event twice does not create a duplicate edge (MERGE confirmed)
-- No `PROXIMITY_EVENT` written when a `KNOWN_ASSOCIATE` edge exists
-- `proximity.candidates` Kafka event published once per episode (not once per ping while within threshold); no event published for known associates
-- `proximity-episode:{pair_key}` key exists while entities are close; TTL refreshes on each ping; new episode starts after TTL expires
-- Neo4j browser shows the entity graph growing as entities are seen
-
-## Done When
-
-- Service consumes `position.normalized` without errors
-- `PROXIMITY_EVENT` edge appears in Neo4j when two unrelated entities come within threshold
-- Running the same event twice does not create a duplicate edge (MERGE confirmed)
-- No `PROXIMITY_EVENT` written when a `KNOWN_ASSOCIATE` edge exists
-- `proximity.candidates` Kafka event published for each unscheduled pair; no event published for known associates
+- `PROXIMITY_EVENT` edge appears in Neo4j for both unscheduled pairs AND known associates (all close pairs write the edge; the graph is the durable proximity evidence store)
+- Running the same event twice does not create a duplicate Neo4j edge (MERGE on `idempotency_key` confirmed)
+- `proximity.candidates` Kafka event published once per episode for unscheduled pairs only; no event published for known associates
+- `proximity-episode:{pair_key}` hash exists while entities are within threshold; `candidate_published` field set to `1` after successful Kafka publish; TTL refreshes on each ping; new episode starts after TTL expires
+- If the service crashes after Neo4j write but before Kafka publish (`candidate_published=0`): next ping triggers retry publish
 - Neo4j browser shows the entity graph growing as entities are seen
