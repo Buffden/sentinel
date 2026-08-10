@@ -37,7 +37,7 @@ These must be confirmed before the position consumer and correlation worker are 
   - TimescaleDB chunk exclusion fires on the `observed_at` dimension
   - The `(geo_cell, observed_at DESC)` index is used within the relevant chunks
 - Confirm no single H3 cell at resolution 5 dominates for a representative set of ADS-B coordinates — hot-spot check (US-12)
-- Validate `ON CONFLICT (entity_id, timestamp_ms) DO NOTHING` correctly ignores duplicate inserts (US-11)
+- Validate `ON CONFLICT (entity_id, observed_at) DO NOTHING` correctly ignores duplicate inserts (US-11); confirm that TimescaleDB requires the partition column (`observed_at`) in the unique constraint and that `UNIQUE(entity_id, timestamp_ms)` raises an error on a hypertable
 
 ### Redis live proximity (live H3 resolution)
 

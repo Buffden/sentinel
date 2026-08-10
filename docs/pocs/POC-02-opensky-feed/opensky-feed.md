@@ -23,9 +23,9 @@ OpenSky uses OAuth2 client credentials (not HTTP basic auth). The poller request
 
 Each OpenSky state vector carries two timestamps: `time` (server-side collection time) and `time_position` (last time the transponder updated position). Sentinel uses `time_position` as `timestamp_ms` because it reflects when the aircraft was actually at that position — not when the server collected it.
 
-`time_position` **can be null** when a state vector is assembled from non-position messages or when the aircraft's last position update predates the current poll window. Handling decision: **drop the event to DLQ** — a state vector with no known position timestamp cannot be reliably ordered in the pipeline. The raw event is forwarded to `adsb.dlq` with rejection reason `NULL_TIME_POSITION`.
+`time_position` **can be null** when a state vector is assembled from non-position messages or when the aircraft's last position update predates the current poll window. Handling decision: **skip with metric increment** (`states_without_position_total`) — a null `time_position` is a valid OpenSky source state, not a parse failure; DLQ'ing it would flood the DLQ with routine data and obscure genuine failures. Similarly, null `latitude`/`longitude` fields are skipped with a metric.
 
-OpenSky also defines a 15-second stale position rule: state vectors where `now() - time_position > 15s` are considered stale. Events older than 15 seconds at ingest time are also routed to `adsb.dlq` with rejection reason `STALE_POSITION` — they represent outdated tracks that would mislead the staleness detection logic.
+Events where `now() - time_position > STALE_POSITION_THRESHOLD_MS` at ingest time are also **skipped with a metric** (`states_stale_position_total`) — they represent outdated tracks that would mislead the staleness detection logic. These are parseable events, not DLQ candidates; log at debug level only.
 
 ### Request scope — bounding-box over global
 
@@ -54,8 +54,8 @@ This POC covers two components working together:
 - Token cached and refreshed before expiry — confirmed by logging token acquisition events
 - Bounding-box request returns state vectors and is cheaper than global `/states/all`
 - Response payload contains the fields assumed in the pipeline: `icao24` (entity_id), `time_position` (timestamp), `latitude`, `longitude`, `baro_altitude`
-- `time_position` null events are routed to `adsb.dlq` with rejection reason `NULL_TIME_POSITION`
-- Events where `now() - time_position > 15s` at ingest time are routed to `adsb.dlq` with rejection reason `STALE_POSITION`
+- `time_position` null (or null `latitude`/`longitude`) → skipped with metric increment `states_without_position_total` (not DLQ'd)
+- Events where `now() - time_position > STALE_POSITION_THRESHOLD_MS` → skipped with metric `states_stale_position_total` (not DLQ'd)
 - Polling at the intended interval does not exceed rate limits; rate limit behaviour documented
 - Live data volume is sufficient to exercise the pipeline (or document that the synthetic generator is needed)
 - Poller publishes raw event bytes to `adsb.raw` without any parsing - format fidelity only
@@ -69,7 +69,7 @@ This POC covers two components working together:
 
 - Poller fetches live OpenSky data via OAuth2 bearer token and bounding-box request
 - Token refresh flow confirmed (token cached, re-requested before expiry)
-- `time_position` null and stale events land in `adsb.dlq` with correct rejection reasons
+- `time_position` null and stale events are skipped with correct metric increments (not DLQ'd); DLQ only receives structurally unparseable events
 - Rate limit behaviour documented (credits per request, requests per minute allowed, response on breach)
 - Data format confirmed or field-name mismatches noted for the normalisation step
 - Position Consumer reads from `adsb.raw` and normalised events appear in `position.normalized`

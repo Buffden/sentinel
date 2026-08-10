@@ -21,8 +21,8 @@ Prove that leader election, alert state management, and entity TTL expiry all wo
 
 - Two Node.js processes both attempt to acquire the `alert-evaluator:leader` key simultaneously — exactly one wins (US-07)
 - When the leader process is killed, the TTL expires and the follower acquires the lease within one TTL window (US-07)
-- Lease renewal works: a live leader keeps the key alive across multiple TTL windows using compare-and-renew (`SET XX PX`)
-- Lease renewal correctly fails when the key has been acquired by a new leader (prevents a lagging slow leader from extending a stale lease)
+- Lease renewal works: a live leader keeps the key alive across multiple TTL windows using Lua compare-and-expire (`if GET(key) == instance_id then PEXPIRE(key, LEADER_TTL_MS)`) — confirm `SET XX PX` is NOT sufficient here because it overwrites the value without checking the current holder
+- Lease renewal correctly fails when the key has been acquired by a new leader (the Lua GET check returns a different value, so PEXPIRE is not called)
 - Lease release on clean shutdown uses compare-before-DEL (Lua script): does NOT delete the key if a new leader has already acquired it
 - **Leadership transition scenario:** messages arrive on `proximity.candidates` during the gap between the old leader stopping consumption and the new leader starting; verify the new leader processes them and emits exactly one alert per event, not zero or two
 - **Crash-after-process scenario:** leader processes an event and publishes to Kafka `alerts` but crashes before committing the Kafka offset; new leader re-processes the event; verify `ON CONFLICT DO NOTHING` prevents duplicate alert insertion
