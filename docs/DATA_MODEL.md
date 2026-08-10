@@ -12,14 +12,14 @@ TimescaleDB runs as a PostgreSQL extension (`timescale/timescaledb-ha`). It host
 
 ### `position_history` (hypertable)
 
-Primary write target for every normalised position ping. Partitioned by TimescaleDB on `time_bucket`. Chunk interval: **1 day**. Retention: **30 days**.
+Primary write target for every normalised position ping. Partitioned by TimescaleDB on `observed_at`. Chunk interval: **1 day**. Retention: **30 days**.
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
 | `entity_id` | TEXT | No | Entity identifier — ICAO hex for aircraft, MMSI for vessels |
 | `entity_type` | TEXT | No | `aircraft` or `vessel` or `synthetic` |
-| `timestamp_ms` | BIGINT | No | Unix ms from source telemetry; idempotency key component |
-| `time_bucket` | TIMESTAMPTZ | No | `timestamp_ms` truncated to day boundary; hypertable partition column |
+| `observed_at` | TIMESTAMPTZ | No | Canonical hypertable time column — `to_timestamp(timestamp_ms / 1000.0)` computed at ingest; TimescaleDB partitions on this column |
+| `timestamp_ms` | BIGINT | No | Unix ms from source telemetry; idempotency key component; preserved as source metadata |
 | `geo_cell` | TEXT | No | H3 cell ID at resolution 5 (~252 km² per cell); computed at ingest from lat/lon |
 | `lat` | DOUBLE PRECISION | No | Decimal degrees |
 | `lon` | DOUBLE PRECISION | No | Decimal degrees |
@@ -28,33 +28,39 @@ Primary write target for every normalised position ping. Partitioned by Timescal
 
 **Constraints and indexes:**
 - Unique constraint on `(entity_id, timestamp_ms)` — `ON CONFLICT DO NOTHING` makes every insert idempotent (ADR-007)
-- Index on `(geo_cell, time_bucket)` — serves regional time-window queries
-- Index on `(entity_id, time_bucket)` — serves single-entity timeline queries
+- Index on `(entity_id, observed_at DESC)` — serves single-entity timeline queries
+- Index on `(geo_cell, observed_at DESC)` — serves regional time-window queries
 
 **Design notes:**
-- `geo_cell` is computed by the position consumer using the H3 library before the insert. The database never derives it. See ADR-006.
+- `observed_at` is the TimescaleDB partition column. It must be TIMESTAMPTZ — TimescaleDB cannot partition on BIGINT. `timestamp_ms` is kept as source metadata and the idempotency key component; it is not the partition column.
+- `geo_cell` is a query index column, not a partition dimension. TimescaleDB partitions on time only (`observed_at`); geo_cell narrows queries within a chunk. See ADR-006.
+- `geo_cell` is computed by the position consumer using the H3 library before the insert. The database never derives it.
 - Daily chunks are chosen for the expected write rate (1–10 pings/s across hundreds to thousands of entities). POC-03 validates this choice.
-- Retention is 30 days to match the `route_baseline` look-back window. Older data has no active query pattern in v1.
+- Retention is 30 days. Older data has no active query pattern in v1.
 
 ---
 
-### `route_baseline` (continuous aggregate)
+### `reference_routes` (plain table)
 
-A TimescaleDB continuous aggregate materialised from `position_history`. Computes the average track per entity per 1-hour bucket. **No service writes to this table** — TimescaleDB refreshes it automatically in the background. See ADR-002.
+Static reference routes for synthetic entities. Seeded from the synthetic generator's route definition at startup. Only synthetic entities have reference routes — real ADS-B and AIS entities do not have route deviation detection in v1 (statistical baseline from averaged history does not produce a meaningful route corridor; see doc-gaps.md decision #11).
 
-| Column | Type | Description |
-|---|---|---|
-| `entity_id` | TEXT | Entity identifier |
-| `time_bucket` | TIMESTAMPTZ | 1-hour bucket derived from `position_history.time_bucket` |
-| `avg_lat` | DOUBLE PRECISION | Mean latitude across all pings in the bucket |
-| `avg_lon` | DOUBLE PRECISION | Mean longitude across all pings in the bucket |
-| `stddev_metres` | DOUBLE PRECISION | Approximate standard deviation of positions in metres across the bucket (derived from lat/lon stddev) |
-| `sample_count` | BIGINT | Number of pings contributing to this bucket |
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `entity_id` | TEXT | No | Synthetic entity identifier |
+| `sequence_number` | INTEGER | No | Waypoint order along the route |
+| `lat` | DOUBLE PRECISION | No | Waypoint latitude |
+| `lon` | DOUBLE PRECISION | No | Waypoint longitude |
+| `tolerance_metres` | REAL | No | Acceptable lateral deviation from this waypoint before OUT_OF_RANGE is emitted |
+| `description` | TEXT | Yes | Human-readable waypoint label |
+
+**Constraints and indexes:**
+- Primary key on `(entity_id, sequence_number)`
+- Index on `entity_id` — Deviation Detector fetches the full route for an entity by ID
 
 **Design notes:**
-- Look-back window: **30 days**. An entity needs at least 30 days of position history for a meaningful baseline. New entities produce no route deviation alerts until sufficient history accumulates.
-- Refresh policy: every hour, covering up to the last 30 days.
-- The Deviation Detector queries by `(entity_id, time_bucket)` and reads `avg_lat`, `avg_lon`, `stddev_metres` to compare the incoming position against the expected route. See ADR-014.
+- The Deviation Detector fetches the reference route for the entity, finds the nearest waypoint to the incoming position, and computes Haversine distance. If distance > `tolerance_metres` for that waypoint: `OUT_OF_RANGE`. Otherwise: `IN_RANGE`.
+- Route deviation detection is **synthetic-only in v1**. Real entities produce no deviation alerts. This eliminates the 30-day cold-start problem of statistical baselines and gives deterministic, injectable anomalies for demos.
+- The `route_baseline` continuous aggregate originally planned here was dropped. Averaging lat/lon per hour does not produce a meaningful route corridor — the average of A→B→C positions lands somewhere in the middle of the route, not on it. Statistical route modeling is deferred to future work.
 
 ---
 
@@ -69,7 +75,8 @@ Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypert
 | `entity_type` | TEXT | No | `aircraft` or `vessel` |
 | `alert_type` | TEXT | No | `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, or `COMPOSITE` |
 | `priority` | TEXT | No | `STANDARD` or `ELEVATED` (COMPOSITE alerts are always ELEVATED) |
-| `status` | TEXT | No | `NEW`, `ACKNOWLEDGED`, or `RESOLVED`; defaults to `NEW` |
+| `status` | TEXT | No | `NEW`, `ACKNOWLEDGED`, `RESOLVED`, or `SUPERSEDED`; defaults to `NEW` |
+| `superseded_by` | TEXT | Yes | FK → `alerts.alert_id`; set when a COMPOSITE alert supersedes this alert |
 | `payload` | JSONB | No | Type-specific fields (see Kafka alert schema below) |
 | `detected_at` | TIMESTAMPTZ | No | When the anomaly was first detected |
 | `updated_at` | TIMESTAMPTZ | No | Last status change timestamp |
@@ -86,7 +93,8 @@ Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypert
 
 **Design notes:**
 - `alert_id` is deterministic: derived from the Kafka alert event, so `ON CONFLICT DO NOTHING` makes Kafka replay fully idempotent.
-- This table is the durable dedup layer (Kafka replay idempotency). It is distinct from `alert-state:{entity_id}` in Redis, which is the in-loop suppression layer. See doc-gaps.md decision #3.
+- `SUPERSEDED` status: a SIGNAL_LOSS or UNSCHEDULED_PROXIMITY alert may be superseded by a COMPOSITE alert after correlation. When the API inserts the COMPOSITE alert, it atomically marks the referenced individual alert(s) as `SUPERSEDED` and records the composite `alert_id` in `superseded_by`. The dashboard shows the COMPOSITE as the active incident; superseded alerts appear in the evidence/history view linked from the composite.
+- This table is the durable dedup layer (Kafka replay idempotency). It is distinct from `alert-state:{entity_id}` in Redis, which is the in-loop suppression layer.
 
 ---
 
@@ -147,15 +155,17 @@ Unique index on `Entity.id`.
 
 ### Edge: `PROXIMITY_EVENT`
 
-Written by the correlation worker when two entities are detected within the configured distance threshold. `MERGE` on `idempotency_key` — replay safe.
+Written by the correlation worker when a new proximity episode begins between two entities. One edge per episode — not one per ping. `MERGE` on `idempotency_key` — replay safe.
 
 | Property | Type | Description |
 |---|---|---|
-| `idempotency_key` | String | `{entity_a_id}:{timestamp_ms}` — unique per detection event |
-| `timestamp_ms` | Long | Unix ms when proximity was detected |
-| `lat` | Float | Latitude of the midpoint between the two entities |
-| `lon` | Float | Longitude of the midpoint |
-| `distance_metres` | Float | Distance between the two entities at detection time |
+| `idempotency_key` | String | `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}:{episode_start_ms}` — one edge per proximity episode; canonical pair ordering ensures (A,B) and (B,A) map to the same key |
+| `episode_start_ms` | Long | Unix ms when this proximity episode began |
+| `last_seen_ms` | Long | Unix ms of the most recent ping confirming proximity (updated during episode) |
+| `min_distance_metres` | Float | Closest approach distance observed during the episode (updated during episode) |
+| `lat` | Float | Latitude of the midpoint at episode start |
+| `lon` | Float | Longitude of the midpoint at episode start |
+| `distance_at_detection` | Float | Distance between the two entities at first detection |
 
 ---
 
@@ -196,42 +206,94 @@ Current position and liveness state for each tracked entity.
 
 ---
 
-### `geo-cell:{h3_cell_id}` (set)
+### `geo-cell:{h3_cell_id}` (sorted set)
 
-Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is the set of entity_ids currently in that cell.
+Spatial index for live proximity candidate scoping. One key per occupied H3 cell (resolution 5); value is a sorted set of `entity_id` members with score = `last_seen_ms`.
 
-- **Writer:** Position consumer — on each normalised ping: `SREM geo-cell:{old_geo_cell} {entity_id}` then `SADD geo-cell:{new_geo_cell} {entity_id}` (old cell tracked via prior hash value)
-- **Reader:** Correlation Worker — reads same-cell + k-ring(1) sets (7 cells, ~1764 km² coverage) to get candidate entity_ids before fetching their positions from `entity:live:*`
-- **TTL:** None — set membership reflects the current ping stream; stale entries are overwritten naturally as entities move between cells. A periodic cleanup pass may be needed in production but is out of scope for v1.
+- **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from prior hash value)
+- **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - SIGNAL_LOSS_THRESHOLD_MS)} +inf` for same-cell + k-ring(1) cells (7 cells); returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
+- **TTL:** None — stale members age out logically via the `ZRANGEBYSCORE` lower-bound score filter. Members from permanently disappeared entities are never returned.
 
 **Design notes:**
-- Replaces a full `entity:live:*` keyspace scan in the Correlation Worker. Without this index, proximity detection requires O(n) Redis reads and O(n²) Haversine comparisons. With it, comparisons are bounded by cell density — typically a small fraction of total tracked entities.
-- H3 resolution 5 (~252 km² per cell) matches the `geo_cell` field already computed by the Position Consumer and stored in `position_history`. No new computation is needed — the cell is read directly from the `position.normalized` event.
+- Using a sorted set (score = `last_seen_ms`) replaces the plain SET. A plain SET accumulates members from permanently disappeared entities with no way to age them out — "overwritten naturally as entities move cells" was incorrect. Entities that stop broadcasting never trigger a `ZREM`. The score filter makes staleness implicit without requiring explicit cleanup.
+- k-ring(1) at H3 resolution 5 covers 7 cells (~1764 km²). This only guarantees no misses when `PROXIMITY_THRESHOLD_METRES < 9850m` (H3 resolution-5 average edge length ~9.85 km). If the threshold is larger, increase k-ring size. For v1, document this constraint in CLAUDE.md.
+- H3 resolution 5 matches the `geo_cell` field already computed by the Position Consumer — no new computation required.
 
 ---
 
-### `alert-state:{entity_id}` (string)
+### `alert-state:{entity_id}` (hash)
 
-In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a signal loss alert on every evaluation cycle while an entity remains dark.
+In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a signal loss alert on every evaluation cycle while an entity remains dark. Also carries the `alert_id` of the emitted signal loss alert for use in composite supersession.
 
-| Value | Description |
-|---|---|
-| `{dark_since_ms}` | Unix ms when the entity was first detected as dark |
+| Field | Type | Description |
+|---|---|---|
+| `dark_since_ms` | String (int) | Unix ms when the entity was first detected as dark |
+| `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this dark episode |
 
 - **Writer:** Alert evaluator on first signal loss emission
-- **Reader:** Alert evaluator (suppression check + composite alert loss-window start via US-06)
+- **Reader:** Alert evaluator (suppression check), Correlation Worker (composite supersession — checks for active dark entity when proximity arrives)
 - **TTL:** None — key lives indefinitely
-- **Deleted by:** Position consumer on the entity's next successful write (entity resumes broadcasting)
+- **Deleted by:** Position consumer — before deleting, writes `recent-loss:{entity_id}` (see below) so the correlation window survives the entity coming back online; then DEL this key
 
 ---
 
-### `deviation-counter:{entity_id}` (string / integer)
+### `recent-loss:{entity_id}` (hash)
 
-Consecutive out-of-baseline ping count for sustained route deviation detection (US-04).
+Short-lived record of a recently resolved signal loss episode. Written by the Position Consumer when an entity resumes broadcasting, so that a subsequent proximity event arriving after the entity comes back online can still trigger a COMPOSITE alert within the correlation window.
 
-- **Writer:** Alert evaluator — INCR on each `OUT_OF_RANGE` event from `deviation.candidates`; DEL on `BACK_IN_RANGE` event
+| Field | Type | Description |
+|---|---|---|
+| `dark_since_ms` | String (int) | Unix ms when the dark episode began |
+| `resumed_at_ms` | String (int) | Unix ms when the entity first resumed broadcasting |
+| `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this episode |
+
+- **Writer:** Position consumer — written atomically before deleting `alert-state:{entity_id}` when the entity resumes
+- **Reader:** Alert Evaluator — checked when a `proximity.candidates` event arrives; if present and proximity timestamp falls within the correlation window, emit COMPOSITE and supersede the referenced SIGNAL_LOSS alert
+- **TTL:** `COMPOSITE_CORRELATION_WINDOW_MS` — expires automatically; after expiry a proximity event with the same entity produces UNSCHEDULED_PROXIMITY only (no composite)
+
+---
+
+### `deviation-state:{entity_id}` (hash)
+
+Route deviation episode state for sustained deviation detection (US-04). Owns all episode state on behalf of the stateless Deviation Detector.
+
+| Field | Type | Description |
+|---|---|---|
+| `count` | String (int) | Consecutive `OUT_OF_RANGE` ping count in the current episode |
+| `episode_start_ms` | String (int) | Unix ms when the current deviation episode began (first OUT_OF_RANGE ping) |
+| `last_processed_ms` | String (int) | Unix ms of the last `deviation.candidates` event processed — replay guard |
+| `alert_emitted` | String (`0` or `1`) | Whether an alert has been emitted for the current episode — prevents re-emission on subsequent pings |
+
+- **Writer:** Alert evaluator — on `OUT_OF_RANGE`: guard `timestamp_ms > last_processed_ms`; `HINCRBY count 1`; set `episode_start_ms` on count==1; set `alert_emitted=1` after emitting; update `last_processed_ms`; on `IN_RANGE`: DEL
 - **Reader:** Alert evaluator only
-- **TTL:** None — managed explicitly by the evaluator
+- **TTL:** Safety TTL of `2 × SIGNAL_LOSS_THRESHOLD_MS` — prevents abandoned state if the entity goes dark or the Deviation Detector stops publishing; the evaluator also deletes explicitly on `IN_RANGE`
+
+**Design notes:**
+- The Deviation Detector is stateless — it emits `OUT_OF_RANGE` or `IN_RANGE` on **every** eligible ping, not just on transitions. `BACK_IN_RANGE` does not exist; the Detector simply classifies each ping. Episode state lives entirely here.
+- `last_processed_ms` is the replay guard: if a `deviation.candidates` event arrives with `timestamp_ms <= last_processed_ms`, it is ignored. This prevents out-of-order or replayed events from resetting or double-incrementing the counter.
+- `alert_emitted` prevents re-emission: once the threshold is crossed and an alert is emitted, subsequent `OUT_OF_RANGE` pings increment `count` but do not re-emit until the episode resets via `IN_RANGE`.
+
+---
+
+### `proximity-episode:{pair_key}` (hash)
+
+Active proximity episode state for a specific entity pair. Defines an encounter episode — a continuous period during which two entities remain within threshold of each other. Prevents the Correlation Worker from publishing repeated `proximity.candidates` events for one sustained encounter.
+
+| Field | Type | Description |
+|---|---|---|
+| `episode_start_ms` | String (int) | Unix ms when this encounter episode began |
+| `last_seen_ms` | String (int) | Unix ms of the most recent position ping that confirmed proximity |
+
+- **Canonical pair key:** `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}` — alphabetically ordered; symmetric regardless of which entity triggered detection
+- **Writer:** Correlation Worker — created on first proximity detection for the pair; `last_seen_ms` updated on each subsequent ping within the episode
+- **Reader:** Correlation Worker — checked before publishing to `proximity.candidates`; if episode exists, refresh TTL and update `last_seen_ms` instead of publishing a new candidate
+- **TTL:** `PROXIMITY_EPISODE_GAP_MS` — refreshed on each within-threshold detection; when it expires the pair is treated as a new episode on the next detection
+
+**Design notes:**
+- Without this key, every `position.normalized` ping from either entity while they are within threshold triggers another `proximity.candidates` event, producing repeated alerts for one encounter.
+- The canonical pair ordering (`min:max`) ensures (A,B) and (B,A) map to the same key regardless of which entity's ping arrived first.
+- If the TTL expires and the pair later comes close again, that is a distinct episode with a new `episode_start_ms`. The new episode produces a new Neo4j edge and a new `proximity.candidates` event.
+- Neo4j idempotency key for the edge: `{pair_key}:{episode_start_ms}` — one edge per episode, not one per ping.
 
 ---
 
@@ -261,14 +323,27 @@ Broadcast channel for live position events. Every normalised ping is published h
 
 ### `alert-events` (pub/sub channel)
 
-Broadcast channel for alert events. Published by the API instance that consumed the alert from Kafka, after writing to the `alerts` TimescaleDB table. All API instances subscribe and fan out to scope-matched WebSocket connections.
+Broadcast channel for alert lifecycle events. Published by the API instance that consumed the alert from Kafka or processed a status change, after writing to TimescaleDB. All API instances subscribe and fan out to scope-matched WebSocket connections.
 
-- **Publisher:** API (the Kafka-consuming instance)
+- **Publisher:** API (the instance that wrote to TimescaleDB)
 - **Subscribers:** All API instances — fan out to scope-matched WebSocket connections
 
-**Why this exists:** The `alerts` Kafka topic is consumed by consumer group `api`, so Kafka assigns each alert to exactly one API instance. WebSocket connections are local to each instance. Without this channel, users connected to non-consuming instances would never receive alert pushes. This mirrors the `position-updates` pattern.
+**Why this exists:** The `alerts` Kafka topic is consumed by consumer group `api`, so Kafka assigns each alert to exactly one API instance. WebSocket connections are local to each instance. Without this channel, users connected to non-consuming instances would never receive alert pushes. This mirrors the `position-updates` pattern. Status changes (acknowledge, resolve, supersede) must also fan out via this channel so all instances update their WebSocket clients.
 
-**Message fields:** full alert event — `alert_id`, `entity_id`, `entity_type`, `alert_type`, `priority`, `detected_at_ms`, `payload`
+**Message envelope:**
+
+```json
+{
+  "type": "ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED",
+  "payload": { ... full alert fields ... }
+}
+```
+
+- `ALERT_CREATED`: new alert consumed from Kafka and written to TimescaleDB
+- `ALERT_STATUS_CHANGED`: operator acknowledged or resolved an alert
+- `ALERT_SUPERSEDED`: a COMPOSITE alert was created; the superseded SIGNAL_LOSS or UNSCHEDULED_PROXIMITY alert is marked SUPERSEDED
+
+**Message fields in `payload`:** `alert_id`, `entity_id`, `entity_type`, `alert_type`, `priority`, `status`, `detected_at_ms`, `payload`
 
 ---
 
@@ -303,31 +378,36 @@ Published by the position consumer. Consumed by the correlation worker and devia
 
 ### `deviation.candidates`
 
-Published by the deviation detector. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; durable facts remain in `position_history` and `route_baseline`). See ADR-014.
+Published by the deviation detector. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; durable facts remain in `position_history` and `reference_routes`). See ADR-014.
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `entity_id` | string | ICAO hex or MMSI |
 | `timestamp_ms` | number | Unix ms of the position ping |
-| `status` | string | `OUT_OF_RANGE` or `BACK_IN_RANGE` |
+| `status` | string | `OUT_OF_RANGE` or `IN_RANGE` — emitted on **every** eligible ping, not just transitions; the Detector is stateless |
 | `current_position` | object | `{ lat, lon }` — position at time of event |
-| `baseline_position` | object | `{ avg_lat, avg_lon }` — expected position from `route_baseline`; omitted on `BACK_IN_RANGE` |
-| `deviation_metres` | number | Distance between current and baseline position; omitted on `BACK_IN_RANGE` |
+| `nearest_waypoint_index` | number | Index of the nearest reference route waypoint; omitted on `IN_RANGE` |
+| `deviation_metres` | number | Distance from the nearest waypoint; omitted on `IN_RANGE` |
+
+**Design notes:**
+- `BACK_IN_RANGE` is replaced by `IN_RANGE`. The Detector no longer tracks transition state — it classifies every ping independently. The Alert Evaluator owns episode state via `deviation-state:{entity_id}`.
+- `baseline_position` is removed — route deviation now compares against `reference_routes` waypoints, not a lat/lon average. The nearest waypoint index is included so the evaluator can log which part of the route was deviated from.
 
 ---
 
 ### `proximity.candidates`
 
-Published by the correlation worker for unscheduled proximity pairs (no `KNOWN_ASSOCIATE` edge). Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; the durable edge remains in Neo4j). See ADR-014.
+Published by the correlation worker when a **new** proximity episode begins between an unscheduled pair (no `KNOWN_ASSOCIATE` edge). One event per episode — not one per ping. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; the durable edge remains in Neo4j). See ADR-014.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `entity_a_id` | string | First entity ICAO hex or MMSI |
-| `entity_b_id` | string | Second entity ICAO hex or MMSI |
-| `timestamp_ms` | number | Unix ms when proximity was detected |
-| `lat` | number | Latitude of the midpoint between the two entities |
+| `pair_key` | string | `{min(a,b)}:{max(a,b)}` — canonical pair ordering |
+| `entity_a_id` | string | Lexicographically smaller entity identifier |
+| `entity_b_id` | string | Lexicographically larger entity identifier |
+| `episode_start_ms` | number | Unix ms when this proximity episode began |
+| `lat` | number | Latitude of the midpoint at first detection |
 | `lon` | number | Longitude of the midpoint |
-| `distance_metres` | number | Distance between the two entities at detection time |
+| `distance_at_detection` | number | Distance between the two entities at first detection |
 
 ---
 
@@ -350,9 +430,9 @@ Published by the alert evaluator. Consumed by the API.
 | Alert type | Payload fields |
 |---|---|
 | `SIGNAL_LOSS` | `dark_since_ms`, `last_lat`, `last_lon` |
-| `ROUTE_DEVIATION` | `current_lat`, `current_lon`, `baseline_lat`, `baseline_lon`, `deviation_metres`, `sustained_cycles` |
-| `UNSCHEDULED_PROXIMITY` | `entity_b_id`, `lat`, `lon`, `distance_metres` |
-| `COMPOSITE` | `signal_loss` (nested), `proximity` (nested), `correlation_window_ms` |
+| `ROUTE_DEVIATION` | `current_lat`, `current_lon`, `nearest_waypoint_index`, `deviation_metres`, `sustained_cycles` |
+| `UNSCHEDULED_PROXIMITY` | `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`, `episode_start_ms` |
+| `COMPOSITE` | `signal_loss` (nested — `dark_since_ms`, `last_lat`, `last_lon`), `proximity` (nested — `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`), `correlation_window_ms`, `supersedes_alert_ids` (array of alert_ids being superseded) |
 
 ---
 

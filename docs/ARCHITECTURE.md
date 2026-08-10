@@ -36,15 +36,18 @@ This document defines the service boundaries, component contracts, data flow, an
 | Consumes | `adsb.raw`, `ais.raw` (consumer group: `position-consumer`) |
 | Publishes to | `position.normalized`, `adsb.dlq`, `ais.dlq` |
 | Writes to TimescaleDB | `position_history` (INSERT ON CONFLICT DO NOTHING) |
-| Writes to Redis | `entity:live:{entity_id}` hash (HSET with `last_seen_ms`, lat, lon; TTL = 24h safety-net) |
-| Writes to Redis | `geo-cell:{h3_cell_id}` set — SREM old cell, SADD new cell on each position update; enables O(cell-density) proximity scoping in the Correlation Worker |
+| Writes to Redis | `entity:live:{entity_id}` hash (HSET with `last_seen_ms`, lat, lon, geo_cell, entity_type; TTL = 24h safety-net; **timestamp guard**: only write if `incoming.timestamp_ms >= stored.last_seen_ms` to prevent replay regressions) |
+| Writes to Redis | `geo-cell:{h3_cell_id}` sorted set — ZREM old cell, ZADD new cell with score=`last_seen_ms`; enables O(cell-density) proximity scoping without stale-member accumulation |
 | Publishes to Redis | `position-updates` pub/sub channel (every normalised event) |
-| Deletes from Redis | `alert-state:{entity_id}` — when entity resumes broadcasting after a signal loss |
+| Writes to Redis | `recent-loss:{entity_id}` hash (TTL = COMPOSITE_CORRELATION_WINDOW_MS) — written when entity resumes after a signal loss, before deleting `alert-state`; contains `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id` |
+| Deletes from Redis | `alert-state:{entity_id}` — after writing `recent-loss`; the correlation window survives the entity coming back online |
 
 **Contract:**
 - Every write uses the idempotency key `{entity_id}:{timestamp_ms}`. Replay is safe by construction.
 - Malformed or unparseable events go to the appropriate DLQ (`adsb.dlq` or `ais.dlq`) — never dropped, never crash the consumer.
 - `last_seen_ms` must be written on every Redis hash update. The alert evaluator depends on this field for signal loss detection.
+- **Timestamp guard on Redis writes:** before writing, check the stored `last_seen_ms`. Only update if `incoming.timestamp_ms >= stored.last_seen_ms`. Prevents Kafka replay or out-of-order delivery from regressing Redis state to an older position and publishing stale positions over WebSocket. "Same write twice" is idempotent; "old write after new write" is not.
+- **Replay mode:** when replaying from an earlier Kafka offset for historical rebuilds, suppress publication to `position-updates` and skip the Redis hash write. Replay uses a separate consumer group and writes only to TimescaleDB.
 - Deletes `alert-state:{entity_id}` on first successful write for an entity that was previously dark. This is the only service that deletes this key.
 - Does not evaluate anomaly rules. Does not write to Neo4j.
 
@@ -58,17 +61,23 @@ This document defines the service boundaries, component contracts, data flow, an
 | Direction | What |
 | --- | --- |
 | Consumes | `position.normalized` (consumer group: `correlation-worker`) |
-| Reads from Redis | `geo-cell:{h3_cell_id}` sets — entity_ids in the incoming entity's H3 cell + k-ring(1) neighbours (7 cells); scopes proximity candidates without scanning all live entities |
-| Reads from Redis | `entity:live:{entity_id}` hashes — positions of the candidate entities identified via geo-cell lookup |
+| Reads from Redis | `geo-cell:{h3_cell_id}` sorted sets — `ZRANGEBYSCORE` for fresh members only (score >= now - SIGNAL_LOSS_THRESHOLD_MS) in same-cell + k-ring(1) cells |
+| Reads from Redis | `entity:live:{entity_id}` hashes — positions of the candidate entities identified via geo-cell lookup; rechecks `last_seen_ms` after fetch and skips stale candidates |
+| Reads from Redis | `proximity-episode:{pair_key}` — episode check before publishing to `proximity.candidates`; if episode active, update `last_seen_ms` + refresh TTL; no new publish |
+| Writes to Redis | `proximity-episode:{pair_key}` — hash with `episode_start_ms`, `last_seen_ms`; TTL = PROXIMITY_EPISODE_GAP_MS; created on first detection; refreshed on subsequent pings within episode |
 | Writes to Neo4j | `PROXIMITY_EVENT` edges via MERGE (idempotent) |
 | Publishes to | `proximity.candidates` — unscheduled proximity pairs, pre-filtered to exclude known associates |
 
 **Contract:**
 
-- Does not write to TimescaleDB or Redis.
-- Proximity candidates are scoped using H3: on each `position.normalized` event, reads `geo-cell:{geo_cell}` and its k-ring(1) neighbours (7 cells total at resolution 5, covering ~1764 km²) to get candidate entity_ids, then fetches their positions from `entity:live:{entity_id}`. This replaces a full `entity:live:*` keyspace scan — comparison is O(cell density) rather than O(total entities).
-- On detecting an unscheduled proximity pair: **Neo4j MERGE first, then Kafka publish.** If Neo4j fails, do not publish to Kafka — no alert for missing evidence. If Neo4j succeeds and Kafka publish fails, retry with exponential backoff (up to 3 attempts); if all retries fail, log and continue. The Neo4j edge is the durable record; re-detection is expected on the next `position.normalized` event from either entity. An outbox pattern would eliminate the failure window but adds infrastructure complexity not justified in v1. Explicitly accepted failure mode: a proximity alert may be delayed by one ping interval if Kafka is transiently unavailable after a successful Neo4j write.
-- On detecting a pair with a `KNOWN_ASSOCIATE` edge: writes the Neo4j edge only, does not publish to `proximity.candidates`.
+- Does not write to TimescaleDB. Writes to Redis only for `proximity-episode:{pair_key}` (episode state hash).
+- Proximity candidates are scoped using H3: `ZRANGEBYSCORE geo-cell:{cell}` for the incoming entity's cell + k-ring(1) neighbours, score-filtered to fresh members only. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips stale candidates. Comparison is O(cell density) rather than O(total entities).
+- **Pair canonicalization:** all pair identifiers use `min(a,b):max(a,b)` ordering — `proximity-episode` key, Neo4j `idempotency_key`, and `proximity.candidates` `entity_a_id`/`entity_b_id` (a is always lexicographically smaller).
+- **k-ring constraint:** The Correlation Worker computes the required k-ring radius from `PROXIMITY_THRESHOLD_METRES` and the cell edge length at `LIVE_H3_RESOLUTION`, rather than hardcoding k-ring(1). k-ring(1) at H3 resolution 5 only guarantees no missed pairs when `PROXIMITY_THRESHOLD_METRES < 9850m` — document and validate this in POC-03.
+- **H3 resolutions:** `LIVE_H3_RESOLUTION` (used for Redis `geo-cell:*` sorted sets) and `HISTORY_H3_RESOLUTION` (used for TimescaleDB `geo_cell` column) are separate configuration values. The Correlation Worker uses `LIVE_H3_RESOLUTION` for geo-cell lookups. They may differ; validate the right values in POC-03.
+- **Episode model:** on first detection of a proximity pair within threshold, create `proximity-episode:{pair_key}`, write Neo4j MERGE edge (idempotency key: `{pair_key}:{episode_start_ms}`), publish ONE `proximity.candidates` event. On subsequent pings within the same episode: update `last_seen_ms` + refresh TTL + optionally update Neo4j edge properties; do NOT publish another event.
+- On detecting a new unscheduled episode: **Neo4j MERGE first, then Kafka publish.** If Neo4j fails, do not publish to Kafka. If Kafka publish fails after successful Neo4j: retry with backoff (3 attempts); on failure log and continue. Accepted failure mode: alert may be delayed by one ping interval.
+- On detecting a pair with a `KNOWN_ASSOCIATE` edge: write Neo4j edge only, do not create proximity-episode, do not publish to `proximity.candidates`.
 - Edge writes use MERGE with an idempotency key to ensure replay does not create duplicate edges.
 - Does not emit alerts. Does not evaluate composite anomaly rules.
 
@@ -77,21 +86,21 @@ This document defines the service boundaries, component contracts, data flow, an
 ### Deviation Detector
 
 **Runtime:** Node.js
-**Concern:** Compare each normalised position against the route baseline and publish deviation status events to Kafka. Does not evaluate alert rules.
+**Concern:** Compare each normalised position against the reference route and publish deviation status events to Kafka. Does not evaluate alert rules.
 
 | Direction | What |
 | --- | --- |
 | Consumes | `position.normalized` (consumer group: `deviation-detector`) |
-| Reads from TimescaleDB | `route_baseline` — current time bucket baseline for the incoming entity |
-| Publishes to | `deviation.candidates` — `OUT_OF_RANGE` and `BACK_IN_RANGE` status events per entity |
+| Reads from TimescaleDB | `route_reference_points` (via `route_references` header) — reference waypoints for the incoming entity (synthetic entities only); see ADR-015 |
+| Publishes to | `deviation.candidates` — `OUT_OF_RANGE` and `IN_RANGE` status events per entity, one per eligible ping |
 
 **Contract:**
 
-- Publishes `OUT_OF_RANGE` when a position exceeds the baseline threshold.
-- Publishes `BACK_IN_RANGE` on the first position that falls back within threshold after an out-of-range sequence. The Alert Evaluator depends on this event to `DEL deviation-counter:{entity_id}` and reset the sustained-ping count.
+- **Stateless:** classifies every eligible ping independently — emits `OUT_OF_RANGE` or `IN_RANGE` on every `position.normalized` event for an entity that has an assigned route. Does not track prior state. Episode state lives entirely in the Alert Evaluator via `deviation-state:{entity_id}`.
+- Finds the nearest waypoint in `route_reference_points` for the entity, computes Haversine distance. If distance > `corridor_threshold_metres` from `route_references`: `OUT_OF_RANGE`. Otherwise: `IN_RANGE`.
+- **Synthetic entities only (v1):** if no row exists in `route_references` for the entity, skip — no event published. Real ADS-B/AIS entities are not covered by route deviation in v1 (ADR-015).
 - Does not apply the `DEVIATION_SUSTAINED_PINGS` filter — that logic belongs to the Alert Evaluator.
 - Does not write to Redis, Neo4j, or the `alerts` topic.
-- Does not emit alerts.
 
 ---
 
@@ -102,27 +111,29 @@ This document defines the service boundaries, component contracts, data flow, an
 
 | Direction | What |
 | --- | --- |
-| Consumes | `deviation.candidates` (consumer group: `alert-evaluator`) — `OUT_OF_RANGE` / `BACK_IN_RANGE` events from Deviation Detector |
-| Consumes | `proximity.candidates` (consumer group: `alert-evaluator`) — unscheduled proximity pairs from Correlation Worker |
+| Consumes | `deviation.candidates` (consumer group: `alert-evaluator`) — `OUT_OF_RANGE` / `IN_RANGE` events from Deviation Detector |
+| Consumes | `proximity.candidates` (consumer group: `alert-evaluator`) — new proximity episode starts from Correlation Worker |
 | Reads from Redis | `entity:live:*` (scheduled scan — `last_seen_ms` for signal loss detection) |
-| Reads from Redis | `alert-state:{entity_id}`, `deviation-counter:{entity_id}`, `alert-evaluator:leader` |
+| Reads from Redis | `alert-state:{entity_id}` hash, `recent-loss:{entity_id}` hash, `deviation-state:{entity_id}` hash, `alert-evaluator:leader` |
 | Reads from TimescaleDB | `position_history` — last known position before signal loss, included in alert payload |
 | Reads from Neo4j | `KNOWN_ASSOCIATE` and `PROXIMITY_EVENT` edges — composite alert context only (targeted lookup per entity pair, not a scan) |
 | Publishes to | `alerts` |
-| Writes to Redis | `alert-state:{entity_id}` (on first signal loss emission; value = `dark_since_ms`; no TTL) |
-| Writes to Redis | `deviation-counter:{entity_id}` (INCR on `OUT_OF_RANGE` event; DEL on `BACK_IN_RANGE` event) |
-| Holds Redis lease | `alert-evaluator:leader` (SET NX PX pattern; renewed on each heartbeat) |
+| Writes to Redis | `alert-state:{entity_id}` hash on first signal loss emission: `{ dark_since_ms, signal_loss_alert_id }`; no TTL |
+| Writes to Redis | `deviation-state:{entity_id}` hash — HINCRBY count on `OUT_OF_RANGE`; DEL on `IN_RANGE`; safety TTL = `2 × SIGNAL_LOSS_THRESHOLD_MS` |
+| Holds Redis lease | `alert-evaluator:leader` (SET NX PX pattern; compare-and-renew on each heartbeat) |
 
 **Contract:**
 
-- Only one instance is the active writer at any time — enforced by leader election on `alert-evaluator:leader` (ADR-005). Follower instances remain warm and ready to take over within one TTL window.
+- **Leader election and Kafka:** only the current lease holder creates and joins the `alert-evaluator` Kafka consumer group. Followers do not join — an unpolled member triggers group rebalances. On lease acquisition: create consumer, start polling. On lease loss: stop polling, close consumer, leave group. Lease renewal uses compare-and-renew: `SET alert-evaluator:leader {instance_id} XX PX {LEADER_TTL_MS}` — only extends if our instance still holds it.
 - Signal loss detection is a scheduled Redis scan — the evaluator reads `last_seen_ms` from `entity:live:*` directly. This is intentional: signal loss is an absence of events and cannot be driven by a Kafka stream (ADR-014).
-- Route deviation inputs arrive via `deviation.candidates`. The evaluator increments `deviation-counter:{entity_id}` on each `OUT_OF_RANGE` event and emits an alert only after `DEVIATION_SUSTAINED_PINGS` consecutive events. It deletes the counter on `BACK_IN_RANGE`.
-- Proximity inputs arrive via `proximity.candidates`. The evaluator checks `alert-state:{entity_id}` to determine whether a composite condition exists before emitting an individual `UNSCHEDULED_PROXIMITY` alert.
-- Neo4j is queried only when assembling composite alert context — a targeted lookup on a specific entity pair, not a scan for recent edges. The evaluator does not write to Neo4j.
-- Reads `position_history` from TimescaleDB only to fetch last known position when building the signal loss alert payload. Does not read `route_baseline` — route baseline comparison is the Deviation Detector's responsibility (ADR-014).
-- Does not delete `alert-state:{entity_id}`. That is the position consumer's responsibility.
-- Alert payload must include `alert_id` in the format `{entity_id}:{alert_type}:{window_start_ms}` for downstream idempotency (ADR-010).
+- **Leader election:** only the lease holder joins the `alert-evaluator` Kafka consumer group. Followers do not join. On lease acquisition: create consumer, subscribe, start polling. On lease loss: (1) stop accepting new work; (2) stop/pause Kafka; (3) wait for or cancel in-flight evaluation; (4) close consumer; (5) return to follower loop. Lease renewal: compare-and-renew (`SET alert-evaluator:leader {instance_id} XX PX ...`). Lease release: compare-before-DEL.
+- **Route deviation:** inputs arrive via `deviation.candidates` with status `OUT_OF_RANGE` or `IN_RANGE`. Replay guard: ignore event if `timestamp_ms <= deviation-state:{entity_id}.last_processed_ms`. State in `deviation-state:{entity_id}` (hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`). On `OUT_OF_RANGE`: HINCRBY count; if count==1 set episode_start_ms; if count >= DEVIATION_SUSTAINED_PINGS and alert_emitted==0: emit ROUTE_DEVIATION, set alert_emitted=1; update last_processed_ms. On `IN_RANGE`: DEL.
+- **Proximity (supersession model):** inputs arrive via `proximity.candidates` (one per new episode). SIGNAL_LOSS is already emitted immediately when detected — never held back. When proximity arrives, check `alert-state:{entity_id}` (entity still dark) OR `recent-loss:{entity_id}` (entity was dark, has since resumed) for both entities. If a matching signal loss is found within the correlation window: emit COMPOSITE with `supersedes_alert_ids`; if not: emit UNSCHEDULED_PROXIMITY.
+- The API handles composite supersession atomically: INSERT COMPOSITE + UPDATE SIGNAL_LOSS to SUPERSEDED in one transaction; broadcast both via `alert-events` (ALERT_CREATED for composite, ALERT_SUPERSEDED for the old alert).
+- Neo4j is queried only when assembling composite alert context — targeted lookup on a specific entity pair. Not a scan.
+- Reads `position_history` only to fetch last known position for the signal loss alert payload. Does not read route reference tables.
+- Does not delete `alert-state:{entity_id}`. That is the Position Consumer's responsibility.
+- Every alert payload carries the immutable detection-location for scope filtering. The current Redis position is not queried for scope decisions (ADR-012).
 
 ---
 
@@ -145,13 +156,16 @@ This document defines the service boundaries, component contracts, data flow, an
 
 **Contract:**
 
-- Sole consumer of the `alerts` Kafka topic. Writes initial alert records to the `alerts` table with status `NEW`, then publishes the alert to the `alert-events` Redis pub/sub channel.
+- Sole consumer of the `alerts` Kafka topic. Writes initial alert records to the `alerts` table with status `NEW`, then publishes to `alert-events` with `type: ALERT_CREATED`.
+- **Composite supersession:** when a COMPOSITE alert is consumed from Kafka, the API performs a single atomic DB transaction: INSERT COMPOSITE alert + UPDATE the referenced SIGNAL_LOSS alert to `SUPERSEDED` (setting `superseded_by = composite_alert_id`). Then broadcasts two `alert-events` messages: `ALERT_CREATED` (for the composite) and `ALERT_SUPERSEDED` (for the old alert). The dashboard shows the COMPOSITE as the active incident and links the superseded alert in the history view.
+- **Alert status changes:** `PATCH /alerts/:alert_id` updates the `alerts` table and publishes an `ALERT_STATUS_CHANGED` message to `alert-events` so all instances can update their WebSocket clients.
 - All routes and WebSocket upgrades require a valid JWT. `POST /auth/google` is the only unauthenticated endpoint.
 - Subscribes to `position-updates` and `alert-events` on startup. Fans each event to all WebSocket connections whose saved scope matches.
-- Scope filtering is applied server-side per connection — the dashboard receives only events matching its configured geo region, entity type, and alert type filters.
-- Alert fan-out uses `alert-events` pub/sub rather than direct WebSocket push from the Kafka-consuming instance. Without this, only the one API instance that received the Kafka partition would push the alert — other instances with matching WebSocket connections would never deliver it.
-- Does not write to Neo4j. Writes to Redis only via `alert-events` pub/sub publish (not a persistent key write).
-- In-memory WebSocket connection map is rebuilt on restart — scope is reloaded from `user_workspaces` on each new WebSocket upgrade.
+- Scope filtering on position events: entity position must be within `scope.geo_region.bounds`. Scope filtering on alerts: use the immutable detection-location in the alert payload (not the current Redis position — see ADR-012).
+- `GET /entities` must also apply workspace scope server-side — returns only entities within the operator's geo region (Phase 03+).
+- Alert fan-out uses `alert-events` pub/sub rather than direct WebSocket push from the Kafka-consuming instance — all instances must be able to deliver to their own WebSocket clients.
+- Does not write to Neo4j. Writes to Redis only via pub/sub publish (not a persistent key write).
+- In-memory WebSocket connection map is rebuilt on restart — scope is reloaded from `user_workspaces` on each new WebSocket upgrade. Scope update → WebSocket reconnect (not an in-band message on the existing connection).
 
 ---
 
@@ -181,8 +195,8 @@ This document defines the service boundaries, component contracts, data flow, an
 | `adsb.dlq` | Position Consumer | Operator (manual inspection) | Malformed ADS-B events with rejection reason |
 | `ais.dlq` | Position Consumer | Operator (manual inspection) | Malformed AIS events with rejection reason |
 | `position.normalized` | Position Consumer | Correlation Worker, Deviation Detector | Parsed, normalised position events |
-| `deviation.candidates` | Deviation Detector | Alert Evaluator | `OUT_OF_RANGE` / `BACK_IN_RANGE` status per entity; short retention (1h) |
-| `proximity.candidates` | Correlation Worker | Alert Evaluator | Unscheduled proximity pairs, pre-filtered to exclude known associates; short retention (1h) |
+| `deviation.candidates` | Deviation Detector | Alert Evaluator | `OUT_OF_RANGE` / `IN_RANGE` status per entity per ping; short retention (1h) |
+| `proximity.candidates` | Correlation Worker | Alert Evaluator | New proximity episode starts for unscheduled pairs; short retention (1h) |
 | `alerts` | Alert Evaluator | API | Alert events with `alert_id`, type, entity, payload |
 
 **Consumer groups:**
@@ -204,12 +218,12 @@ This document defines the service boundaries, component contracts, data flow, an
 | Table / Object | Owner (writes) | Readers |
 | --- | --- | --- |
 | `position_history` | Position Consumer | Alert Evaluator (last known position for signal loss payload), API |
-| `route_baseline` | TimescaleDB (continuous aggregate over `position_history`) | Deviation Detector |
+| `reference_routes` | Manual seed / synthetic generator | Deviation Detector |
 | `alerts` | API (on Kafka consume) | API |
 | `users` | API | API |
 | `user_workspaces` | API | API |
 
-`route_baseline` is a TimescaleDB continuous aggregate — no service writes to it directly. It is derived from `position_history` and refreshed automatically in the background. See ADR-002.
+`route_baseline` continuous aggregate: **not used**. Route deviation in v1 uses `route_references` + `route_reference_points` (static tables). See ADR-015.
 
 ### Neo4j
 
@@ -224,10 +238,12 @@ This document defines the service boundaries, component contracts, data flow, an
 | Key / Channel | Writer | Reader | Notes |
 | --- | --- | --- | --- |
 | `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = 24h (safety-net only — key must outlive `SIGNAL_LOSS_THRESHOLD_MS` so the evaluator can scan it; dashboard cleanup is client-side) |
-| `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Set of entity_ids in that H3 cell; updated on every position write (SREM old cell, SADD new cell); no TTL — membership is current as long as positions arrive |
-| `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Value = `dark_since_ms`; no TTL; deleted by Position Consumer on entity resume |
-| `deviation-counter:{entity_id}` | Alert Evaluator | Alert Evaluator | INCR/DEL per evaluation cycle |
-| `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease; renewed on each heartbeat |
+| `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Sorted set; score = `last_seen_ms`; ZRANGEBYSCORE filters to fresh members; stale members age out logically via score filter |
+| `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker | Proximity episode state; hash with `episode_start_ms`, `last_seen_ms`; TTL = PROXIMITY_EPISODE_GAP_MS; canonical pair = `min(a,b):max(a,b)` |
+| `recent-loss:{entity_id}` | Position Consumer | Alert Evaluator | Short-lived signal loss record; hash with `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`; TTL = COMPOSITE_CORRELATION_WINDOW_MS; enables composite after entity resumes |
+| `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`; safety TTL = `2 × SIGNAL_LOSS_THRESHOLD_MS`; DEL on IN_RANGE |
+| `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator, Correlation Worker | Hash: `dark_since_ms`, `signal_loss_alert_id`; no TTL; deleted by Position Consumer (after writing recent-loss) on entity resume |
+| `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | SET NX PX lease; compare-and-renew on heartbeat; compare-before-DEL on release |
 | `position-updates` (pub/sub) | Position Consumer | API | Broadcast channel; every normalised position event |
 | `alert-events` (pub/sub) | API (consuming instance) | API (all instances) | Broadcast channel; every alert after TimescaleDB write; all instances fan out to scope-matched WebSocket connections |
 
@@ -251,7 +267,7 @@ External Feeds
                                     │     ├─► Neo4j (PROXIMITY_EVENT edges)
                                     │     └─► proximity.candidates
                                     └─► Deviation Detector
-                                          ├─ reads TimescaleDB (route_baseline)
+                                          ├─ reads TimescaleDB (route_reference_points)
                                           └─► deviation.candidates
 
 Alert Evaluator (leader-elected)
@@ -277,7 +293,7 @@ Dashboard ◄──► API (REST + WebSocket)
 | ADR | Scope |
 | --- | --- |
 | [ADR-001](adr/ADR-001-kafka-over-http-ingestion.md) | Kafka over direct HTTP ingestion |
-| [ADR-002](adr/ADR-002-timescaledb-over-cassandra.md) | TimescaleDB for position history and route baseline |
+| [ADR-002](adr/ADR-002-timescaledb-over-cassandra.md) | TimescaleDB for position history |
 | [ADR-003](adr/ADR-003-neo4j-entity-graph.md) | Neo4j for entity relationship graph |
 | [ADR-004](adr/ADR-004-redis-live-state.md) | Redis for live entity state, pub/sub, and leader election |
 | [ADR-005](adr/ADR-005-leader-election-alert-evaluator.md) | Leader election for alert evaluator |
@@ -290,3 +306,4 @@ Dashboard ◄──► API (REST + WebSocket)
 | [ADR-012](adr/ADR-012-workspace-scope-alert-filtering.md) | Workspace scope and server-side alert filtering |
 | [ADR-013](adr/ADR-013-nodejs-ingestion-poller.md) | Node.js for the ingestion poller |
 | [ADR-014](adr/ADR-014-alert-evaluator-hybrid-input-model.md) | Hybrid input model for the Alert Evaluator |
+| [ADR-015](adr/ADR-015-v1-reference-route-model.md) | v1 reference route model for deviation detection |
