@@ -18,7 +18,7 @@ The operator needs to define a scope before alerts are streamed. Scope has three
 This scope must be:
 - Set once and saved per operator - not re-entered on every visit
 - Applied on the server before alerts reach the WebSocket client
-- Updatable without dropping and re-opening the connection
+- Updatable — takes effect on the next WebSocket connection (fast reconnect, transparent to the operator)
 
 ---
 
@@ -45,7 +45,7 @@ The `scope` JSONB field has the shape:
     "bounds": { "min_lat": 41.3, "max_lat": 51.1, "min_lon": -5.2, "max_lon": 9.6 }
   },
   "entity_types": ["aircraft", "vessel"],
-  "alert_types": ["SIGNAL_LOSS", "ROUTE_DEVIATION", "PROXIMITY", "COMPOSITE"]
+  "alert_types": ["SIGNAL_LOSS", "ROUTE_DEVIATION", "UNSCHEDULED_PROXIMITY", "COMPOSITE"]
 }
 ```
 
@@ -53,19 +53,21 @@ Geographic regions are selected from a predefined list with known bounding boxes
 
 ### Server-side filtering
 
-When the API consumes an alert event from the `alerts` Kafka topic, it checks the alert against every active WebSocket connection's scope before pushing:
+The API instance that consumes an alert from Kafka writes it to TimescaleDB, then publishes it to the `alert-events` Redis pub/sub channel. All API instances subscribe to `alert-events` and evaluate the alert against their local WebSocket connection map (see doc-gaps.md decision #10 — direct push from the consuming instance would miss users on other instances).
 
-1. Look up the alerted entity's last known position from Redis (`entity:live:{entity_id}`)
+Scope filter on each `alert-events` message:
+
+1. Use the **position embedded in the alert payload** (`payload.last_lat`, `payload.last_lon` for signal loss; `payload.lat`, `payload.lon` for proximity/composite) — not the current Redis position. The alert payload carries an immutable position recorded at detection time; the Redis position may have changed by delivery time.
 2. Check whether the position falls within the scope's `geo_region.bounds`
 3. Check whether the entity type matches the scope's `entity_types` list
 4. Check whether the alert type matches the scope's `alert_types` list
-5. Push only if all three match
+5. Push only if all match
 
 Operators with no saved workspace see the scope setup prompt and receive no alerts until a scope is saved.
 
 ### Scope updates over an active connection
 
-An operator can update their scope while the WebSocket is open. The dashboard calls `PUT /users/me/workspace` with the new scope. The API updates the `user_workspaces` table and sends a `scope_updated` control message over the existing WebSocket. The server immediately applies the new scope to that connection's filter - no reconnect required.
+An operator can update their scope while the WebSocket is open. The dashboard calls `PUT /users/me/workspace` with the new scope. The API updates the `user_workspaces` table, then the **dashboard reconnects the WebSocket**. On reconnect, the API loads the updated scope from `user_workspaces` and applies it to the new connection. This is simpler than a `scope_updated` in-band control message and avoids the complexity of hot-swapping a filter on a live connection. The reconnect is fast and transparent to the operator.
 
 ---
 
@@ -116,7 +118,8 @@ An operator can update their scope while the WebSocket is open. The dashboard ca
 - A `user_workspaces` table is added to TimescaleDB as described above
 - The API maintains an in-memory map of `{ connection_id -> scope }` for active WebSocket connections
 - On WebSocket upgrade, the API loads the operator's saved scope from `user_workspaces` into this map
-- On alert consumption from Kafka, the API evaluates the alert against all entries in the in-memory scope map
+- The API publishes each consumed alert to `alert-events` Redis pub/sub; all instances receive it and evaluate against their local connection scope maps
+- Alert scope filtering uses the position in the alert payload, not the current Redis position
 - `GET /users/me/workspace` returns the saved scope (used by the dashboard on load to decide whether to show the scope prompt or restore the previous view)
-- `PUT /users/me/workspace` updates the saved scope and sends a `scope_updated` message to the operator's active WebSocket connection if one is open
+- `PUT /users/me/workspace` updates the saved scope; the dashboard then reconnects the WebSocket to pick up the new scope server-side
 - A predefined region list (name + bounding box) is maintained as a static JSON file in the API service - no database table needed for regions in v1

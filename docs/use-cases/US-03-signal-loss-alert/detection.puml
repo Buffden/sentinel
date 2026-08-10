@@ -25,10 +25,10 @@ loop every 10s (scheduled scan)
 
   note over Redis
     Detection is driven by last_seen_ms in the hash,
-    not by TTL expiry. The key may still be alive
-    when the threshold is crossed.
-    TTL = SIGNAL_LOSS_THRESHOLD_MS (drives dashboard
-    ghost cleanup only - see US-01).
+    not by TTL expiry. Key TTL = 24h (safety-net) —
+    deliberately longer than SIGNAL_LOSS_THRESHOLD_MS
+    so the key cannot expire between scan cycles.
+    Dashboard ghost cleanup is client-side (see US-01).
   end note
 
   alt now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS

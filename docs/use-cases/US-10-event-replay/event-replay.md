@@ -13,10 +13,16 @@ As the system, I want to replay events from a past Kafka offset so that a consum
 
 ## Acceptance Criteria
 
-- A consumer that restarts picks up from its last committed offset and processes all missed events
-- A consumer can be intentionally rewound to an earlier offset for backfill (e.g. after a Neo4j restart or a corrected anomaly rule)
-- Replayed events are safe to process - all writes are idempotent by construction (US-11)
-- No manual intervention is required to recover a consumer that missed events during a restart
+**Mode A — Crash recovery (automatic):**
+- A consumer that restarts picks up from its last committed Kafka offset and processes all missed events normally
+- No manual intervention required; idempotency keys prevent duplicate records in TimescaleDB and Neo4j
+- The timestamp guard (`incoming.timestamp_ms > stored.last_seen_ms`) prevents Redis live-state regression from re-delivered events
+
+**Mode B — Historical backfill (intentional):**
+- A developer can rewind a consumer group to an earlier offset to rebuild a specific store (e.g. Neo4j after restart, TimescaleDB history after a schema migration)
+- Backfill mode runs under a separate consumer group (or explicit `--mode=backfill` flag) and disables ephemeral side effects: Redis live-state writes, `position-updates` pub/sub, `deviation.candidates`, `proximity.candidates`, and `alerts` are suppressed
+- Only the target store is written during backfill
+- Backfill mode must not be used to re-warm Redis live state from arbitrary historical replay; prefer latest-row-per-entity from TimescaleDB or a bounded recent Kafka tail for Redis warm-up
 
 ---
 

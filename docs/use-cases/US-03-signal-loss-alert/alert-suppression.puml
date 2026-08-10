@@ -8,9 +8,10 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nalert-state:{id}" as AlertState
+database "Redis\nalert-state:{id}\n(hash)" as AlertState
 participant "Position\nConsumer" as Consumer
 database "Redis\nentity:live:{id}" as LiveState
+database "Redis\nrecent-loss:{id}\n(hash)" as RecentLoss
 queue "Kafka\nalerts" as Kafka
 
 note over Evaluator
@@ -20,8 +21,8 @@ note over Evaluator
 end note
 
 loop evaluation cycle N (entity still dark)
-  Evaluator -> AlertState : GET alert-state:ABC
-  AlertState --> Evaluator : SIGNAL_LOSS alert already active
+  Evaluator -> AlertState : HGET alert-state:ABC signal_loss_alert_id
+  AlertState --> Evaluator : $alert_id (SIGNAL_LOSS alert already active)
 
   Evaluator -> Evaluator : skip - alert already raised\ndo not re-emit
 
@@ -29,6 +30,9 @@ loop evaluation cycle N (entity still dark)
     Operator does not receive
     a duplicate alert on every cycle.
     One alert per loss event.
+    alert-state is a hash:
+      dark_since_ms: epoch ms when entity went dark
+      signal_loss_alert_id: alert_id of emitted SIGNAL_LOSS
   end note
 end
 
@@ -38,17 +42,23 @@ note over Consumer, LiveState
   and writes it to Redis.
 end note
 
-Consumer -> LiveState : HSET entity:live:ABC\n{ lat, lon, last_seen_ms }
+Consumer -> LiveState : HSET entity:live:ABC\n{ lat, lon, last_seen_ms }\n(timestamp guard: skip if last_seen_ms <= stored)
+Consumer -> RecentLoss : HSET recent-loss:ABC\n{ dark_since_ms, signal_loss_alert_id }\nEXPIRE COMPOSITE_CORRELATION_WINDOW_MS
+note over Consumer, RecentLoss
+  Write recent-loss BEFORE deleting alert-state.
+  Enables composite supersession even after
+  entity has resumed — within the correlation window.
+end note
 Consumer -> AlertState : DEL alert-state:ABC
 note over Consumer, AlertState
-  The position consumer clears the suppression key,
+  The position consumer clears alert-state,
   not the evaluator. This ensures the key is only
   removed when a real ping is received — not on
   a timer or assumption.
 end note
 
 loop next evaluation cycle (entity live again)
-  Evaluator -> AlertState : GET alert-state:ABC
+  Evaluator -> AlertState : HGET alert-state:ABC signal_loss_alert_id
   AlertState --> Evaluator : nil (no active alert)
 
   note over Evaluator

@@ -19,7 +19,7 @@ Read `insights/intent.md` for the full context on why this project exists and wh
 | Concern | Technology | Why |
 | --- | --- | --- |
 | Message broker | Kafka (Redpanda locally, MSK on AWS) | Decouples ingestion from processing; absorbs bursty feeds |
-| Position history | TimescaleDB | Geo-cell + time-bucket sharding matches the query pattern |
+| Position history | TimescaleDB | Time-based partitioning (`observed_at`); geo_cell is an index column for spatial filtering |
 | Entity graph | Neo4j | Proximity/relationship queries are graph traversals, not table scans |
 | Live entity state | Redis | Highest-frequency read; cache, not source of truth |
 | Ingestion poller | Node.js | Shares TypeScript types and Kafka client config with the API; one runtime across the backend — see ADR-013 |
@@ -50,14 +50,10 @@ docker compose up -d        # Start all backing services
 
 ### Naming
 - Entity identifiers: `entity_id` (string, e.g. ICAO hex for aircraft, MMSI for vessels)
-- Idempotency keys: `{entity_id}:{timestamp_ms}`  - used on every write, everywhere
-- Kafka topics: `{entity_type}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
-- Redis keys and channels:
-  - `entity:live:{entity_id}` - current position hash, includes `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` (drives dashboard ghost cleanup only, not alert detection)
-  - `alert-state:{entity_id}` - in-loop alert suppression flag; value = `dark_since_ms` (Unix ms when entity went dark); **no TTL** — written by alert evaluator on first emission, deleted explicitly by position consumer when entity resumes broadcasting; used by composite alert evaluator (US-06) to retrieve the loss window start; distinct from the durable dedup in the `alerts` table (TimescaleDB)
-  - `deviation-counter:{entity_id}` - consecutive out-of-baseline ping count for sustained deviation detection (US-04)
-  - `alert-evaluator:leader` - leader election lease key, SET NX PX pattern
-  - `position-updates` - Redis pub/sub channel; position consumer publishes every normalised position event here after writing to the hash; all API instances subscribe and fan out to scoped WebSocket connections
+- Idempotency: all durable/replay-sensitive writes have deterministic idempotency semantics. Position writes use `{entity_id}:{timestamp_ms}` (source event time); pair-based writes use `{min(a,b)}:{max(a,b)}:{episode_start_ms}`; alert writes use `{entity_id}:{alert_type}:{window_start_ms}`. See DATA_MODEL.md for each store's mechanism.
+- Event time vs processing time: episode anchors (`episode_start_ms`), correlation window anchors (`resumed_at_ms`, `dark_since_ms`), replay guards (`last_processed_ms`), and deterministic identifiers (`alert_id`, `idempotency_key`) use source event time. Purely operational/audit timestamps (`detected_at` when persisting an alert, `created_at`, `updated_at`) may use processing time. See DATA_MODEL.md for per-field details.
+- Kafka topics: `{source}.{stage}` for per-source topics (e.g. `adsb.raw`, `ais.raw`, `adsb.dlq`, `ais.dlq`); descriptive names for cross-source topics (e.g. `position.normalized`, `alerts`)
+- Redis keys and channels: see `docs/DATA_MODEL.md` — Redis section is the canonical reference for key schemas, TTLs, writers, and readers
 
 ### Code style
 - Prefer explicit over clever  - this code will be read in an interview setting
@@ -70,12 +66,33 @@ docker compose up -d        # Start all backing services
 - Alert evaluator failures must not result in duplicate alerts  - leader election handles this, not application-level dedup hacks
 
 ### Service contracts
-- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; writes PROXIMITY_EVENT edges to Neo4j; publishes unscheduled proximity pairs to `proximity.candidates` (see ADR-014) — does not write to TimescaleDB or Redis
-- Deviation detector Kafka consumer group: `deviation-detector`; consumes `position.normalized`; reads `route_baseline` from TimescaleDB; publishes `OUT_OF_RANGE` / `BACK_IN_RANGE` events to `deviation.candidates` — does not write to Redis, Neo4j, or the `alerts` topic
+
+See `docs/ARCHITECTURE.md` — service I/O tables, contracts, and data flow are the canonical reference. Key invariants:
+- Canonical pair ordering: `min(entity_a_id, entity_b_id):{max(entity_a_id, entity_b_id)}` everywhere (episode hash, Neo4j idempotency key, Kafka event)
+- All `timestamp_ms` values are source event times — never processing time
+- **Two replay modes:** (A) Crash recovery — consumer resumes from last committed offset; normal processing. (B) Historical backfill — separate consumer group; suppress ephemeral side effects (Redis writes, pub/sub, deviation/proximity candidates, alerts). Never replay full history to re-warm Redis live state — prefer latest-row-per-entity from TimescaleDB or a bounded Kafka tail.
 
 ### Commits
 - Commit message format: `<scope>: <what and why>`  - e.g. `ingestion: add DLQ for malformed AIS events`
 - Scopes match service names: `ingestion`, `position-consumer`, `correlation`, `deviation-detector`, `alert-evaluator`, `api`, `dashboard`, `infra`, `schema`
+
+---
+
+## Learning / Pair-Engineering Mode
+
+This repository is also a hands-on distributed-systems learning project. When working on implementation (not docs), behave as a senior engineer pairing with the developer — not as an autonomous implementation agent.
+
+- Explain the mental model before framework/library mechanics
+- Use Sentinel-specific examples; connect implementation to the system-design concept being demonstrated
+- Surface meaningful design choices and trade-offs before making them; involve the developer in architectural decisions
+- Prefer small hands-on experiments for unfamiliar infrastructure before building the full thing
+- Explain relevant failure modes, replay behavior, concurrency, and idempotency as they arise
+- Show how to inspect and debug the running system (CLI, logs, console UIs)
+- After significant work, provide a short engineering debrief and knowledge check
+
+Do not optimize purely for implementation speed when doing so would hide the concepts the developer is trying to learn. The goal is that the developer can explain, debug, and defend the system without Claude.
+
+If a `LEARNING_MODE.md` file exists at the repo root, read it before starting any implementation work — it may contain phase-specific guidance.
 
 ---
 

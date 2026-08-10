@@ -1,5 +1,5 @@
 @startuml baseline-computation
-title US-04: Baseline Computation - Historical Route Built from TimescaleDB
+title US-04: Reference Route Setup - Static Routes Seeded at Startup
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,27 +7,41 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-participant "Position\nConsumer" as Consumer
-database "TimescaleDB\nposition_history" as TSDB
-database "TimescaleDB\nroute_baseline\n(continuous aggregate)" as Baseline
+participant "Load\nGenerator" as LoadGen
+database "TimescaleDB\nroute_references" as RouteRef
+database "TimescaleDB\nroute_reference_points" as RoutePoints
+participant "Deviation\nDetector" as Detector
 
-Consumer -> TSDB : INSERT INTO position_history\n{ entity_id, geo_cell, timestamp_ms, lat, lon }
-
-note over TSDB
-  Partitioned by (geo_cell, time_bucket).
-  Each entity builds up a position
-  history across many time chunks.
+note over LoadGen
+  At startup, the synthetic load generator
+  seeds known route definitions into TimescaleDB.
+  Real ADS-B/AIS entities have no assigned route —
+  they are skipped by the Deviation Detector.
 end note
 
-TSDB -> Baseline : continuous aggregate refresh\n(time-bucket rollup per entity)
+LoadGen -> RouteRef : insert route header\n{ route_id, entity_id, route_name,\n  corridor_threshold_metres, source }
 
-note over Baseline
-  Materialised view updated automatically.
-  Computes average track per entity
-  per time bucket over the last N days.
-  No full table scan on each evaluation.
+LoadGen -> RoutePoints : insert ordered waypoints\n{ route_id, sequence_no, lat, lon }\n(one row per waypoint; pairs define route segments)
+
+note over RoutePoints
+  Waypoints define the expected corridor.
+  corridor_threshold_metres lives on route_references.
+  Seeded from the generator's known route definition —
+  deterministic, injectable, consistent with
+  the anomalies the generator will produce.
+  No statistical averaging of historical positions.
 end note
 
-Baseline --> Baseline : route_baseline ready\n{ entity_id, time_bucket,\n  avg_lat, avg_lon, stddev_metres }
+Detector -> RouteRef : look up entity in route_references
+RouteRef --> Detector : row found (entity has an assigned reference route)
+
+note over Detector
+  If no row found: entity has no reference route.
+  Skip without publishing to deviation.candidates.
+  Real ADS-B/AIS entities fall through here in v1.
+end note
+
+Detector -> RoutePoints : fetch ordered waypoints for route_id
+RoutePoints --> Detector : ordered waypoint list
 
 @enduml

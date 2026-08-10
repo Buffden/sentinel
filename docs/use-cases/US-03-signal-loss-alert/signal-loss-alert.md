@@ -26,19 +26,19 @@ As an operator, I want to receive an alert when an entity's transponder goes dar
 
 ![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry — the TTL is used only for dashboard ghost cleanup (US-01).
+The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry. The key carries a 24h TTL (safety-net only) — it is deliberately longer than `SIGNAL_LOSS_THRESHOLD_MS` so the key cannot expire between scan cycles before the evaluator has a chance to inspect `last_seen_ms`. Dashboard ghost cleanup is separate and client-side (US-01).
 
 ### Alert Delivery
 
 ![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
 
-The alert is consumed from Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), then pushed over WebSocket only to operators whose saved scope matches the entity's position, type, and alert type.
+The API instance that consumes the alert from Kafka writes it to the `alerts` table in TimescaleDB (idempotent on replay), then publishes it to the `alert-events` Redis pub/sub channel. All API instances subscribe to `alert-events` and fan out to scope-matched WebSocket connections. This mirrors the `position-updates` pattern and solves the fan-out problem: the Kafka consumer group `api` delivers each alert to exactly one instance, but WebSocket connections are local per instance — without the Redis broadcast, users on non-consuming instances would never receive the push.
 
 ### Alert Suppression
 
 ![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
 
-Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` key to Redis (no TTL). Subsequent evaluation cycles check for this key first and skip re-emission if it is present. When the entity comes back online, the position consumer explicitly deletes `alert-state:{entity_id}` on its next write, clearing the suppression. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
+Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` hash to Redis (no TTL) containing `dark_since_ms` and `signal_loss_alert_id`. Subsequent evaluation cycles check for this hash first and skip re-emission if it is present. When the entity comes back online, the position consumer: (1) writes `recent-loss:{entity_id}` hash (TTL = `COMPOSITE_CORRELATION_WINDOW_MS`) containing the dark episode details for potential composite correlation; (2) then deletes `alert-state:{entity_id}`. The `recent-loss` key enables composite supersession even after the entity has resumed broadcasting. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
 
 ---
 

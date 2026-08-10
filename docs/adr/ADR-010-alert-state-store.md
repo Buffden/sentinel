@@ -10,7 +10,7 @@
 The alert evaluator publishes alert events to the `alerts` Kafka topic. Currently, alerts are stateless from the system's perspective - an operator sees them on the dashboard but cannot acknowledge, resolve, or suppress them. To support alert lifecycle management (US-13), alert state must be persisted somewhere.
 
 Requirements:
-- Store per-alert state: `NEW`, `ACKNOWLEDGED`, `RESOLVED`
+- Store per-alert state: `NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`
 - State must survive restarts - losing alert history when Redis restarts is not acceptable
 - State must be queryable: filter by status, entity, time range, alert type
 - Writes are low-volume relative to position pings (thousands of alerts vs millions of pings)
@@ -71,5 +71,6 @@ The `alert_id` is a deterministic key of the form `{entity_id}:{alert_type}:{win
 - The API layer consumes from the `alerts` Kafka topic and writes initial alert records with status `NEW` to the `alerts` table
 - Alert state transitions are applied via `PATCH /alerts/:alert_id` endpoints - the API updates the table directly
 - The `alert_id` format `{entity_id}:{alert_type}:{window_start_ms}` must be included in every alert event published by the alert evaluator
-- A new `alerts` table must be added to the TimescaleDB schema alongside `position_history` and `route_baseline`
-- Alert history is queryable via the API without re-reading Kafka - the table is the source of truth for current alert state
+- The `alerts` table includes a `SUPERSEDED` status and a nullable `superseded_by` column (FK → `alerts.alert_id`). When a COMPOSITE alert is created, the API atomically inserts the composite and marks the referenced SIGNAL_LOSS alert as SUPERSEDED in one DB transaction.
+- Alert status changes (acknowledge, resolve, supersede) are broadcast via the `alert-events` Redis pub/sub channel with a typed envelope (`ALERT_STATUS_CHANGED` or `ALERT_SUPERSEDED`) so all API instances can push the update to their WebSocket clients.
+- Alert history is queryable via the API without re-reading Kafka — the table is the source of truth for current alert state

@@ -1,5 +1,5 @@
 @startuml geo-cell-write
-title US-12: Geo-Cell Write - H3 Cell Computed at Ingest and Stored as Partition Key
+title US-12: Geo-Cell Write - Two H3 Resolutions: HISTORY for TimescaleDB, LIVE for Redis sorted sets
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -10,25 +10,42 @@ skinparam noteBackgroundColor #FFFDE7
 queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
 database "TimescaleDB\nposition_history" as TSDB
+database "Redis\ngeo-cell:{cell_id}\n(sorted set)" as GeoCell
 
 Kafka -> Consumer : consume event\n{ entity_id, lat, lon, timestamp_ms }
 
-Consumer -> Consumer : compute H3 cell ID\nh3.latLngToCell(lat, lon, resolution=5)
+Consumer -> Consumer : compute H3 cell IDs:\nhistory_cell = h3.latLngToCell(lat, lon, HISTORY_H3_RESOLUTION)\nlive_cell    = h3.latLngToCell(lat, lon, LIVE_H3_RESOLUTION)
 
 note over Consumer
-  H3 resolution 5 = ~252 km² per cell.
-  High-traffic areas span multiple cells
-  naturally - no single cell becomes
-  a write hot-spot.
+  HISTORY_H3_RESOLUTION — configurable:
+    used for TimescaleDB geo_cell index column.
+    Larger cells = fewer distinct values = better index selectivity
+    for bounding-box queries over historical windows.
+  LIVE_H3_RESOLUTION — configurable, tuned independently:
+    used for Redis sorted sets (geo-cell proximity index).
+    Smaller cells = tighter spatial locality
+    for proximity k-ring expansion.
+  If both resolutions are equal, only one cell ID is computed.
+  Tune both during implementation based on entity density
+  and PROXIMITY_THRESHOLD_METRES.
 end note
 
-Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- H3 cell ID\n  time_bucket,     -- truncated to chunk interval\n  timestamp_ms,\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- history_geo_cell (HISTORY_H3_RESOLUTION)\n  observed_at,     -- to_timestamp(timestamp_ms/1000.0)\n  timestamp_ms,    -- source fidelity + logical idempotency key\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note over TSDB
-  Composite partition key: (geo_cell, time_bucket).
-  TimescaleDB routes the row to the chunk
-  that owns this geo-cell + time-bucket pair.
-  Spatially nearby events land in the same chunk.
+  Hypertable partitioned by observed_at (TIMESTAMPTZ).
+  geo_cell is an ordinary indexed column, not a partition dimension.
+  Queries filter on geo_cell IN ($cells) AND observed_at BETWEEN $t1 AND $t2.
+  TimescaleDB chunk exclusion applies to the time dimension only.
+end note
+
+Consumer -> GeoCell : ZADD geo-cell:{live_cell} $timestamp_ms $entity_id
+note over GeoCell
+  Score = last_seen_ms.
+  Correlation Worker queries with ZRANGEBYSCORE
+  to filter out stale members before proximity check.
+  LIVE_H3_RESOLUTION cells are smaller, giving
+  tighter k-ring expansion at proximity detection time.
 end note
 
 @enduml

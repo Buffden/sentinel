@@ -31,11 +31,12 @@ Consumer -> KafkaNorm : publish to position.normalized
 Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, last_seen_ms }
 
 note right of Redis
-  TTL = SIGNAL_LOSS_THRESHOLD_MS
-  Key expiry removes stale entities from
-  the map automatically (dashboard ghost cleanup).
-  Signal loss detection reads last_seen_ms
-  from the hash on a schedule - not TTL expiry.
+  TTL = 24h (safety-net only).
+  Must be longer than SIGNAL_LOSS_THRESHOLD_MS
+  so the alert evaluator can always find the key
+  on its scan cycle. Dashboard ghost cleanup is
+  client-side: Angular removes the marker when
+  now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS.
 end note
 
 Consumer -> Redis : PUBLISH position-updates\n{ entity_id, lat, lon, altitude, last_seen_ms }
@@ -47,10 +48,13 @@ note right of Redis
   additional pub/sub infrastructure.
 end note
 
-Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note right of TSDB
-  Idempotency key: entity_id + timestamp_ms
+  Conflict target: (entity_id, observed_at).
+  TimescaleDB requires the partition column in
+  any unique constraint on a hypertable.
+  observed_at = to_timestamp(timestamp_ms / 1000.0).
   Safe to replay from Kafka offset.
 end note
 

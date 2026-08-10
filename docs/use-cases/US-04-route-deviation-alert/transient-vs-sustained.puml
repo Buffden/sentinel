@@ -9,44 +9,47 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\ndeviation.candidates" as DevCandKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\ndeviation-counter:{id}" as DevState
+database "Redis\ndeviation-state:{id}\n(hash)" as DevState
 queue "Kafka\nalerts" as Kafka
 
 == Transient OUT_OF_RANGE event (no alert) ==
 
-DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation_metres: 45000 }
+DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation_metres: 45000, timestamp_ms: T1 }
 
-Evaluator -> DevState : INCR deviation-counter:DEF
-DevState --> Evaluator : counter = 1
+Evaluator -> DevState : HINCRBY deviation-state:DEF count 1\nHSET episode_start_ms T1 last_processed_ms T1
+DevState --> Evaluator : count = 1
 
-Evaluator -> Evaluator : counter < DEVIATION_SUSTAINED_PINGS\nno alert emitted
+Evaluator -> DevState : EXPIRE deviation-state:DEF DEVIATION_STATE_TTL_MS
+
+Evaluator -> Evaluator : count < DEVIATION_SUSTAINED_PINGS\nno alert emitted
 
 note over Evaluator
   A single OUT_OF_RANGE event could be
   a GPS glitch or brief correction.
   Not actionable on its own.
+  episode_start_ms records when the deviation began.
 end note
 
-== BACK_IN_RANGE event - counter reset ==
+== IN_RANGE event - state reset ==
 
-DevCandKafka -> Evaluator : { entity_id: DEF, status: BACK_IN_RANGE }
+DevCandKafka -> Evaluator : { entity_id: DEF, status: IN_RANGE,\n  timestamp_ms: T2 }
 
-Evaluator -> DevState : DEL deviation-counter:DEF
+Evaluator -> DevState : DEL deviation-state:DEF
 note over Evaluator
-  Counter reset. Transient - no alert raised.
+  State reset. Transient — no alert raised.
   Deviation Detector observed entity return
-  to within baseline threshold.
+  to within corridor threshold (segment distance).
 end note
 
 == Sustained deviation (N consecutive OUT_OF_RANGE events) ==
 
 loop for N consecutive OUT_OF_RANGE events
-  DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation_metres: 45000 }
-  Evaluator -> DevState : INCR deviation-counter:DEF
+  DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation_metres: 45000, timestamp_ms: Tn }
+  Evaluator -> DevState : HINCRBY deviation-state:DEF count 1\nHSET last_processed_ms Tn\nEXPIRE DEVIATION_STATE_TTL_MS
 end
 
-DevState --> Evaluator : counter >= DEVIATION_SUSTAINED_PINGS
+DevState --> Evaluator : count >= DEVIATION_SUSTAINED_PINGS
 
-Evaluator -> Kafka : publish ROUTE_DEVIATION alert\n{ entity_id, current_position,\n  baseline_position, deviation_metres,\n  sustained_cycles }
+Evaluator -> Kafka : publish ROUTE_DEVIATION alert\n{ entity_id, current_position,\n  deviation_metres, nearest_segment_index,\n  sustained_cycles, episode_start_ms }
 
 @enduml

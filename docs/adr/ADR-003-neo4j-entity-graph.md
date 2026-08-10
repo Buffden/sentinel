@@ -49,4 +49,6 @@ Use Neo4j as the entity relationship graph store.
 
 - Neo4j requires a separate Docker container and sufficient heap allocation (default JVM settings are too low for sustained load)
 - The Cypher query language must be used  - no ORM abstraction; queries are written explicitly
-- Neo4j's transaction model differs from RDBMS  - idempotency on edge creation must be handled with MERGE, not INSERT (addressed in ADR-007)
+- Neo4j's transaction model differs from RDBMS — idempotency on edge creation must be handled with MERGE, not INSERT (addressed in ADR-007)
+- `PROXIMITY_EVENT` edges represent proximity episodes, not individual pings. Idempotency key: `{min(a,b)}:{max(a,b)}:{episode_start_ms}` — one edge per episode. Edge properties are updated during the episode (`last_seen_ms`, `min_distance_metres`) without changing the idempotency key.
+- Pair canonicalization (`min(a,b):max(a,b)`) ensures (A,B) and (B,A) always produce the same key and the same edge.

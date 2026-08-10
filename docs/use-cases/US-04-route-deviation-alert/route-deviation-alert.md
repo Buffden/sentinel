@@ -7,32 +7,33 @@
 
 ## Story
 
-As an operator, I want to receive an alert when an entity's current track diverges significantly from its established historical baseline so that I can identify route deviations.
+As an operator, I want to receive an alert when an entity's current track diverges significantly from its assigned reference route so that I can identify route deviations.
 
 ---
 
 ## Acceptance Criteria
 
-- The system maintains a historical route baseline per entity derived from past position history
-- A deviation alert is emitted when the current position diverges from the baseline by more than `ROUTE_DEVIATION_THRESHOLD_METRES`
-- The baseline is computed from a configurable historical window (e.g. the last 30 days of tracks for the same entity)
-- A single transient position ping that falls outside the baseline does not trigger an alert - sustained deviation does
+- Route deviation detection applies to **synthetic entities only** in v1. Real ADS-B/AIS entities have no reference route and are skipped. Statistical baseline modeling from historical lat/lon averages does not produce a meaningful route corridor and is deferred to future work.
+- Each synthetic entity has a reference route in `route_references` (with `corridor_threshold_metres`) and ordered waypoints in `route_reference_points`
+- A deviation alert is emitted when the current position is further than `corridor_threshold_metres` from the nearest **route segment** (minimum perpendicular distance), sustained across `DEVIATION_SUSTAINED_PINGS` consecutive pings
+- The Deviation Detector is stateless — it classifies every ping as `OUT_OF_RANGE` or `IN_RANGE`. The Alert Evaluator owns episode state (`deviation-state:{entity_id}` hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`)
+- A single transient out-of-range ping does not trigger an alert — sustained deviation does; `alert_emitted` flag prevents re-emission within the same episode; `last_processed_ms` prevents replay regressions
 
 ---
 
 ## Flow Diagrams
 
-### Baseline Computation
+### Reference Route Setup
 
-![Baseline Computation](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/baseline-computation.svg)
+![Reference Route Setup](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/baseline-computation.svg)
 
-Position history written to TimescaleDB is rolled up into a continuous aggregate that materialises the expected route per entity per time bucket.
+At startup, the synthetic load generator seeds reference routes into TimescaleDB. Each synthetic entity has one assigned route: a header record with a corridor threshold and an ordered list of waypoints defining the expected path. Real ADS-B/AIS entities have no assigned route and are skipped by the Deviation Detector.
 
 ### Deviation Detection
 
 ![Deviation Detection](../../../diagrams/docs/use-cases/US-04-route-deviation-alert/deviation-detection.svg)
 
-The Deviation Detector compares each normalised position against the materialised baseline and publishes `OUT_OF_RANGE` / `BACK_IN_RANGE` events to `deviation.candidates`. The Alert Evaluator consumes these events, increments a counter per entity on `OUT_OF_RANGE`, and emits an alert only after `DEVIATION_SUSTAINED_PINGS` consecutive events. The API writes the alert to the alerts table (status: NEW, idempotent on replay) before pushing to scope-matched WebSocket connections.
+The Deviation Detector statlessly classifies each position against the reference route and publishes `OUT_OF_RANGE` or `IN_RANGE` events to `deviation.candidates` (one per eligible ping). The Alert Evaluator consumes these events; it guards against replay via `last_processed_ms`, increments a counter on `OUT_OF_RANGE`, and emits exactly one ROUTE_DEVIATION alert per episode after `DEVIATION_SUSTAINED_PINGS` consecutive out-of-range pings. On `IN_RANGE`, the episode state is deleted and the counter resets. The API writes the alert to the alerts table (status: NEW, idempotent on replay) before pushing to scope-matched WebSocket connections.
 
 ### Transient vs Sustained
 
@@ -44,6 +45,6 @@ A single position ping outside the baseline increments a counter but does not tr
 
 ## Architectural Justification
 
-Justifies: [ADR-002 - TimescaleDB for Position History](../../adr/ADR-002-timescaledb-over-cassandra.md)
+Justifies: [ADR-015 - v1 Reference Route Model](../../adr/ADR-015-v1-reference-route-model.md)
 
-Route baseline computation requires materialised historical track averages per entity across a configurable time window. TimescaleDB continuous aggregates produce time-bucket rollups that serve this query without scanning raw position rows on every evaluation cycle. The geo-cell + time-bucket sharding key (ADR-006) also ensures that historical queries for a specific entity in a specific region hit a minimal set of chunks.
+Route deviation in v1 uses deterministic reference routes (`route_references` + `route_reference_points`) rather than a statistical lat/lon average. Statistical averaging across mixed flight phases (departure, cruise, approach) produces a midpoint coordinate that is not on any actual route segment, causing false positives. Reference routes are explicitly assigned to synthetic entities and give injectable, predictable anomalies for demos. Real ADS-B/AIS entities have no assigned route and are skipped.

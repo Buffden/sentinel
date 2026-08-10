@@ -10,7 +10,7 @@
 The Alert Evaluator was originally designed to pull directly from all three persistence stores on each evaluation cycle:
 
 - **Redis** — scan `entity:live:*` for signal loss (`last_seen_ms`)
-- **TimescaleDB** — query `route_baseline` continuous aggregate for deviation detection
+- **TimescaleDB** — query `route_baseline` continuous aggregate for deviation detection (this aggregate was later found to be architecturally incorrect; see ADR-015)
 - **Neo4j** — query `PROXIMITY_EVENT` and `KNOWN_ASSOCIATE` edges for proximity and composite detection
 
 A review of the architecture raised a valid concern: coupling a single service to three different stores makes it harder to test in isolation, harder to reason about failure modes, and harder to evolve individual detection rules independently. The reviewer suggested introducing dedicated stream processors that publish derived facts onto Kafka topics, so that the Alert Evaluator becomes a pure Kafka consumer.
@@ -38,28 +38,17 @@ A new Node.js service, `services/deviation-detector/`, is introduced with a sing
 | Direction | What |
 |---|---|
 | Consumes | `position.normalized` (consumer group: `deviation-detector`) |
-| Reads from TimescaleDB | `route_baseline` — current time bucket baseline for the incoming entity |
+| Reads from TimescaleDB | `route_reference_points` (via `route_references`) — reference route segments for the incoming entity (synthetic entities only); see ADR-015 |
 | Publishes to | `deviation.candidates` |
 
-**Event schema on `deviation.candidates`:**
-
-```json
-{
-  "entity_id":         "string",
-  "timestamp_ms":      "number",
-  "status":            "OUT_OF_RANGE | BACK_IN_RANGE",
-  "current_position":  { "lat": "number", "lon": "number" },
-  "baseline_position": { "avg_lat": "number", "avg_lon": "number" },
-  "deviation_metres":  "number"
-}
-```
-
-`baseline_position` and `deviation_metres` are omitted on `BACK_IN_RANGE` events.
+The `deviation.candidates` event schema is defined in `DATA_MODEL.md` (Kafka Event Schemas section).
 
 **Contract:**
 
-- Publishes `OUT_OF_RANGE` when a position exceeds the baseline threshold; publishes `BACK_IN_RANGE` on the first position that falls back within threshold after an out-of-range sequence. Both events are required — the Alert Evaluator uses `BACK_IN_RANGE` to `DEL deviation-counter:{entity_id}` and reset the sustained-ping count.
-- Does not apply the `DEVIATION_SUSTAINED_PINGS` filter. The Alert Evaluator owns the counter and suppression logic.
+- **Stateless:** emits `OUT_OF_RANGE` or `IN_RANGE` on every eligible ping. Does not track state between pings. `BACK_IN_RANGE` is replaced by `IN_RANGE` (every in-range ping, not just transitions). This eliminates the restart problem: a stateless detector produces the same output regardless of prior history.
+- Does not apply the `DEVIATION_SUSTAINED_PINGS` filter. The Alert Evaluator owns all episode state via `deviation-state:{entity_id}` (hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`).
+- Reads from `route_reference_points` (via `route_references`) — the correct v1 reference route schema. See ADR-015. Does not read `route_baseline` (which does not exist).
+- Skips entities with no row in `route_references` — real ADS-B/AIS entities are not covered in v1.
 - Does not write to Redis, Neo4j, or the `alerts` topic.
 - Does not emit alerts. Anomaly rule evaluation is not its concern.
 
@@ -78,11 +67,11 @@ The Neo4j write is not removed — the graph remains the source of truth for rel
 | Detection | Before | After |
 | --- | --- | --- |
 | Signal Loss | Scheduled Redis scan (`entity:live:*`) | Unchanged — scheduled Redis scan |
-| Route Deviation | Direct TimescaleDB query (`route_baseline`) | Consumes `deviation.candidates` |
-| Unscheduled Proximity | Direct Neo4j query (`PROXIMITY_EVENT` edges) | Consumes `proximity.candidates` |
-| Composite Alert | Redis (`alert-state`) + Neo4j scan | Redis (`alert-state`) + Neo4j targeted lookup (unchanged) |
+| Route Deviation | Direct TimescaleDB query (`route_baseline`, not used) | Consumes `deviation.candidates` from stateless Deviation Detector |
+| Unscheduled Proximity | Direct Neo4j query (`PROXIMITY_EVENT` edges) | Consumes `proximity.candidates` (one event per proximity episode) |
+| Composite Alert | Redis scan + Neo4j | Supersession model: SIGNAL_LOSS emitted immediately; proximity arrival checks `alert-state` (active dark) or `recent-loss` (was dark); if match, emit COMPOSITE + supersede SIGNAL_LOSS |
 
-The Alert Evaluator's `route_baseline` read is removed — that comparison now belongs to the Deviation Detector. Its remaining TimescaleDB dependency is narrowed to `position_history`, read only when building the signal loss alert payload to include the entity's last known position. Its Neo4j access narrows from a broad edge scan to a targeted lookup used only when assembling composite alert context — checking known associates and fetching the proximity window for a specific entity pair.
+The Alert Evaluator's `route_baseline` read is removed — that comparison now belongs to the Deviation Detector (which reads from `route_reference_points`, not a continuous aggregate). Its remaining TimescaleDB dependency is narrowed to `position_history`, read only when building the signal loss alert payload. Its Neo4j access narrows to composite alert context — a targeted lookup on a specific entity pair, not a scan.
 
 ---
 
@@ -134,16 +123,7 @@ Valid for a first pass but couples the Alert Evaluator to three stores, making e
 - A new service `services/deviation-detector/` must be scaffolded and added to `docker-compose.yml`
 - Two new Kafka topics must be created in the infrastructure init script: `deviation.candidates`, `proximity.candidates`
 - The Correlation Worker gains a Kafka produce call alongside its existing Neo4j write — both happen on the same proximity detection event
-- The Alert Evaluator's `route_baseline` read is removed; its TimescaleDB access is narrowed to `position_history` only — read when building the signal loss alert payload to include the entity's last known position
-- The Alert Evaluator's Neo4j access is narrowed to composite alert context only — it no longer scans for recent `PROXIMITY_EVENT` edges
-- The following documents require updates to reflect this architecture:
-  - `docs/ARCHITECTURE.md` — new service contract, updated topic table, updated consumer groups, updated persistence ownership, updated data flow diagram
-  - `docs/DATA_MODEL.md` — new Kafka event schemas for `deviation.candidates` and `proximity.candidates`
-  - `docs/implementation/phase-04-alert-pipeline.md` — Alert Evaluator drops `route_baseline` read; retains `position_history` read for signal loss payload; Deviation Detector is a new service introduced here or in a dedicated phase
-  - `docs/implementation/phase-05-correlation.md` — Correlation Worker also publishes to `proximity.candidates`
-  - `docs/use-cases/US-04-route-deviation/` — updated flow through Deviation Detector
-  - `docs/use-cases/US-05-unscheduled-proximity/` — updated flow via `proximity.candidates`
-  - `docs/use-cases/US-06-composite-alert/` — updated input sources for Alert Evaluator
-  - `docs/architecture.puml` and exported SVGs — new service node and topic edges
-  - `README.md` — architecture overview and data flow summary
-  - `CLAUDE.md` — Kafka topic naming conventions section
+- The Alert Evaluator's `route_baseline` read is removed; its TimescaleDB access is narrowed to `position_history` only
+- The Deviation Detector reads from `route_reference_points` (via `route_references`) — the v1 reference route schema defined in ADR-015
+- The composite alert uses a supersession model — SIGNAL_LOSS is never held back; `recent-loss:{entity_id}` enables composite correlation after entity resumes
+- Proximity is modeled as an episode (`proximity-episode:{pair_key}`), not a per-ping event; one `proximity.candidates` event per episode

@@ -1,5 +1,5 @@
 @startuml proximity-detection
-title US-05: Proximity Detection - Correlation Worker writes Neo4j + publishes proximity.candidates
+title US-05: Proximity Detection - Episode model; one candidate per encounter
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,83 +9,104 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nposition.normalized" as Kafka
 participant "Correlation\nWorker" as Correlation
-database "Redis\nentity:live:{id}" as Redis
+database "Redis\ngeo-cell:{cell}\n(sorted set,\nwritten by Position Consumer)" as GeoCell
+database "Redis\nentity:live:{id}" as LiveState
+database "Redis\nproximity-episode:{pair_key}" as Episode
 database "Neo4j\nentity graph" as Neo4j
 queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
-database "TimescaleDB\nalerts table" as TSDB
+database "TimescaleDB\nalerts" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Kafka -> Correlation : consume position event\n{ entity_id, lat, lon, timestamp_ms }
+Kafka -> Correlation : consume position event\n{ entity_id, live_geo_cell, timestamp_ms, lat, lon, ... }
 
-Correlation -> Redis : HGETALL entity:live:*\n(fetch all current positions)
-Redis --> Correlation : positions of all live entities
+note over Correlation
+  Position Consumer already wrote the geo-cell sorted set.
+  Correlation Worker only reads from it.
+  k-ring radius computed from PROXIMITY_THRESHOLD_METRES
+  and cell edge length at LIVE_H3_RESOLUTION — not hardcoded.
+end note
 
-Correlation -> Correlation : compute pairwise distances\nflag pairs within PROXIMITY_THRESHOLD_METRES
+Correlation -> GeoCell : ZRANGEBYSCORE geo-cell:{cell} (now - LIVE_PROXIMITY_MAX_AGE_MS) +inf\n(for each cell in k-ring)
+GeoCell --> Correlation : candidate entity IDs (fresh members only)
 
-alt two entities within threshold
-  Correlation -> Neo4j : MATCH (a:Entity {id: $id_a})-[:KNOWN_ASSOCIATE]-(b:Entity {id: $id_b})\nRETURN b
+Correlation -> LiveState : HGETALL entity:live:{candidate_id}\n(for each candidate)
+LiveState --> Correlation : { lat, lon, last_seen_ms, ... }
 
-  note over Neo4j
-    Graph absence query.
-    Checks for a KNOWN_ASSOCIATE edge
-    between the two entity nodes.
-    Single traversal - not a table scan.
+Correlation -> Correlation : recheck last_seen_ms — skip stale candidates\ncompute distance to each fresh candidate
+
+alt distance <= PROXIMITY_THRESHOLD_METRES
+  note over Correlation
+    pair_key = min(entity_id, candidate_id) + ':' + max(entity_id, candidate_id)
+    Canonical ordering prevents A:B and B:A being treated as different pairs.
   end note
 
-  alt no KNOWN_ASSOCIATE edge found
-    Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\n(see graph-update diagram for full idempotency detail)
+  Correlation -> Episode : HGETALL proximity-episode:{pair_key}
+  Episode --> Correlation : existing episode fields or nil
 
-    Correlation -> ProxKafka : publish proximity.candidates\n{ entity_a_id, entity_b_id, timestamp_ms,\n  lat, lon, distance_metres }
-
+  alt episode key exists (continuing encounter)
+    alt candidate_published == 0 (Kafka publish failed in prior attempt)
+      Correlation -> ProxKafka : retry publish proximity.candidates\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
+      Correlation -> Episode : set candidate_published = 1 on success
+    end
+    Correlation -> Episode : update last_seen_ms = event.timestamp_ms\nrefresh TTL (PROXIMITY_EPISODE_GAP_MS)
     note over Correlation
-      Both writes happen on the same detection event.
-      Neo4j edge = durable record (queried by API investigation panel).
-      proximity.candidates = real-time signal to Alert Evaluator.
-      Known associates are filtered here - they never reach
-      proximity.candidates (ADR-014).
+      Continuing encounter. No new candidate event.
+      TTL refresh keeps episode alive while pair stays close.
     end note
 
-  else prior relationship exists
-    Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge (durable record only)
-    note over Correlation
-      Known associate - routine proximity.
-      Neo4j edge written for history.
-      No proximity.candidates event published.
-    end note
+  else no active episode (new encounter)
+    Correlation -> Neo4j : check for KNOWN_ASSOCIATE edge between pair
+
+    alt KNOWN_ASSOCIATE edge exists (expected proximity)
+      Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\n(durable evidence — not anomalous)
+      Correlation -> Episode : create episode hash (TTL only, no candidate_published)
+      note over Correlation
+        Known associate — routine proximity.
+        Neo4j edge written for historical record.
+        Episode hash prevents Neo4j write on every subsequent ping.
+        No proximity.candidates event published.
+      end note
+
+    else no KNOWN_ASSOCIATE (unscheduled proximity)
+      note over Correlation
+        episode_start_ms = event.timestamp_ms (source event time)
+        Write order: Neo4j → set candidate_published=0 → Kafka → set candidate_published=1
+      end note
+      Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\nidempotency_key = {pair_key}:{episode_start_ms}
+      Correlation -> Episode : create proximity-episode hash\n{ episode_start_ms, last_seen_ms: event.timestamp_ms,\n  candidate_published: 0 }
+      Correlation -> ProxKafka : publish proximity.candidates\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
+      Correlation -> Episode : set candidate_published = 1
+
+      note over ProxKafka
+        One proximity.candidates event per episode.
+        Alert Evaluator triggered once per encounter.
+        If publish fails: candidate_published stays 0;
+        retry on next ping for this pair.
+      end note
+    end
   end
 end
 
 == Alert Evaluator - consumes proximity.candidates ==
 
+ProxKafka -> Evaluator : consume proximity.candidates event\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
+
 note over Evaluator
-  Completely separate from the Correlation Worker.
-  Consumes proximity.candidates events driven by Kafka.
-  No Neo4j polling - known associates already filtered upstream.
+  One event per episode — not one per ping.
+  Known associates already filtered upstream.
+  Checks for signal loss correlation (see US-06).
+  If no signal loss: emits UNSCHEDULED_PROXIMITY.
 end note
 
-ProxKafka -> Evaluator : consume proximity.candidates event\n{ entity_a_id, entity_b_id, timestamp_ms, lat, lon, distance_metres }
-
-Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
+Evaluator -> Alerts : publish UNSCHEDULED_PROXIMITY alert
 
 Alerts -> API : consume alert
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: UNSCHEDULED_PROXIMITY,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
-
-note over TSDB
-  Idempotent write - safe under Kafka replay.
-  alert_id = {entity_id}:UNSCHEDULED_PROXIMITY:{window_start_ms}
-end note
-
-note over API
-  Scope filter applied per connection:
-  entity position + type must match
-  the operator's saved workspace scope.
-end note
-
+API -> TSDB : persist alert (idempotent on replay)
 API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
-Dashboard --> Operator : proximity alert displayed\nstatus: NEW
+Dashboard --> Operator : proximity alert displayed
 
 @enduml

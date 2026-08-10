@@ -7,27 +7,42 @@
 
 ## Story
 
-As an operator, I want a signal loss event and a subsequent proximity event involving the same entity to be correlated into a single composite alert rather than two separate alerts so that I am not flooded with redundant notifications.
+As an operator, I want an unscheduled proximity event and a related signal loss involving the same entity to be correlated into a single composite incident so that I have one elevated, clearly linked alert rather than two disconnected weak signals.
 
 ---
 
 ## Acceptance Criteria
 
-- When an entity that has gone dark (US-03) subsequently appears in proximity to a previously unrelated entity (US-05), the two weak signals are merged into one composite alert
-- The composite alert is elevated in priority above individual signal loss or proximity alerts
-- The operator receives one notification, not two
-- If only one of the two signals is present, no composite alert is raised - only the individual alert
+- SIGNAL_LOSS is emitted immediately when an entity goes dark — it is never held back waiting for potential future correlation
+- When an unscheduled proximity event arrives within `COMPOSITE_CORRELATION_WINDOW_MS` of a signal loss episode involving the same entity (whether the entity is still dark or has recently resumed), a COMPOSITE alert (ELEVATED) is emitted
+- The COMPOSITE alert atomically supersedes the SIGNAL_LOSS; the operator sees one active incident, not two
+- Each signal-loss episode can be upgraded into at most one COMPOSITE incident — a later proximity event for the same entity produces an independent UNSCHEDULED_PROXIMITY alert, not a second composite
+- If no signal loss correlation exists when proximity arrives: UNSCHEDULED_PROXIMITY is emitted as normal
+- If signal loss occurs with no qualifying proximity within the window: SIGNAL_LOSS remains active
 
 ---
 
 ## Example
 
 ```
-Signal loss - Vessel B goes dark for 40 minutes
-    +
-Vessel B reappears in proximity to Vessel A (no prior relationship)
-    =
-One composite alert at elevated priority
+Vessel B goes dark
+    → SIGNAL_LOSS alert emitted immediately
+
+Vessel A comes within threshold of Vessel B (no prior relationship)
+within COMPOSITE_CORRELATION_WINDOW_MS of Vessel B going dark
+    → Alert Evaluator finds signal loss for Vessel B
+    → COMPOSITE alert emitted (ELEVATED)
+    → SIGNAL_LOSS marked SUPERSEDED
+    → Operator sees: one COMPOSITE (active, elevated)
+
+OR:
+
+Vessel B goes dark → SIGNAL_LOSS emitted
+Vessel B resumes (within COMPOSITE_CORRELATION_WINDOW_MS)
+    → correlation opportunity recorded temporarily
+Vessel A then comes close to Vessel B
+    → correlation opportunity found → COMPOSITE emitted, SIGNAL_LOSS superseded
+    → correlation opportunity consumed; further proximity produces independent alerts
 ```
 
 ---
@@ -38,19 +53,19 @@ One composite alert at elevated priority
 
 ![Signal Correlation](../../../diagrams/docs/use-cases/US-06-composite-alert/signal-correlation.svg)
 
-When a `proximity.candidates` event arrives, the alert evaluator checks `alert-state:{entity_id}` in Redis for an active signal loss (set by the US-03 detection cycle). If the proximity falls within the loss window, it performs a targeted Neo4j lookup on the specific entity pair to fetch the full relationship context, then correlates the two weak signals into a single composite pattern.
+When a `proximity.candidates` event arrives, the Alert Evaluator checks for an active signal loss (entity still dark) or a recent signal loss within the correlation window (entity resumed). If found, it checks that the composite has not already been issued for this signal-loss episode, then emits a COMPOSITE alert. The correlation opportunity is consumed so that later proximity events for the same entity produce independent alerts.
 
 ### Composite Emission
 
 ![Composite Emission](../../../diagrams/docs/use-cases/US-06-composite-alert/composite-emission.svg)
 
-One elevated composite alert is published to Kafka, written to the `alerts` table in TimescaleDB with status `NEW` (idempotent on replay), and pushed only to operators whose saved scope matches - suppressing the individual signal loss and proximity alerts entirely.
+The API atomically inserts the COMPOSITE alert and marks the SIGNAL_LOSS as `SUPERSEDED` in one DB transaction. Both updates are broadcast to all API instances via the `alert-events` channel so every WebSocket connection receives the change.
 
 ### Single Signal Path
 
 ![Single Signal Path](../../../diagrams/docs/use-cases/US-06-composite-alert/single-signal-path.svg)
 
-Shows what happens when only one weak signal is present: no composite is raised, only the individual alert is emitted.
+When only one condition is present — signal loss with no qualifying proximity, or proximity with no matching signal loss — only the individual alert is emitted. No composite is produced.
 
 ---
 
@@ -58,4 +73,4 @@ Shows what happens when only one weak signal is present: no composite is raised,
 
 Justifies: [ADR-003 - Neo4j for Entity Relationship Graph](../../adr/ADR-003-neo4j-entity-graph.md)
 
-Correlation across multiple weak signals requires traversing entity relationships across time - querying which entities were near which other entities, whether those entities have prior relationships, and whether the timing matches a signal loss window. This is a multi-hop graph traversal problem. A relational model would require multiple self-joins with time-window conditions, which grows expensive as relationship density increases. Neo4j expresses this as a Cypher pattern match directly on the graph structure.
+Correlation across multiple weak signals requires traversing entity relationships across time. Neo4j expresses "is this pair related?" and "what was their proximity history?" as Cypher pattern matches directly on the graph. The composite lookup targets a specific entity pair — it is a point query, not a scan.
