@@ -33,7 +33,7 @@ Adopt a **hybrid input model** for the Alert Evaluator:
 
 ## New Service: Deviation Detector
 
-A new Node.js service, `services/deviation-detector/`, is introduced with a single responsibility: consume the normalised position stream, compare each position against the route baseline, and publish deviation candidates to Kafka.
+A new Node.js service, `services/deviation-detector/`, is introduced with a single responsibility: consume the normalised position stream, compare each position against the route baseline, and publish deviation status events to Kafka.
 
 | Direction | What |
 |---|---|
@@ -41,8 +41,25 @@ A new Node.js service, `services/deviation-detector/`, is introduced with a sing
 | Reads from TimescaleDB | `route_baseline` — current time bucket baseline for the incoming entity |
 | Publishes to | `deviation.candidates` |
 
+**Event schema on `deviation.candidates`:**
+
+```json
+{
+  "entity_id":         "string",
+  "timestamp_ms":      "number",
+  "status":            "OUT_OF_RANGE | BACK_IN_RANGE",
+  "current_position":  { "lat": "number", "lon": "number" },
+  "baseline_position": { "avg_lat": "number", "avg_lon": "number" },
+  "deviation_metres":  "number"
+}
+```
+
+`baseline_position` and `deviation_metres` are omitted on `BACK_IN_RANGE` events.
+
 **Contract:**
-- Publishes a candidate event for every position that falls outside the baseline threshold — does not apply the sustained-ping filter. The Alert Evaluator owns the `DEVIATION_SUSTAINED_PINGS` counter and suppression logic.
+
+- Publishes `OUT_OF_RANGE` when a position exceeds the baseline threshold; publishes `BACK_IN_RANGE` on the first position that falls back within threshold after an out-of-range sequence. Both events are required — the Alert Evaluator uses `BACK_IN_RANGE` to `DEL deviation-counter:{entity_id}` and reset the sustained-ping count.
+- Does not apply the `DEVIATION_SUSTAINED_PINGS` filter. The Alert Evaluator owns the counter and suppression logic.
 - Does not write to Redis, Neo4j, or the `alerts` topic.
 - Does not emit alerts. Anomaly rule evaluation is not its concern.
 
@@ -59,7 +76,7 @@ The Neo4j write is not removed — the graph remains the source of truth for rel
 ## Changes to the Alert Evaluator
 
 | Detection | Before | After |
-|---|---|---|
+| --- | --- | --- |
 | Signal Loss | Scheduled Redis scan (`entity:live:*`) | Unchanged — scheduled Redis scan |
 | Route Deviation | Direct TimescaleDB query (`route_baseline`) | Consumes `deviation.candidates` |
 | Unscheduled Proximity | Direct Neo4j query (`PROXIMITY_EVENT` edges) | Consumes `proximity.candidates` |
@@ -72,7 +89,7 @@ The Alert Evaluator drops its TimescaleDB dependency entirely. Its Neo4j access 
 ## New Kafka Topics
 
 | Topic | Producer | Consumer | Retention | Purpose |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `deviation.candidates` | Deviation Detector | Alert Evaluator | Short (1h) | Per-entity positions outside the route baseline, pre-filtered against baseline threshold |
 | `proximity.candidates` | Correlation Worker | Alert Evaluator | Short (1h) | Unscheduled entity proximity pairs, pre-filtered to exclude known associates |
 
