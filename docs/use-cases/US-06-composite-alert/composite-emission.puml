@@ -1,5 +1,5 @@
 @startuml composite-emission
-title US-06: Composite Emission - One Alert Persisted and Pushed, Individual Alerts Suppressed
+title US-06: Composite Emission - Atomic supersession: SIGNAL_LOSS marked SUPERSEDED, COMPOSITE inserted
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,48 +11,53 @@ participant "Alert\nEvaluator\n(leader)" as Evaluator
 queue "Kafka\nalerts" as Kafka
 participant "Express API" as API
 database "TimescaleDB\nalerts table" as TSDB
+database "Redis\nalert-events\n(pub/sub)" as AlertEvents
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Evaluator -> Kafka : publish ONE composite alert\n{ alert_id, alert_type: COMPOSITE,\n  priority: ELEVATED,\n  entity_b: signal loss,\n  entity_a: unrelated proximity,\n  correlation_window_ms,\n  window_start_ms,\n  location, timestamp_ms }
-
 note over Evaluator
-  Individual SIGNAL_LOSS and
-  UNSCHEDULED_PROXIMITY alerts
-  for this event are NOT emitted.
-  The composite replaces both.
+  Both signals confirmed (see signal-correlation diagram).
+  SIGNAL_LOSS was already emitted when entity went dark.
+  Now: supersede it and emit COMPOSITE in one transaction.
 end note
 
-Kafka -> API : consume composite alert
+Evaluator -> Kafka : publish COMPOSITE alert event\n{ alert_id: $composite_id,\n  alert_type: COMPOSITE, priority: ELEVATED,\n  entity_id: $dark_entity_id,\n  pair_key, episode_start_ms,\n  dark_since_ms, distance_at_detection,\n  supersedes_alert_ids: [$signal_loss_alert_id],\n  location, timestamp_ms }
 
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: COMPOSITE,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+Kafka -> API : consume COMPOSITE alert
+
+API -> TSDB : BEGIN TRANSACTION\n--\nUPDATE alerts\n  SET status = 'SUPERSEDED',\n      superseded_by = $composite_id\n  WHERE alert_id = $signal_loss_alert_id\n    AND status NOT IN ('SUPERSEDED');\n--\nINSERT INTO alerts\n  (alert_id, entity_id, alert_type, status, detected_at, payload)\n  VALUES ($composite_id, ..., 'COMPOSITE', 'NEW', ...)\n  ON CONFLICT (alert_id) DO NOTHING;\n--\nCOMMIT
 
 note over TSDB
-  Composite alert stored as a single row.
-  alert_id = {entity_id}:COMPOSITE:{window_start_ms}
-  Idempotent - safe under Kafka replay.
-  Operator can acknowledge and resolve it
-  via the same lifecycle flow as any alert (US-13).
+  Atomic: both the status update and the insert
+  succeed or both roll back.
+  ON CONFLICT DO NOTHING on the INSERT ensures
+  Kafka replay is safe — composite row already present
+  after the first successful commit.
+  superseded_by column is a nullable FK → alerts.alert_id.
 end note
 
-TSDB --> API : inserted (or conflict - no-op)
+TSDB --> API : transaction committed (or idempotent no-op on replay)
+
+API -> AlertEvents : PUBLISH alert-events\n{ type: ALERT_SUPERSEDED,\n  payload: { alert_id: $signal_loss_alert_id,\n    new_status: SUPERSEDED, superseded_by: $composite_id } }
+
+API -> AlertEvents : PUBLISH alert-events\n{ type: ALERT_CREATED,\n  payload: { alert_id: $composite_id,\n    alert_type: COMPOSITE, status: NEW, ... } }
 
 note over API
-  Fan-out: check each active WebSocket connection's
-  saved scope before pushing.
-  geo_region bounds + entity_type + COMPOSITE
-  must all match the connection's scope.
+  Two typed messages on alert-events pub/sub.
+  Dashboard can update the existing SIGNAL_LOSS card
+  to show SUPERSEDED, then display the new COMPOSITE card.
+  Fan-out per connection: scope filter applied before WebSocket push.
 end note
 
-API --> Dashboard : push composite alert over WebSocket\n(only to connections whose scope matches)
+API --> Dashboard : push ALERT_SUPERSEDED + ALERT_CREATED\nover WebSocket (scope-matched connections only)
 
-Dashboard --> Operator : single elevated alert displayed\n(signal loss + proximity correlated)\nstatus: NEW
+Dashboard --> Operator : SIGNAL_LOSS card updated to SUPERSEDED\nnew COMPOSITE alert displayed at elevated priority\nstatus: NEW
 
 note over Dashboard, Operator
-  Operator sees one notification,
-  not two.
-  Priority is visually elevated above
-  individual signal loss or proximity alerts.
+  Operator sees the incident history:
+  the original SIGNAL_LOSS is visible as SUPERSEDED
+  alongside the COMPOSITE that explains it.
+  One active incident, not two.
 end note
 
 @enduml

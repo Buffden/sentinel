@@ -38,7 +38,7 @@ The API instance that consumes the alert from Kafka writes it to the `alerts` ta
 
 ![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
 
-Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` key to Redis (no TTL). Subsequent evaluation cycles check for this key first and skip re-emission if it is present. When the entity comes back online, the position consumer explicitly deletes `alert-state:{entity_id}` on its next write, clearing the suppression. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
+Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` hash to Redis (no TTL) containing `dark_since_ms` and `signal_loss_alert_id`. Subsequent evaluation cycles check for this hash first and skip re-emission if it is present. When the entity comes back online, the position consumer: (1) writes `recent-loss:{entity_id}` hash (TTL = `COMPOSITE_CORRELATION_WINDOW_MS`) containing the dark episode details for potential composite correlation; (2) then deletes `alert-state:{entity_id}`. The `recent-loss` key enables composite supersession even after the entity has resumed broadcasting. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
 
 ---
 

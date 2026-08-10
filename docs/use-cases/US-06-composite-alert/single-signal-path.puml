@@ -8,48 +8,57 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nalert-state:{id}" as AlertState
+database "Redis\nalert-state:{id}\n(hash)" as AlertState
+database "Redis\nrecent-loss:{id}\n(hash)" as RecentLoss
 queue "Kafka\nproximity.candidates" as ProxKafka
 queue "Kafka\nalerts" as Kafka
 
-== Signal loss only - no proximity candidate arrives ==
+== Signal loss only - no proximity candidate arrives within window ==
 
 note over Evaluator
   Signal loss detected via scheduled Redis scan.
-  alert-state:VesselB set. SIGNAL_LOSS alert emitted.
+  HSET alert-state:VesselB { dark_since_ms, signal_loss_alert_id }.
+  SIGNAL_LOSS alert emitted immediately.
   No proximity.candidates event has arrived
-  for VesselB within the loss window.
+  for VesselB within COMPOSITE_CORRELATION_WINDOW_MS.
   Only one weak signal present.
-  No composite alert raised.
+  SIGNAL_LOSS remains active — no supersession.
 end note
 
-Evaluator -> Kafka : publish individual SIGNAL_LOSS alert\n{ alert_id, alert_type: SIGNAL_LOSS, entity_id: VesselB }
+Evaluator -> Kafka : publish SIGNAL_LOSS alert immediately\n{ alert_id, alert_type: SIGNAL_LOSS, entity_id: VesselB,\n  dark_since_ms }
 
-== Proximity candidate arrives - no active signal loss ==
+== Proximity candidate arrives - no active or recent signal loss ==
 
-ProxKafka -> Evaluator : consume proximity.candidates event\n{ entity_a_id: VesselC, entity_b_id: VesselD,\n  timestamp_ms, lat, lon, distance_metres }
+ProxKafka -> Evaluator : consume proximity.candidates event\n{ pair_key, entity_a_id: VesselC, entity_b_id: VesselD,\n  episode_start_ms, timestamp_ms, lat, lon, distance_at_detection }
 
-Evaluator -> AlertState : GET alert-state:VesselC
-AlertState --> Evaluator : nil - no active signal loss for VesselC
+Evaluator -> AlertState : HGETALL alert-state:VesselC
+AlertState --> Evaluator : nil — no active signal loss for VesselC
 
-Evaluator -> AlertState : GET alert-state:VesselD
-AlertState --> Evaluator : nil - no active signal loss for VesselD
+Evaluator -> AlertState : HGETALL alert-state:VesselD
+AlertState --> Evaluator : nil — no active signal loss for VesselD
+
+Evaluator -> RecentLoss : HGETALL recent-loss:VesselC
+RecentLoss --> Evaluator : nil — not recently dark
+
+Evaluator -> RecentLoss : HGETALL recent-loss:VesselD
+RecentLoss --> Evaluator : nil — not recently dark
 
 note over Evaluator
   VesselC and VesselD are in proximity
-  but neither has gone dark.
+  but neither has gone dark (active or recently).
   No signal loss component.
   Only one weak signal present.
   No composite alert raised.
+  Emit UNSCHEDULED_PROXIMITY only.
 end note
 
-Evaluator -> Kafka : publish individual UNSCHEDULED_PROXIMITY alert\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  entity_c, entity_d }
+Evaluator -> Kafka : publish UNSCHEDULED_PROXIMITY alert\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  pair_key, episode_start_ms,\n  entity_c, entity_d, distance_at_detection }
 
 note over Kafka
   Composite alert requires BOTH:
-  signal loss AND proximity to an
-  unrelated entity within the loss window.
-  Neither case above qualifies.
+  signal loss AND unscheduled proximity
+  within COMPOSITE_CORRELATION_WINDOW_MS.
+  Neither case above qualifies for supersession.
 end note
 
 @enduml

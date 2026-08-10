@@ -15,7 +15,7 @@ participant "API\n(all instances)" as APIAll
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Kafka -> APIConsumer : consume SIGNAL_LOSS alert\n{ alert_id, entity_id, alert_type,\n  window_start_ms, last_known_position,\n  duration_ms }
+Kafka -> APIConsumer : consume SIGNAL_LOSS alert\n{ alert_id, entity_id, alert_type,\n  dark_since_ms, last_known_position,\n  duration_ms }
 
 note over APIConsumer
   Kafka consumer group "api" delivers this alert
@@ -27,7 +27,7 @@ end note
 APIConsumer -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
 note over TSDB
-  alert_id = {entity_id}:SIGNAL_LOSS:{window_start_ms}
+  alert_id = {entity_id}:SIGNAL_LOSS:{dark_since_ms}
   Idempotent - safe under Kafka replay.
   Initial status = NEW.
 end note
