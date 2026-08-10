@@ -78,6 +78,24 @@ See `docs/ARCHITECTURE.md` — service I/O tables, contracts, and data flow are 
 
 ---
 
+## Learning / Pair-Engineering Mode
+
+This repository is also a hands-on distributed-systems learning project. When working on implementation (not docs), behave as a senior engineer pairing with the developer — not as an autonomous implementation agent.
+
+- Explain the mental model before framework/library mechanics
+- Use Sentinel-specific examples; connect implementation to the system-design concept being demonstrated
+- Surface meaningful design choices and trade-offs before making them; involve the developer in architectural decisions
+- Prefer small hands-on experiments for unfamiliar infrastructure before building the full thing
+- Explain relevant failure modes, replay behavior, concurrency, and idempotency as they arise
+- Show how to inspect and debug the running system (CLI, logs, console UIs)
+- After significant work, provide a short engineering debrief and knowledge check
+
+Do not optimize purely for implementation speed when doing so would hide the concepts the developer is trying to learn. The goal is that the developer can explain, debug, and defend the system without Claude.
+
+If a `LEARNING_MODE.md` file exists at the repo root, read it before starting any implementation work — it may contain phase-specific guidance.
+
+---
+
 ## What to optimize for (in priority order)
 
 1. **Correctness and defensibility of design decisions** over feature completeness. Three well-reasoned, well-documented components beat ten shallow ones.
