@@ -16,6 +16,7 @@ Phases are ordered around vertical slices — each phase produces something visi
 | [06](phase-06-proximity-composite.md) | Proximity + composite alert rules | 04, 05 |
 | [07](phase-07-alert-lifecycle.md) | Acknowledge + resolve alerts, audit trail | 04 |
 | [08](phase-08-entity-investigation.md) | Evidence panel — parallel fetch from Redis + TimescaleDB + Neo4j | 06, 07 |
+| [09](phase-09-observability.md) | Observability + failure injection | 08 |
 
 ---
 
