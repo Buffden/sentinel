@@ -82,7 +82,7 @@ The Neo4j write is not removed — the graph remains the source of truth for rel
 | Unscheduled Proximity | Direct Neo4j query (`PROXIMITY_EVENT` edges) | Consumes `proximity.candidates` |
 | Composite Alert | Redis (`alert-state`) + Neo4j scan | Redis (`alert-state`) + Neo4j targeted lookup (unchanged) |
 
-The Alert Evaluator drops its TimescaleDB dependency entirely. Its Neo4j access narrows from a broad edge scan to a targeted lookup used only when assembling composite alert context — checking known associates and fetching the proximity window for a specific entity pair.
+The Alert Evaluator's `route_baseline` read is removed — that comparison now belongs to the Deviation Detector. Its remaining TimescaleDB dependency is narrowed to `position_history`, read only when building the signal loss alert payload to include the entity's last known position. Its Neo4j access narrows from a broad edge scan to a targeted lookup used only when assembling composite alert context — checking known associates and fetching the proximity window for a specific entity pair.
 
 ---
 
@@ -134,12 +134,12 @@ Valid for a first pass but couples the Alert Evaluator to three stores, making e
 - A new service `services/deviation-detector/` must be scaffolded and added to `docker-compose.yml`
 - Two new Kafka topics must be created in the infrastructure init script: `deviation.candidates`, `proximity.candidates`
 - The Correlation Worker gains a Kafka produce call alongside its existing Neo4j write — both happen on the same proximity detection event
-- The Alert Evaluator's TimescaleDB dependency is removed entirely
+- The Alert Evaluator's `route_baseline` read is removed; its TimescaleDB access is narrowed to `position_history` only — read when building the signal loss alert payload to include the entity's last known position
 - The Alert Evaluator's Neo4j access is narrowed to composite alert context only — it no longer scans for recent `PROXIMITY_EVENT` edges
 - The following documents require updates to reflect this architecture:
   - `docs/ARCHITECTURE.md` — new service contract, updated topic table, updated consumer groups, updated persistence ownership, updated data flow diagram
   - `docs/DATA_MODEL.md` — new Kafka event schemas for `deviation.candidates` and `proximity.candidates`
-  - `docs/implementation/phase-04-alert-pipeline.md` — Alert Evaluator no longer reads TimescaleDB; Deviation Detector is a new service introduced here or in a dedicated phase
+  - `docs/implementation/phase-04-alert-pipeline.md` — Alert Evaluator drops `route_baseline` read; retains `position_history` read for signal loss payload; Deviation Detector is a new service introduced here or in a dedicated phase
   - `docs/implementation/phase-05-correlation.md` — Correlation Worker also publishes to `proximity.candidates`
   - `docs/use-cases/US-04-route-deviation/` — updated flow through Deviation Detector
   - `docs/use-cases/US-05-unscheduled-proximity/` — updated flow via `proximity.candidates`

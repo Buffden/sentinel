@@ -13,7 +13,7 @@ The full data pipeline working end-to-end — a real aircraft position flows fro
 ### Shared Package (`packages/shared/`)
 
 - [ ] Shared TypeScript types (normalised position schema, alert payload types, Kafka message envelopes)
-- [ ] Shared Kafka client config (broker URL, SSL, auth) — imported by ingestion poller, position consumer, correlation worker, alert evaluator, and API
+- [ ] Shared Kafka client config (broker URL, SSL, auth) — imported by ingestion poller, position consumer, correlation worker, deviation detector, alert evaluator, and API
 - [ ] AIS ingestion (AISHub) is out of scope for v1 — the pipeline is designed to support it but only ADS-B (OpenSky) is wired up
 
 ### Ingestion Poller (`services/ingestion-poller/`)
