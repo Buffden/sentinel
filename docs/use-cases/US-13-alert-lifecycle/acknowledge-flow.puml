@@ -15,13 +15,18 @@ actor Operator
 
 == Alert Created ==
 
-Kafka -> API : consume alert event\n{ alert_id, entity_id, alert_type,\n  window_start_ms, payload }
+Kafka -> API : consume alert event\n{ alert_id, entity_id, alert_type, payload }
 
 API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
 
 note over TSDB
-  alert_id = {entity_id}:{alert_type}:{window_start_ms}
-  Idempotent insert - safe under Kafka replay.
+  alert_id format varies by type:
+    SIGNAL_LOSS:           {entity_id}:SIGNAL_LOSS:{dark_since_ms}
+    ROUTE_DEVIATION:       {entity_id}:ROUTE_DEVIATION:{episode_start_ms}
+    UNSCHEDULED_PROXIMITY: {pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
+    COMPOSITE:             {pair_key}:COMPOSITE:{dark_since_ms}
+  Deterministic - safe to replay from Kafka.
+  ON CONFLICT DO NOTHING ensures idempotency.
   Initial status = NEW.
 end note
 

@@ -16,27 +16,32 @@ database "Neo4j\nentity graph" as Neo4j
 Operator -> Dashboard : opens alert for VesselB
 Dashboard -> API : GET /alerts/:alert_id/investigation
 
-API -> TSDB : SELECT timestamp_ms, lat, lon, geo_cell\nFROM position_history\nWHERE entity_id = 'VesselB'\nAND timestamp_ms BETWEEN $window_start AND $window_end\nORDER BY timestamp_ms ASC
+API -> TSDB : SELECT observed_at, lat, lon, geo_cell\nFROM position_history\nWHERE entity_id = 'VesselB'\nAND observed_at BETWEEN $window_start AND $window_end\nORDER BY observed_at ASC
 
 note over TSDB
-  Geo-cell + time-bucket sharding (ADR-006)
-  means this query hits only the chunks
-  covering VesselB's region and time window.
+  Hypertable partitioned by observed_at (ADR-002, ADR-006).
+  TimescaleDB chunk exclusion eliminates all chunks
+  outside the requested time window.
+  geo_cell is an indexed column — not a partition dimension.
+  Query hits only the relevant time chunks.
   Not a full table scan.
 end note
 
 TSDB --> API : position track [ { timestamp_ms, lat, lon }, ... ]
 
-API -> Neo4j : MATCH (b:Entity {id: 'VesselB'})-[e:PROXIMITY_EVENT]-(other)\nWHERE e.timestamp_ms BETWEEN $window_start AND $window_end\nRETURN other.id, e.timestamp_ms, e.lat, e.lon,\n  e.distance_metres,\n  exists((b)-[:KNOWN_ASSOCIATE]-(other)) AS known
+API -> Neo4j : MATCH (b:Entity {id: 'VesselB'})-[e:PROXIMITY_EVENT]-(other)\nWHERE e.episode_start_ms BETWEEN $window_start AND $window_end\nRETURN other.id, e.episode_start_ms, e.last_seen_ms,\n  e.lat, e.lon, e.distance_at_detection, e.min_distance_metres,\n  exists((b)-[:KNOWN_ASSOCIATE]-(other)) AS known
 
 note over Neo4j
   Single Cypher traversal from VesselB node.
-  Returns all proximity events in the window
+  Each PROXIMITY_EVENT edge represents one episode
+  (not one ping). episode_start_ms is the idempotency
+  key component and episode anchor.
+  Returns all proximity episodes in the window
   with a flag indicating whether the other
   entity was a known associate.
 end note
 
-Neo4j --> API : proximity events [ { entity_id, timestamp_ms, distance_metres, known }, ... ]
+Neo4j --> API : proximity episodes\n[ { entity_id, episode_start_ms, last_seen_ms,\n  distance_at_detection, min_distance_metres, known }, ... ]
 
 API --> Dashboard : investigation response\n{ position_track, proximity_events }
 Dashboard --> Operator : entity track rendered on map\nproximity events overlaid as markers on timeline

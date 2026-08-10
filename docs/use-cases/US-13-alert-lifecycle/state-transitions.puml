@@ -1,5 +1,5 @@
 @startuml state-transitions
-title US-13: Alert State Machine
+title US-13: Alert State Machine (including SUPERSEDED for composite alerts)
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -18,25 +18,41 @@ ACKNOWLEDGED --> RESOLVED : operator clicks Resolve\nPATCH /alerts/:alert_id\n{ 
 
 NEW --> RESOLVED : operator skips acknowledge\nand resolves directly
 
+NEW --> SUPERSEDED : system-only\natomic transaction on composite detection\n(UPDATE status=SUPERSEDED, superseded_by=$composite_id)
+
+SUPERSEDED --> [*]
+
 RESOLVED --> [*]
 
 note right of NEW
-  alert_id = {entity_id}:{alert_type}:{window_start_ms}
-  Deterministic - safe to replay from Kafka.
+  alert_id deterministic:
+    SIGNAL_LOSS: {entity_id}:SIGNAL_LOSS:{dark_since_ms}
+    UNSCHEDULED_PROXIMITY: {pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
+    ROUTE_DEVIATION: {entity_id}:ROUTE_DEVIATION:{episode_start_ms}
+    COMPOSITE: {pair_key}:COMPOSITE:{dark_since_ms}
   Duplicate insert is a no-op via ON CONFLICT DO NOTHING.
 end note
 
 note right of ACKNOWLEDGED
   Records who acknowledged and when.
   Other operators see the alert is owned.
-  Alert evaluator continues evaluating -
+  Alert evaluator continues evaluating —
   it does not read lifecycle state.
 end note
 
+note right of SUPERSEDED
+  System-only transition — cannot be set by operator PATCH.
+  Occurs atomically with COMPOSITE alert insertion.
+  superseded_by column (nullable FK) references the COMPOSITE alert.
+  Dashboard shows SUPERSEDED alerts in evidence/history view.
+  Not deletable — part of the audit trail.
+end note
+
 note right of RESOLVED
-  Record is never deleted - it is the audit trail.
+  Record is never deleted — it is the audit trail.
   If the anomaly recurs, a new alert_id is generated
-  (new window_start_ms) - a fresh record, not a reopen.
+  (new window_start_ms or episode_start_ms) —
+  a fresh record, not a reopen.
 end note
 
 @enduml

@@ -37,12 +37,12 @@ note over Evaluator
   and the alert-state:{entity_id} suppression key.
 end note
 
-Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  window_start_ms: 1700005000000 }
+Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  dark_since_ms: 1700005000000 }
 
 note over Kafka
-  New window_start_ms = new alert_id.
+  New dark_since_ms = new alert_id.
   Completely independent of the resolved alert.
-  No reopen logic - just a fresh record.
+  No reopen logic — just a fresh record.
 end note
 
 Kafka -> API : consume new alert event
