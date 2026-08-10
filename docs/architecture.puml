@@ -60,6 +60,8 @@ node "Message Broker" #2a1a3a {
     queue [adsb.raw  |  ais.raw] as KAFKA_RAW
     queue [position.normalized] as KAFKA_NORM
     queue [adsb.dlq  |  ais.dlq\n(dead-letter)] as KAFKA_DLQ #5a1a1a
+    queue [deviation.candidates] as KAFKA_DEV_CAND
+    queue [proximity.candidates] as KAFKA_PROX_CAND
     queue [alerts] as KAFKA_ALERTS
 }
 
@@ -70,7 +72,11 @@ together {
     }
 
     node "Correlation Worker" #1a2a3a {
-        component [proximity detection\nentity graph builder] as CORR_WORKER #1e3a5a
+        component [proximity detection\nentity graph + proximity.candidates] as CORR_WORKER #1e3a5a
+    }
+
+    node "Deviation Detector" #1a2a3a {
+        component [baseline comparison\ndeviation.candidates publisher] as DEV_DETECTOR #1e3a5a
     }
 }
 
@@ -116,11 +122,8 @@ LOADGEN     -[#facc15]down->  KAFKA_RAW
 ' poller -> raw topics (yellow)
 POLLER      -[#facc15]down->  KAFKA_RAW
 
-' broker: raw -> normalized (purple, internal)
+' broker: raw -> position consumer (purple)
 KAFKA_RAW   -[#a78bfa]down->  POS_CONSUMER
-
-' broker -> consumers (purple)
-KAFKA_NORM  -[#a78bfa]down->  CORR_WORKER
 
 ' consumers -> DLQ on malformed event (red)
 POS_CONSUMER -[#f87171]right-> KAFKA_DLQ
@@ -129,28 +132,42 @@ POS_CONSUMER -[#f87171]right-> KAFKA_DLQ
 POS_CONSUMER -[#38bdf8]down-> TSDB
 POS_CONSUMER -[#f87171]down-> REDIS
 
-' position consumer -> normalized topic (for correlation worker)
+' position consumer -> normalized topic (for correlation worker + deviation detector)
 POS_CONSUMER -[#a78bfa]right-> KAFKA_NORM
+
+' normalized -> correlation worker + deviation detector
+KAFKA_NORM  -[#a78bfa]down->  CORR_WORKER
+KAFKA_NORM  -[#a78bfa]down->  DEV_DETECTOR
 
 ' correlation worker reads live positions from Redis
 CORR_WORKER  -[#f87171]down-> REDIS
 
-' correlation worker -> Neo4j (write proximity edges)
+' correlation worker -> Neo4j (write proximity edges) + proximity.candidates
 CORR_WORKER  -[#4ade80]down-> NEO4J
+CORR_WORKER  -[#a78bfa]down-> KAFKA_PROX_CAND
 
-' persistence -> alert evaluator (orange)
-TSDB        -[#fb923c]down->  ALERT
-NEO4J       -[#fb923c]down->  ALERT
-REDIS       -[#fb923c]down->  ALERT
+' deviation detector reads route_baseline from TimescaleDB
+DEV_DETECTOR -[#38bdf8]down-> TSDB
+
+' deviation detector -> deviation.candidates
+DEV_DETECTOR -[#a78bfa]down-> KAFKA_DEV_CAND
+
+' deviation.candidates + proximity.candidates -> alert evaluator (purple, Kafka-sourced inputs)
+KAFKA_DEV_CAND  -[#a78bfa]down-> ALERT
+KAFKA_PROX_CAND -[#a78bfa]down-> ALERT
+
+' alert evaluator: reads + writes Redis; reads TimescaleDB (last known position) and Neo4j (composite context)
+REDIS       <-[#fb923c]->     ALERT : "reads / writes"
+TSDB        -[#fb923c]->      ALERT : "reads\n(last known position)"
+NEO4J       -[#fb923c]down->  ALERT : "reads\n(composite context)"
 
 ' alert evaluator -> alerts topic -> API (slate)
 ALERT       -[#94a3b8]down->  KAFKA_ALERTS
 KAFKA_ALERTS -[#94a3b8]down-> API
 
 ' API reads from stores and verifies identity with Google
-' Redis is bidirectional: API reads entity state (hash GET), API also subscribes to position-updates pub/sub channel
 API         -[#38bdf8]left->  TSDB
-API         <-[#f87171]->     REDIS
+API         <-[#f87171]->     REDIS : "entity state /\nposition-updates"
 API         -[#4ade80]left->  NEO4J
 API         -[#a78bfa]up->    GOOGLE
 
