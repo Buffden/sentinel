@@ -30,7 +30,7 @@ Where `entity_id` is the entity's canonical identifier (ICAO hex for aircraft, M
 **Millisecond precision is sufficient.** ADS-B broadcasts at most once per ~0.5 seconds per entity; AIS at most once every few seconds. A millisecond-precision timestamp combined with entity_id produces a key that is unique per entity per broadcast  - collisions are not possible under normal operation.
 
 **Per-store application:**
-- **TimescaleDB:** `ON CONFLICT (entity_id, timestamp_ms) DO NOTHING` — duplicate inserts are silently ignored
+- **TimescaleDB:** `ON CONFLICT (entity_id, observed_at) DO NOTHING` — duplicate inserts are silently ignored. The unique constraint is on `(entity_id, observed_at)` rather than `(entity_id, timestamp_ms)` because TimescaleDB requires the partition column (`observed_at`) in every unique constraint on a hypertable. `observed_at = to_timestamp(timestamp_ms / 1000.0)` is deterministically derived, so the constraint is equivalent in practice.
 - **Neo4j:** `MERGE` on the idempotency key as a node/edge property — creates if absent, does nothing if present
 - **Redis live state:** `HSET` is idempotent only when the same data is written twice. It does NOT protect against regressions: if a newer position has already been written and an older replayed event arrives, `HSET` will overwrite the newer value with the older one. A **timestamp guard** is required before any Redis live-state write: check the stored `last_seen_ms`; only write if `incoming.timestamp_ms > stored.last_seen_ms`. See Phase 02 for the guard implementation and ADR-007 for why.
 
@@ -64,7 +64,7 @@ The above idempotency guarantees apply differently depending on the replay conte
 ## Consequences
 
 - All consumers must extract `entity_id` and `timestamp_ms` from the normalised event before writing — these fields must be present in the `position.normalized` Kafka message schema
-- The key format `{entity_id}:{timestamp_ms}` is the **logical** idempotency key used across services. The TimescaleDB unique constraint is `(entity_id, timestamp_ms)`. The hypertable partition column is `observed_at TIMESTAMPTZ` — these are consistent: two events with the same `entity_id` and `timestamp_ms` always produce the same `observed_at`.
+- The key format `{entity_id}:{timestamp_ms}` is the **logical** idempotency key used across services. The TimescaleDB unique constraint is `(entity_id, observed_at)` — the hypertable partition column is `observed_at TIMESTAMPTZ` (TimescaleDB requires the partition column in any unique constraint on a hypertable). Two events with the same `entity_id` and `timestamp_ms` always produce the same `observed_at`, so the constraint is logically equivalent to `(entity_id, timestamp_ms)` under normal ADS-B/AIS broadcast frequency.
 - **Pair-based writes** (proximity episodes) use a canonical pair key: `{min(a,b)}:{max(a,b)}:{episode_start_ms}`. This is the Neo4j PROXIMITY_EVENT edge idempotency key.
 - Clock skew on the data source side could theoretically produce two events with the same timestamp for the same entity — treated as acceptable and handled by `DO NOTHING` / `MERGE` (the second write is dropped, which is correct for a duplicate).
 - Redis live-state writes are NOT unconditionally idempotent. The timestamp guard (`incoming.timestamp_ms > stored.last_seen_ms`) must be applied before any `HSET entity:live:*` call to prevent out-of-order events from regressing live state.

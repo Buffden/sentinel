@@ -18,7 +18,7 @@ The operator needs to define a scope before alerts are streamed. Scope has three
 This scope must be:
 - Set once and saved per operator - not re-entered on every visit
 - Applied on the server before alerts reach the WebSocket client
-- Updatable without dropping and re-opening the connection
+- Updatable — takes effect on the next WebSocket connection (fast reconnect, transparent to the operator)
 
 ---
 
@@ -45,7 +45,7 @@ The `scope` JSONB field has the shape:
     "bounds": { "min_lat": 41.3, "max_lat": 51.1, "min_lon": -5.2, "max_lon": 9.6 }
   },
   "entity_types": ["aircraft", "vessel"],
-  "alert_types": ["SIGNAL_LOSS", "ROUTE_DEVIATION", "PROXIMITY", "COMPOSITE"]
+  "alert_types": ["SIGNAL_LOSS", "ROUTE_DEVIATION", "UNSCHEDULED_PROXIMITY", "COMPOSITE"]
 }
 ```
 

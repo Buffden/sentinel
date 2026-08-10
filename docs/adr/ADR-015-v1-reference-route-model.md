@@ -25,7 +25,7 @@ Route deviation in v1 uses a **deterministic reference route** model, not a stat
 
 ### Reference route store
 
-A regular PostgreSQL table `reference_routes` holds explicitly defined waypoints for synthetic entities:
+Two plain PostgreSQL tables hold explicitly defined route data for synthetic entities:
 
 ```sql
 route_references (
@@ -48,12 +48,12 @@ route_reference_points (
 
 This schema replaces the single flat `reference_routes` table used previously. Separating the route header from its waypoints makes it easier to assign a per-corridor threshold and describe the route metadata.
 
-### Deviation Detector logic (unchanged in structure)
+### Deviation Detector logic
 
 1. On each `position.normalized` event, look up whether the entity has an assigned route in `route_references`.
 2. If none: skip — no event emitted. Real ADS-B/AIS entities with no assigned route produce no deviation candidates.
-3. If found: fetch all `route_reference_points` for the route, find the nearest waypoint by Haversine distance.
-4. If `distance > corridor_threshold_metres`: publish `OUT_OF_RANGE`.
+3. If found: fetch all `route_reference_points` for the route, find the nearest **route segment** (not nearest waypoint) by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]). If the perpendicular foot falls outside the segment, use the distance to the nearer endpoint. Publish `nearest_segment_index` (index `i` of the segment start) and `deviation_metres`.
+4. If `deviation_metres > corridor_threshold_metres`: publish `OUT_OF_RANGE`.
 5. Otherwise: publish `IN_RANGE`.
 
 ### Real entities

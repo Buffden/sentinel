@@ -38,7 +38,7 @@ A new Node.js service, `services/deviation-detector/`, is introduced with a sing
 | Direction | What |
 |---|---|
 | Consumes | `position.normalized` (consumer group: `deviation-detector`) |
-| Reads from TimescaleDB | `reference_routes` — reference waypoints for the incoming entity (synthetic entities only) |
+| Reads from TimescaleDB | `route_reference_points` (via `route_references`) — reference route segments for the incoming entity (synthetic entities only); see ADR-015 |
 | Publishes to | `deviation.candidates` |
 
 **Event schema on `deviation.candidates`:**
@@ -49,12 +49,12 @@ A new Node.js service, `services/deviation-detector/`, is introduced with a sing
   "timestamp_ms":           "number",
   "status":                 "OUT_OF_RANGE | IN_RANGE",
   "current_position":       { "lat": "number", "lon": "number" },
-  "nearest_waypoint_index": "number",
+  "nearest_segment_index":  "number",
   "deviation_metres":       "number"
 }
 ```
 
-`nearest_waypoint_index` and `deviation_metres` are omitted on `IN_RANGE` events. `BACK_IN_RANGE` does not exist — every in-range ping emits `IN_RANGE`.
+`nearest_segment_index` (index of the first waypoint of the nearest route segment) and `deviation_metres` (minimum perpendicular distance to that segment) are omitted on `IN_RANGE` events. `BACK_IN_RANGE` does not exist — every in-range ping emits `IN_RANGE`.
 
 **Contract:**
 
