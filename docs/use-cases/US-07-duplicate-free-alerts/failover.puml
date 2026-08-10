@@ -15,13 +15,16 @@ queue "Kafka\nalerts" as Kafka
 == Normal operation - compare-and-renew ==
 
 A -> Kafka : emitting alerts normally
-A -> Redis : SET alert-evaluator:leader $instance_a XX PX $TTL_MS\n(compare-and-renew: SET only if key exists AND value unchanged)
-Redis --> A : OK (lease renewed)
+A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen PEXPIRE('alert-evaluator:leader', $TTL_MS) end
+Redis --> A : 1 (TTL extended) or 0 (key changed — lease lost)
 
 note over A
-  Compare-and-renew prevents a lagging slow instance
-  from extending a lease it no longer owns.
-  SET XX fails if the key has been acquired by a new leader.
+  Ownership-safe renewal via Lua compare-and-expire.
+  SET XX PX is NOT safe: it overwrites the value
+  without checking who currently holds the key.
+  A slow old leader could steal a lease already
+  acquired by a new leader using SET XX PX.
+  The Lua GET+PEXPIRE pattern prevents this.
 end note
 
 == Scenario 1: Leader crash (ungraceful) ==

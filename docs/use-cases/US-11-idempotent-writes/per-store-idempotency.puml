@@ -20,12 +20,15 @@ end note
 
 PosConsumer -> PosConsumer : derive idempotency key\n{entity_id}:{timestamp_ms}
 
-PosConsumer -> TSDB : INSERT INTO position_history\n(entity_id, timestamp_ms, lat, lon, geo_cell)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+PosConsumer -> TSDB : INSERT INTO position_history\n(entity_id, observed_at, timestamp_ms, lat, lon, geo_cell)\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note right of TSDB
   Duplicate row silently ignored.
-  Conflict target is the composite
-  primary key (entity_id, timestamp_ms).
+  Conflict target is (entity_id, observed_at) —
+  TimescaleDB requires the partition column in
+  any unique constraint on a hypertable.
+  observed_at = to_timestamp(timestamp_ms / 1000.0)
+  is deterministically derived, so equivalent in practice.
 end note
 
 note over PosConsumer

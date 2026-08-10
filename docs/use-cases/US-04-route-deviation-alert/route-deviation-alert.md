@@ -14,8 +14,8 @@ As an operator, I want to receive an alert when an entity's current track diverg
 ## Acceptance Criteria
 
 - Route deviation detection applies to **synthetic entities only** in v1. Real ADS-B/AIS entities have no reference route and are skipped. Statistical baseline modeling from historical lat/lon averages does not produce a meaningful route corridor and is deferred to future work.
-- Each synthetic entity has a reference route in the `reference_routes` table (waypoints with per-waypoint tolerance in metres)
-- A deviation alert is emitted when the current position is further than `tolerance_metres` from the nearest waypoint, sustained across `DEVIATION_SUSTAINED_PINGS` consecutive pings
+- Each synthetic entity has a reference route in `route_references` (with `corridor_threshold_metres`) and ordered waypoints in `route_reference_points`
+- A deviation alert is emitted when the current position is further than `corridor_threshold_metres` from the nearest **route segment** (minimum perpendicular distance), sustained across `DEVIATION_SUSTAINED_PINGS` consecutive pings
 - The Deviation Detector is stateless — it classifies every ping as `OUT_OF_RANGE` or `IN_RANGE`. The Alert Evaluator owns episode state (`deviation-state:{entity_id}` hash: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`)
 - A single transient out-of-range ping does not trigger an alert — sustained deviation does; `alert_emitted` flag prevents re-emission within the same episode; `last_processed_ms` prevents replay regressions
 

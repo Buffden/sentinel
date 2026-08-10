@@ -37,10 +37,14 @@ note over B
 end note
 
 loop every heartbeat interval (< TTL_MS)
-  A -> Redis : SET alert-evaluator:leader $instance_a XX PX $TTL_MS
+  A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen PEXPIRE('alert-evaluator:leader', $TTL_MS)
   note over Redis
-    XX = only set if key exists.
-    Renews the TTL while leader is alive.
+    GET-then-PEXPIRE via Lua (atomic).
+    SET XX PX is NOT safe for renewal —
+    it overwrites the key value without checking
+    who holds it; a slow old leader could
+    accidentally steal a lease held by a new leader.
+    Lua compare-and-expire prevents this.
   end note
   A -> Kafka : emit alerts (leader only)
 end

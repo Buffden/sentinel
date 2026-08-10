@@ -48,10 +48,13 @@ note right of Redis
   additional pub/sub infrastructure.
 end note
 
-Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note right of TSDB
-  Idempotency key: entity_id + timestamp_ms
+  Conflict target: (entity_id, observed_at).
+  TimescaleDB requires the partition column in
+  any unique constraint on a hypertable.
+  observed_at = to_timestamp(timestamp_ms / 1000.0).
   Safe to replay from Kafka offset.
 end note
 

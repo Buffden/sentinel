@@ -29,7 +29,7 @@ note over Consumer
   only one cell ID is computed (same value reused).
 end note
 
-Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- HISTORY_H3_RESOLUTION cell ID (index column)\n  observed_at,     -- computed as to_timestamp(timestamp_ms/1000.0)\n  timestamp_ms,    -- kept as source fidelity + idempotency key\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, timestamp_ms) DO NOTHING
+Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- history_geo_cell (HISTORY_H3_RESOLUTION)\n  observed_at,     -- to_timestamp(timestamp_ms/1000.0)\n  timestamp_ms,    -- source fidelity + logical idempotency key\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note over TSDB
   Hypertable partitioned by observed_at (TIMESTAMPTZ).

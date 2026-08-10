@@ -19,7 +19,7 @@ DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation
 Evaluator -> DevState : HINCRBY deviation-state:DEF count 1\nHSET episode_start_ms T1 last_processed_ms T1
 DevState --> Evaluator : count = 1
 
-Evaluator -> DevState : EXPIRE deviation-state:DEF 2×SIGNAL_LOSS_THRESHOLD_MS
+Evaluator -> DevState : EXPIRE deviation-state:DEF DEVIATION_STATE_TTL_MS
 
 Evaluator -> Evaluator : count < DEVIATION_SUSTAINED_PINGS\nno alert emitted
 
@@ -38,18 +38,18 @@ Evaluator -> DevState : DEL deviation-state:DEF
 note over Evaluator
   State reset. Transient — no alert raised.
   Deviation Detector observed entity return
-  to within waypoint tolerance.
+  to within corridor threshold (segment distance).
 end note
 
 == Sustained deviation (N consecutive OUT_OF_RANGE events) ==
 
 loop for N consecutive OUT_OF_RANGE events
   DevCandKafka -> Evaluator : { entity_id: DEF, status: OUT_OF_RANGE,\n  deviation_metres: 45000, timestamp_ms: Tn }
-  Evaluator -> DevState : HINCRBY deviation-state:DEF count 1\nHSET last_processed_ms Tn\nEXPIRE 2×SIGNAL_LOSS_THRESHOLD_MS
+  Evaluator -> DevState : HINCRBY deviation-state:DEF count 1\nHSET last_processed_ms Tn\nEXPIRE DEVIATION_STATE_TTL_MS
 end
 
 DevState --> Evaluator : count >= DEVIATION_SUSTAINED_PINGS
 
-Evaluator -> Kafka : publish ROUTE_DEVIATION alert\n{ entity_id, current_position,\n  deviation_metres, nearest_waypoint_index,\n  sustained_cycles, episode_start_ms }
+Evaluator -> Kafka : publish ROUTE_DEVIATION alert\n{ entity_id, current_position,\n  deviation_metres, nearest_segment_index,\n  sustained_cycles, episode_start_ms }
 
 @enduml

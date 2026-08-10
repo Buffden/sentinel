@@ -28,10 +28,10 @@ alt no reference route found
   Detector -> Detector : skip — entity has no reference route\nno event published
 end
 
-Detector -> Detector : find nearest waypoint\ncompute Haversine distance to each waypoint
+Detector -> Detector : find nearest route segment (point[i]→point[i+1])\ncompute minimum perpendicular distance to each segment
 
-alt distance to nearest > waypoint.tolerance_metres
-  Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, deviation_metres,\n  nearest_waypoint_index }
+alt deviation_metres > corridor_threshold_metres
+  Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, deviation_metres,\n  nearest_segment_index }
 else within threshold
   Detector -> DevCandKafka : publish IN_RANGE\n{ entity_id, timestamp_ms, status: IN_RANGE,\n  current_position }
 end
@@ -61,10 +61,10 @@ alt status = OUT_OF_RANGE
   Evaluator -> DevState : HINCRBY deviation-state:{entity_id} count 1\nHSET last_processed_ms $timestamp_ms\n(HSET episode_start_ms $timestamp_ms ON FIRST increment)
   DevState --> Evaluator : updated count
 
-  Evaluator -> DevState : EXPIRE deviation-state:{entity_id}\n2 × SIGNAL_LOSS_THRESHOLD_MS
+  Evaluator -> DevState : EXPIRE deviation-state:{entity_id}\nDEVIATION_STATE_TTL_MS (default: 24h)
 
   alt count >= DEVIATION_SUSTAINED_PINGS
-    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, deviation_metres,\n  nearest_waypoint_index, sustained_cycles,\n  episode_start_ms }
+    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, deviation_metres,\n  nearest_segment_index, sustained_cycles,\n  episode_start_ms }
     Alerts -> API : consume alert
     API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
     note over API
