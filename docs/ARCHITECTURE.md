@@ -14,7 +14,7 @@ This document defines the service boundaries, component contracts, data flow, an
 **Concern:** Fetch raw positional telemetry from external feeds and forward it to Kafka without any parsing or business logic.
 
 | Direction | What |
-|---|---|
+| --- | --- |
 | Reads from | OpenSky Network REST API (ADS-B), AISHub (AIS) |
 | Publishes to | `adsb.raw`, `ais.raw` |
 | Writes to stores | — |
@@ -32,7 +32,7 @@ This document defines the service boundaries, component contracts, data flow, an
 **Concern:** Normalise raw positional events, write to the persistence layer, and broadcast to the API layer via Redis pub/sub.
 
 | Direction | What |
-|---|---|
+| --- | --- |
 | Consumes | `adsb.raw`, `ais.raw` (consumer group: `position-consumer`) |
 | Publishes to | `position.normalized`, `adsb.dlq`, `ais.dlq` |
 | Writes to TimescaleDB | `position_history` (INSERT ON CONFLICT DO NOTHING) |
@@ -52,19 +52,43 @@ This document defines the service boundaries, component contracts, data flow, an
 ### Correlation Worker
 
 **Runtime:** Node.js
-**Concern:** Detect entity proximity from the normalised position stream and maintain the entity relationship graph in Neo4j.
+**Concern:** Detect entity proximity from the normalised position stream, maintain the entity relationship graph in Neo4j, and publish unscheduled proximity candidates to Kafka.
 
 | Direction | What |
-|---|---|
+| --- | --- |
 | Consumes | `position.normalized` (consumer group: `correlation-worker`) |
 | Reads from Redis | `entity:live:*` hashes — all current entity positions, needed for pairwise distance computation |
 | Writes to Neo4j | `PROXIMITY_EVENT` edges via MERGE (idempotent) |
+| Publishes to | `proximity.candidates` — unscheduled proximity pairs, pre-filtered to exclude known associates |
 
 **Contract:**
-- Does not write to TimescaleDB, Redis, or Kafka.
-- Proximity detection results are not published to Kafka — the alert evaluator reads Neo4j directly.
+
+- Does not write to TimescaleDB or Redis.
+- On detecting an unscheduled proximity pair: writes a `PROXIMITY_EVENT` edge to Neo4j AND publishes to `proximity.candidates`. Both happen on the same event — the Neo4j write is the durable record; the Kafka publish is the real-time signal to the Alert Evaluator.
+- On detecting a pair with a `KNOWN_ASSOCIATE` edge: writes the Neo4j edge only, does not publish to `proximity.candidates`.
 - Edge writes use MERGE with an idempotency key to ensure replay does not create duplicate edges.
 - Does not emit alerts. Does not evaluate composite anomaly rules.
+
+---
+
+### Deviation Detector
+
+**Runtime:** Node.js
+**Concern:** Compare each normalised position against the route baseline and publish deviation status events to Kafka. Does not evaluate alert rules.
+
+| Direction | What |
+| --- | --- |
+| Consumes | `position.normalized` (consumer group: `deviation-detector`) |
+| Reads from TimescaleDB | `route_baseline` — current time bucket baseline for the incoming entity |
+| Publishes to | `deviation.candidates` — `OUT_OF_RANGE` and `BACK_IN_RANGE` status events per entity |
+
+**Contract:**
+
+- Publishes `OUT_OF_RANGE` when a position exceeds the baseline threshold.
+- Publishes `BACK_IN_RANGE` on the first position that falls back within threshold after an out-of-range sequence. The Alert Evaluator depends on this event to `DEL deviation-counter:{entity_id}` and reset the sustained-ping count.
+- Does not apply the `DEVIATION_SUSTAINED_PINGS` filter — that logic belongs to the Alert Evaluator.
+- Does not write to Redis, Neo4j, or the `alerts` topic.
+- Does not emit alerts.
 
 ---
 
@@ -74,20 +98,26 @@ This document defines the service boundaries, component contracts, data flow, an
 **Concern:** Evaluate anomaly rules against live state and the entity graph, and emit alerts exactly once.
 
 | Direction | What |
-|---|---|
+| --- | --- |
+| Consumes | `deviation.candidates` (consumer group: `alert-evaluator`) — `OUT_OF_RANGE` / `BACK_IN_RANGE` events from Deviation Detector |
+| Consumes | `proximity.candidates` (consumer group: `alert-evaluator`) — unscheduled proximity pairs from Correlation Worker |
 | Reads from Redis | `entity:live:*` (scheduled scan — `last_seen_ms` for signal loss detection) |
 | Reads from Redis | `alert-state:{entity_id}`, `deviation-counter:{entity_id}`, `alert-evaluator:leader` |
-| Reads from Neo4j | `PROXIMITY_EVENT` and `KNOWN_ASSOCIATE` edges |
-| Reads from TimescaleDB | `route_baseline` continuous aggregate |
+| Reads from TimescaleDB | `position_history` — last known position before signal loss, included in alert payload |
+| Reads from Neo4j | `KNOWN_ASSOCIATE` and `PROXIMITY_EVENT` edges — composite alert context only (targeted lookup per entity pair, not a scan) |
 | Publishes to | `alerts` |
-| Writes to Redis | `alert-state:{entity_id}` (on first alert emission; value = `dark_since_ms`; no TTL) |
-| Writes to Redis | `deviation-counter:{entity_id}` (INCR/DEL during route deviation evaluation) |
+| Writes to Redis | `alert-state:{entity_id}` (on first signal loss emission; value = `dark_since_ms`; no TTL) |
+| Writes to Redis | `deviation-counter:{entity_id}` (INCR on `OUT_OF_RANGE` event; DEL on `BACK_IN_RANGE` event) |
 | Holds Redis lease | `alert-evaluator:leader` (SET NX PX pattern; renewed on each heartbeat) |
 
 **Contract:**
+
 - Only one instance is the active writer at any time — enforced by leader election on `alert-evaluator:leader` (ADR-005). Follower instances remain warm and ready to take over within one TTL window.
-- Checks `alert-state:{entity_id}` before emitting any signal loss alert. If the key exists, the alert is already active — no re-emission.
-- Does not write to TimescaleDB or Neo4j.
+- Signal loss detection is a scheduled Redis scan — the evaluator reads `last_seen_ms` from `entity:live:*` directly. This is intentional: signal loss is an absence of events and cannot be driven by a Kafka stream (ADR-014).
+- Route deviation inputs arrive via `deviation.candidates`. The evaluator increments `deviation-counter:{entity_id}` on each `OUT_OF_RANGE` event and emits an alert only after `DEVIATION_SUSTAINED_PINGS` consecutive events. It deletes the counter on `BACK_IN_RANGE`.
+- Proximity inputs arrive via `proximity.candidates`. The evaluator checks `alert-state:{entity_id}` to determine whether a composite condition exists before emitting an individual `UNSCHEDULED_PROXIMITY` alert.
+- Neo4j is queried only when assembling composite alert context — a targeted lookup on a specific entity pair, not a scan for recent edges. The evaluator does not write to Neo4j.
+- Reads `position_history` from TimescaleDB only to fetch last known position when building the signal loss alert payload. Does not read `route_baseline` — route baseline comparison is the Deviation Detector's responsibility (ADR-014).
 - Does not delete `alert-state:{entity_id}`. That is the position consumer's responsibility.
 - Alert payload must include `alert_id` in the format `{entity_id}:{alert_type}:{window_start_ms}` for downstream idempotency (ADR-010).
 
@@ -99,7 +129,7 @@ This document defines the service boundaries, component contracts, data flow, an
 **Concern:** Serve the dashboard over REST and WebSocket, consuming alerts from Kafka, authenticating operators, and fanning live updates to scoped connections.
 
 | Direction | What |
-|---|---|
+| --- | --- |
 | Consumes | `alerts` (consumer group: `api`) |
 | Reads from Redis | `entity:live:{entity_id}` hash (initial map load, investigation panel) |
 | Subscribes to Redis | `position-updates` pub/sub channel (live WebSocket fan-out) |
@@ -109,6 +139,7 @@ This document defines the service boundaries, component contracts, data flow, an
 | Authenticates via | Google OAuth 2.0 ID token verification (ADR-011) |
 
 **Contract:**
+
 - Sole consumer of the `alerts` Kafka topic. Writes initial alert records to the `alerts` table with status `NEW`.
 - All routes and WebSocket upgrades require a valid JWT. `POST /auth/google` is the only unauthenticated endpoint.
 - Subscribes to `position-updates` on startup. Fans each event to all WebSocket connections whose saved scope matches the event's entity and position.
@@ -124,11 +155,12 @@ This document defines the service boundaries, component contracts, data flow, an
 **Concern:** Render the live map, alert feed, and investigation panel.
 
 | Direction | What |
-|---|---|
+| --- | --- |
 | Connects to | API via WebSocket (live position and alert push) |
 | Calls | API REST endpoints (investigation, alert lifecycle, workspace management) |
 
 **Contract:**
+
 - Communicates only with the API. Never reads from persistence stores directly.
 - Scope is configured in the workspace and applied server-side. The dashboard renders what it receives.
 
@@ -137,20 +169,24 @@ This document defines the service boundaries, component contracts, data flow, an
 ## Kafka Topics
 
 | Topic | Producer | Consumer(s) | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `adsb.raw` | Ingestion Poller | Position Consumer | Raw ADS-B events, unmodified bytes |
 | `ais.raw` | Ingestion Poller | Position Consumer | Raw AIS events, unmodified bytes |
 | `adsb.dlq` | Position Consumer | Operator (manual inspection) | Malformed ADS-B events with rejection reason |
 | `ais.dlq` | Position Consumer | Operator (manual inspection) | Malformed AIS events with rejection reason |
-| `position.normalized` | Position Consumer | Correlation Worker | Parsed, normalised position events |
+| `position.normalized` | Position Consumer | Correlation Worker, Deviation Detector | Parsed, normalised position events |
+| `deviation.candidates` | Deviation Detector | Alert Evaluator | `OUT_OF_RANGE` / `BACK_IN_RANGE` status per entity; short retention (1h) |
+| `proximity.candidates` | Correlation Worker | Alert Evaluator | Unscheduled proximity pairs, pre-filtered to exclude known associates; short retention (1h) |
 | `alerts` | Alert Evaluator | API | Alert events with `alert_id`, type, entity, payload |
 
 **Consumer groups:**
 
-| Consumer group | Service | Topic |
-|---|---|---|
+| Consumer group | Service | Topic(s) |
+| --- | --- | --- |
 | `position-consumer` | Position Consumer | `adsb.raw`, `ais.raw` |
 | `correlation-worker` | Correlation Worker | `position.normalized` |
+| `deviation-detector` | Deviation Detector | `position.normalized` |
+| `alert-evaluator` | Alert Evaluator | `deviation.candidates`, `proximity.candidates` |
 | `api` | API | `alerts` |
 
 ---
@@ -160,9 +196,9 @@ This document defines the service boundaries, component contracts, data flow, an
 ### TimescaleDB
 
 | Table / Object | Owner (writes) | Readers |
-|---|---|---|
-| `position_history` | Position Consumer | Alert Evaluator, API |
-| `route_baseline` | TimescaleDB (continuous aggregate over `position_history`) | Alert Evaluator |
+| --- | --- | --- |
+| `position_history` | Position Consumer | Alert Evaluator (last known position for signal loss payload), API |
+| `route_baseline` | TimescaleDB (continuous aggregate over `position_history`) | Deviation Detector |
 | `alerts` | API (on Kafka consume) | API |
 | `users` | API | API |
 | `user_workspaces` | API | API |
@@ -172,7 +208,7 @@ This document defines the service boundaries, component contracts, data flow, an
 ### Neo4j
 
 | Object | Owner (writes) | Readers |
-|---|---|---|
+| --- | --- | --- |
 | `Entity` nodes | Correlation Worker | Alert Evaluator, API |
 | `PROXIMITY_EVENT` edges | Correlation Worker | Alert Evaluator, API |
 | `KNOWN_ASSOCIATE` edges | Manual / future import | Alert Evaluator, API |
@@ -180,7 +216,7 @@ This document defines the service boundaries, component contracts, data flow, an
 ### Redis
 
 | Key / Channel | Writer | Reader | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Hash: lat, lon, `last_seen_ms`; TTL = `SIGNAL_LOSS_THRESHOLD_MS` — drives dashboard ghost cleanup only |
 | `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Value = `dark_since_ms`; no TTL; deleted by Position Consumer on entity resume |
 | `deviation-counter:{entity_id}` | Alert Evaluator | Alert Evaluator | INCR/DEL per evaluation cycle |
@@ -191,22 +227,30 @@ This document defines the service boundaries, component contracts, data flow, an
 
 ## Data Flow Summary
 
-```
+```text
 External Feeds
   └─ Ingestion Poller ──► adsb.raw / ais.raw
                                 │
                          Position Consumer
-                          ├─► position.normalized ──► Correlation Worker ──► Neo4j (PROXIMITY_EVENT)
                           ├─► TimescaleDB (position_history)
                           ├─► Redis (entity:live:{id}, last_seen_ms)
                           ├─► Redis pub/sub (position-updates) ──► API ──► WebSocket (scoped)
-                          └─► adsb.dlq / ais.dlq (malformed)
+                          ├─► adsb.dlq / ais.dlq (malformed)
+                          └─► position.normalized
+                                    ├─► Correlation Worker
+                                    │     ├─► Neo4j (PROXIMITY_EVENT edges)
+                                    │     └─► proximity.candidates
+                                    └─► Deviation Detector
+                                          ├─ reads TimescaleDB (route_baseline)
+                                          └─► deviation.candidates
 
 Alert Evaluator (leader-elected)
-  ├─ reads Redis (entity:live:* scan → last_seen_ms)
-  ├─ reads Neo4j (proximity events)
-  ├─ reads TimescaleDB (route_baseline)
-  └─► alerts topic ──► API ──► TimescaleDB (alerts table) + WebSocket (scoped)
+  ├─ consumes deviation.candidates
+  ├─ consumes proximity.candidates
+  ├─ reads Redis (entity:live:* scan → signal loss detection)
+  ├─ reads TimescaleDB (position_history → last known position for signal loss payload)
+  ├─ reads Neo4j (composite alert context — targeted lookup only)
+  └─► alerts ──► API ──► TimescaleDB (alerts table) + WebSocket (scoped)
 
 Dashboard ◄──► API (REST + WebSocket)
                ├─ reads Redis (entity:live:* for initial map load)
@@ -219,7 +263,7 @@ Dashboard ◄──► API (REST + WebSocket)
 ## ADR Index
 
 | ADR | Scope |
-|---|---|
+| --- | --- |
 | [ADR-001](adr/ADR-001-kafka-over-http-ingestion.md) | Kafka over direct HTTP ingestion |
 | [ADR-002](adr/ADR-002-timescaledb-over-cassandra.md) | TimescaleDB for position history and route baseline |
 | [ADR-003](adr/ADR-003-neo4j-entity-graph.md) | Neo4j for entity relationship graph |
@@ -233,3 +277,4 @@ Dashboard ◄──► API (REST + WebSocket)
 | [ADR-011](adr/ADR-011-google-oauth-operator-auth.md) | Google OAuth 2.0 for operator authentication |
 | [ADR-012](adr/ADR-012-workspace-scope-alert-filtering.md) | Workspace scope and server-side alert filtering |
 | [ADR-013](adr/ADR-013-nodejs-ingestion-poller.md) | Node.js for the ingestion poller |
+| [ADR-014](adr/ADR-014-alert-evaluator-hybrid-input-model.md) | Hybrid input model for the Alert Evaluator |

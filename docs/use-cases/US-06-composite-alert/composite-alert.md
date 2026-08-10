@@ -38,7 +38,7 @@ One composite alert at elevated priority
 
 ![Signal Correlation](../../../diagrams/docs/use-cases/US-06-composite-alert/signal-correlation.svg)
 
-The alert evaluator checks `alert-state:{entity_id}` in Redis for an active signal loss (set by the US-03 detection cycle), reads `dark_since_ms` from the key value, then queries Neo4j to find proximity events involving the dark entity within the loss window, correlating the two weak signals into a single pattern.
+When a `proximity.candidates` event arrives, the alert evaluator checks `alert-state:{entity_id}` in Redis for an active signal loss (set by the US-03 detection cycle). If the proximity falls within the loss window, it performs a targeted Neo4j lookup on the specific entity pair to fetch the full relationship context, then correlates the two weak signals into a single composite pattern.
 
 ### Composite Emission
 

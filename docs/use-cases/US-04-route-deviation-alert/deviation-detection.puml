@@ -1,5 +1,5 @@
 @startuml deviation-detection
-title US-04: Deviation Detection - Current Track Compared Against Baseline
+title US-04: Deviation Detection - Deviation Detector publishes candidates, Alert Evaluator emits alert
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,27 +7,48 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
+queue "Kafka\nposition.normalized" as NormKafka
+participant "Deviation\nDetector" as Detector
+database "TimescaleDB\nroute_baseline" as Baseline
+queue "Kafka\ndeviation.candidates" as DevCandKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nentity:live:{id}" as Redis
-database "TimescaleDB\nroute_baseline + alerts" as Baseline
-queue "Kafka\nalerts" as Kafka
+database "Redis\ndeviation-counter:{id}" as DevState
+queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
+database "TimescaleDB\nalerts table" as TSDB
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-loop every evaluation cycle
-  Evaluator -> Redis : HGETALL entity:live:{entity_id}\n(current position)
-  Redis --> Evaluator : { lat, lon, last_seen_ms }
+NormKafka -> Detector : consume position event\n{ entity_id, lat, lon, timestamp_ms }
 
-  Evaluator -> Baseline : SELECT avg_lat, avg_lon, stddev_metres\nWHERE entity_id = ? AND time_bucket = current_bucket
-  Baseline --> Evaluator : expected position range
+Detector -> Baseline : SELECT avg_lat, avg_lon, stddev_metres\nWHERE entity_id = ? AND time_bucket = current_bucket
+Baseline --> Detector : expected position range
 
-  Evaluator -> Evaluator : compute distance\nbetween current and baseline position
+Detector -> Detector : compute Haversine distance\nbetween current and baseline position
 
-  alt distance > ROUTE_DEVIATION_THRESHOLD_METRES (sustained)
-    Evaluator -> Kafka : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres }
-    Kafka -> API : consume alert
-    API -> Baseline : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
+alt distance > ROUTE_DEVIATION_THRESHOLD_METRES
+  Detector -> DevCandKafka : publish OUT_OF_RANGE\n{ entity_id, timestamp_ms, status: OUT_OF_RANGE,\n  current_position, baseline_position, deviation_metres }
+else back within threshold after out-of-range sequence
+  Detector -> DevCandKafka : publish BACK_IN_RANGE\n{ entity_id, timestamp_ms, status: BACK_IN_RANGE,\n  current_position }
+end
+
+note over Detector
+  Detector owns comparison only.
+  It does not apply DEVIATION_SUSTAINED_PINGS.
+  Counter and suppression logic belong
+  to the Alert Evaluator (ADR-014).
+end note
+
+DevCandKafka -> Evaluator : consume deviation.candidates event
+
+alt status = OUT_OF_RANGE
+  Evaluator -> DevState : INCR deviation-counter:{entity_id}
+  DevState --> Evaluator : counter value
+
+  alt counter >= DEVIATION_SUSTAINED_PINGS
+    Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: ROUTE_DEVIATION, entity_id,\n  current_position, baseline_position,\n  deviation_metres, sustained_cycles }
+    Alerts -> API : consume alert
+    API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type: ROUTE_DEVIATION,\n  status: NEW, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
     note over API
       Idempotent write - safe under Kafka replay.
       Scope filter applied before push:
@@ -36,9 +57,16 @@ loop every evaluation cycle
     end note
     API --> Dashboard : push alert over WebSocket\n(scope-matched connections only)
     Dashboard --> Operator : route deviation alert displayed\nstatus: NEW
-  else within threshold or single transient ping
-    Evaluator -> Evaluator : no action
+  else counter < DEVIATION_SUSTAINED_PINGS
+    Evaluator -> Evaluator : no alert yet - transient deviation
   end
+
+else status = BACK_IN_RANGE
+  Evaluator -> DevState : DEL deviation-counter:{entity_id}
+  note over Evaluator
+    Counter reset.
+    No alert emitted on BACK_IN_RANGE.
+  end note
 end
 
 @enduml

@@ -1,5 +1,5 @@
 @startuml graph-update
-title US-05: Graph Update - Proximity Event Written to Neo4j
+title US-05: Graph Update - Proximity Event Written to Neo4j and proximity.candidates Published
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,6 +9,7 @@ skinparam noteBackgroundColor #FFFDE7
 
 participant "Correlation\nWorker" as Correlation
 database "Neo4j\nentity graph" as Neo4j
+queue "Kafka\nproximity.candidates" as ProxKafka
 
 Correlation -> Neo4j : MERGE (a:Entity {id: $id_a})\nMERGE (b:Entity {id: $id_b})
 
@@ -28,5 +29,16 @@ note over Neo4j
 end note
 
 Neo4j --> Correlation : edge created or matched (no-op on replay)
+
+Correlation -> ProxKafka : publish proximity.candidates\n{ entity_a_id, entity_b_id, timestamp_ms,\n  lat, lon, distance_metres }
+
+note over ProxKafka
+  Published only for unscheduled pairs
+  (no KNOWN_ASSOCIATE edge).
+  Known associates: Neo4j edge written, no Kafka event.
+  Alert Evaluator consumes this topic
+  to emit UNSCHEDULED_PROXIMITY and COMPOSITE alerts.
+  Short retention (1h) - stale candidates have no value.
+end note
 
 @enduml

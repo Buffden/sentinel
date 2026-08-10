@@ -26,7 +26,7 @@ main
  ├── infra/docker-compose + schema/init
  ├── ingestion/poller + position-consumer/core + api/core + dashboard/live-map
  ├── api/auth + dashboard/workspace
- ├── alert-evaluator/signal-loss + alert-evaluator/route-deviation + api/alerts + dashboard/alert-panel
+ ├── deviation-detector/core + alert-evaluator/signal-loss + alert-evaluator/route-deviation + api/alerts + dashboard/alert-panel
  ├── correlation/core
  ├── alert-evaluator/proximity + alert-evaluator/composite
  ├── api/alert-lifecycle + dashboard/alert-actions

@@ -70,11 +70,12 @@ docker compose up -d        # Start all backing services
 - Alert evaluator failures must not result in duplicate alerts  - leader election handles this, not application-level dedup hacks
 
 ### Service contracts
-- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; writes PROXIMITY_EVENT edges to Neo4j only — does not write to TimescaleDB, Redis, or Kafka
+- Correlation worker Kafka consumer group: `correlation-worker`; consumes `position.normalized`; writes PROXIMITY_EVENT edges to Neo4j; publishes unscheduled proximity pairs to `proximity.candidates` (see ADR-014) — does not write to TimescaleDB or Redis
+- Deviation detector Kafka consumer group: `deviation-detector`; consumes `position.normalized`; reads `route_baseline` from TimescaleDB; publishes `OUT_OF_RANGE` / `BACK_IN_RANGE` events to `deviation.candidates` — does not write to Redis, Neo4j, or the `alerts` topic
 
 ### Commits
 - Commit message format: `<scope>: <what and why>`  - e.g. `ingestion: add DLQ for malformed AIS events`
-- Scopes match service names: `ingestion`, `position-consumer`, `correlation`, `alert-evaluator`, `api`, `dashboard`, `infra`, `schema`
+- Scopes match service names: `ingestion`, `position-consumer`, `correlation`, `deviation-detector`, `alert-evaluator`, `api`, `dashboard`, `infra`, `schema`
 
 ---
 

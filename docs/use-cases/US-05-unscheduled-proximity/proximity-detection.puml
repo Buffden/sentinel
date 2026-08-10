@@ -1,5 +1,5 @@
 @startuml proximity-detection
-title US-05: Proximity Detection - No Prior Relationship Check via Neo4j
+title US-05: Proximity Detection - Correlation Worker writes Neo4j + publishes proximity.candidates
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,6 +11,7 @@ queue "Kafka\nposition.normalized" as Kafka
 participant "Correlation\nWorker" as Correlation
 database "Redis\nentity:live:{id}" as Redis
 database "Neo4j\nentity graph" as Neo4j
+queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 queue "Kafka\nalerts" as Alerts
 participant "Express API" as API
@@ -38,29 +39,36 @@ alt two entities within threshold
   alt no KNOWN_ASSOCIATE edge found
     Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge\n(see graph-update diagram for full idempotency detail)
 
+    Correlation -> ProxKafka : publish proximity.candidates\n{ entity_a_id, entity_b_id, timestamp_ms,\n  lat, lon, distance_metres }
+
     note over Correlation
-      Correlation Worker's job ends here.
-      It writes proximity evidence to Neo4j.
-      Alert emission belongs to the Alert Evaluator
-      so that leader election (ADR-005) governs
-      all alert output from one place.
+      Both writes happen on the same detection event.
+      Neo4j edge = durable record (queried by API investigation panel).
+      proximity.candidates = real-time signal to Alert Evaluator.
+      Known associates are filtered here - they never reach
+      proximity.candidates (ADR-014).
     end note
+
   else prior relationship exists
-    Correlation -> Correlation : routine proximity - no edge written
+    Correlation -> Neo4j : MERGE PROXIMITY_EVENT edge (durable record only)
+    note over Correlation
+      Known associate - routine proximity.
+      Neo4j edge written for history.
+      No proximity.candidates event published.
+    end note
   end
 end
 
-== Alert Evaluator - runs on its own independent evaluation cycle ==
+== Alert Evaluator - consumes proximity.candidates ==
 
 note over Evaluator
   Completely separate from the Correlation Worker.
-  Polls Neo4j on each evaluation cycle
-  to find unscheduled proximity evidence
-  written since the last cycle.
+  Consumes proximity.candidates events driven by Kafka.
+  No Neo4j polling - known associates already filtered upstream.
 end note
 
-Evaluator -> Neo4j : query PROXIMITY_EVENT edges\nwithout KNOWN_ASSOCIATE within window
-Neo4j --> Evaluator : unscheduled proximity pairs
+ProxKafka -> Evaluator : consume proximity.candidates event\n{ entity_a_id, entity_b_id, timestamp_ms, lat, lon, distance_metres }
+
 Evaluator -> Alerts : publish to alerts\n{ alert_id, alert_type: UNSCHEDULED_PROXIMITY,\n  entity_a, entity_b,\n  location, distance_metres, timestamp_ms }
 
 Alerts -> API : consume alert
