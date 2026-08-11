@@ -1,65 +1,32 @@
-# Phase 05 — Correlation Worker
+# Phase 05 — Correlation Worker + Unscheduled Proximity
 
 ## Goal
 
-Detect entity proximity efficiently and build the relationship graph in Neo4j.
+Detect proximity efficiently, persist relationship evidence, and emit unscheduled-proximity alerts through the existing alert path.
 
 ```text
-position.normalized
-        ↓
-Correlation Worker
-        ↓
-H3 candidate lookup (geo-cell:* sorted sets)
-        ↓
-exact distance check
-        ↓
-Neo4j PROXIMITY_EVENT edge
-        ↓
-proximity.candidates (one event per new episode)
+position.normalized → Correlation Worker → H3 candidates → exact distance → Neo4j PROXIMITY_EVENT → proximity.candidates → Alert Evaluator → UNSCHEDULED_PROXIMITY
 ```
-
-Start with two synthetic entities moving toward each other.
-
-Do not start with scale.
-
----
-
-## Learning Goals
-
-- spatial indexing with H3 and why it reduces candidate space
-- canonical pair ordering (`min(a,b):max(a,b)`) and why it is necessary
-- proximity episode model — one episode per continuous encounter, not one per ping
-- graph persistence and `MERGE` idempotency in Neo4j
-- partial failure between Neo4j write and Kafka publish
-- `candidate_published` flag as a Kafka publish recovery mechanism
-
----
 
 ## Suggested Checkpoints
 
-1. H3 cell lookup: confirm two nearby entities appear in the same or adjacent cells
-2. Exact distance check filters candidates below `PROXIMITY_THRESHOLD_METRES`
-3. First detection: Neo4j MERGE writes a `PROXIMITY_EVENT` edge
-4. `proximity-episode:{pair_key}` hash is created in Redis; one `proximity.candidates` event is published
-5. Subsequent pings within the same episode: `last_seen_ms` updated, TTL refreshed, no new Kafka event
-6. Known-associate pair: Neo4j edge written, episode hash created, no `proximity.candidates` published
-7. Episode expires (TTL); pair comes close again — confirm a new episode starts with a new edge
-
----
+1. H3 same/neighbor-cell candidate lookup.
+2. Exact distance filtering.
+3. Canonical pair ordering (`min:max`).
+4. Neo4j `MERGE` for one proximity episode.
+5. `proximity-episode:{pair_key}` state and TTL.
+6. One `proximity.candidates` event per encounter.
+7. `KNOWN_ASSOCIATE` pair is persisted as graph evidence but filtered by the **Correlation Worker** before `proximity.candidates`.
+8. Alert Evaluator converts an unscheduled candidate into `UNSCHEDULED_PROXIMITY`.
+9. Existing API path persists and delivers it.
 
 ## Required Failure Experiments
 
-- same proximity pair triggered from both entity A's ping and entity B's ping — confirm canonical pair ordering produces one episode hash, not two
-- Neo4j write succeeds but Kafka publish fails — confirm `candidate_published=0` persists and the next ping retries the publish
-- Kafka event delivered twice — confirm no second episode is created
-- known-associate pair — confirm no event appears in `proximity.candidates` regardless of proximity duration
-
----
+- A/B and B/A triggering produce one canonical episode
+- Neo4j succeeds but Kafka publish fails; `candidate_published=0` enables retry
+- duplicate Kafka delivery does not create a second episode
+- known-associate pair produces graph evidence but no candidate and no alert
 
 ## Exit Criteria
 
-- two synthetic entities converging produces exactly one `proximity.candidates` event per encounter
-- Neo4j Browser shows one `PROXIMITY_EVENT` edge per episode
-- `redis-cli` shows `proximity-episode:{pair_key}` hash with correct fields and TTL
-- known-associate pairs produce Neo4j edges but no `proximity.candidates` events
-- developer can verify all of the above without reading the code
+One candidate/alert exists per continuous unscheduled encounter, one graph edge exists per episode, and known associates never enter the anomaly-candidate stream.
