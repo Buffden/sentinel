@@ -57,8 +57,6 @@ Before implementing anything significant, use this order:
 
    * current executable reality.
 
-Do not recreate `docs/implementation/`.
-
 ---
 
 # Starting a Phase
