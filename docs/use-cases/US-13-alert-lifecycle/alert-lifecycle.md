@@ -7,18 +7,22 @@
 
 ## Story
 
-As an operator, I want to acknowledge and resolve alerts so that my team can track which anomalies are being actively investigated, which have been closed, and which are still waiting for attention.
+As an operator, I want to acknowledge and resolve alerts so that active investigation state is durable and visible, while system correlation can replace weaker active alerts with a stronger composite incident.
 
 ---
 
 ## Acceptance Criteria
 
-- An alert starts in `NEW` state when it is first emitted by the alert evaluator
-- An operator can transition an alert from `NEW` to `ACKNOWLEDGED` to signal it is being investigated
-- An operator can transition an alert from `ACKNOWLEDGED` to `RESOLVED` to close it
-- If the same anomaly recurs after resolution, a new alert is created with a new `alert_id` - the resolved record is not overwritten
-- All state transitions are idempotent - acknowledging an already-acknowledged alert has no side effect
-- Alert state survives system restarts - it is not held in memory or in Redis alone
+- Every persisted alert starts in `NEW`.
+- An operator may transition `NEW → ACKNOWLEDGED`.
+- An operator may transition `ACKNOWLEDGED → RESOLVED`.
+- Direct `NEW → RESOLVED` is allowed.
+- `SUPERSEDED` is system-only and terminal.
+- A stronger COMPOSITE may transition an active individual alert from either `NEW` or `ACKNOWLEDGED` to `SUPERSEDED`.
+- `RESOLVED` alerts are historical and are not superseded later.
+- If an anomaly recurs after resolution, a new deterministic `alert_id` is created for the new episode; the old row is never reopened or overwritten.
+- Repeating an already-applied operator transition is idempotent.
+- Lifecycle state survives restarts because it is stored durably in TimescaleDB.
 
 ---
 
@@ -28,19 +32,19 @@ As an operator, I want to acknowledge and resolve alerts so that my team can tra
 
 ![State Transitions](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/state-transitions.svg)
 
-The full alert state machine: NEW on creation, ACKNOWLEDGED when an operator takes ownership, RESOLVED when closed. A recurring anomaly produces a new alert rather than reopening the resolved one.
+`NEW` and `ACKNOWLEDGED` are active states. `RESOLVED` and `SUPERSEDED` are terminal states. Supersession is a system correlation outcome, not an operator action.
 
 ### Acknowledge Flow
 
 ![Acknowledge Flow](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/acknowledge-flow.svg)
 
-Operator acknowledges an alert via the dashboard; the API updates the alerts table in TimescaleDB and the dashboard reflects the new state in real time.
+The API persists acknowledgement metadata and broadcasts an `ALERT_STATUS_CHANGED` event so connected clients converge on the same lifecycle state.
 
-### Resolve and Reopen
+### Resolution and Later Recurrence
 
-![Resolve and Reopen](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/resolve-and-reopen.svg)
+![Resolution and Later Recurrence](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/resolve-and-reopen.svg)
 
-Shows what happens when an operator resolves an alert but the anomaly recurs: the alert evaluator emits a new alert event with a new window, creating a fresh record rather than overwriting history.
+A resolved alert remains immutable historical evidence. If the anomaly occurs again in a new episode/window, the Alert Evaluator emits a new deterministic alert identity and the API inserts a new `NEW` row.
 
 ---
 
@@ -48,4 +52,4 @@ Shows what happens when an operator resolves an alert but the anomaly recurs: th
 
 Justifies: [ADR-010 - Alert State Store](../../adr/ADR-010-alert-state-store.md)
 
-Alert lifecycle state must survive restarts and be queryable by status, entity, and time range. Redis (already in the stack for live entity state) is volatile and lacks native secondary indexes - it is the right tool for high-frequency ephemeral reads but the wrong tool for durable, mutable, queryable records. A regular PostgreSQL table on the existing TimescaleDB instance provides durability, queryability, and idempotent writes via `ON CONFLICT DO NOTHING` on the deterministic `alert_id`, without adding any new infrastructure.
+Alert lifecycle state is durable, mutable, and queryable. A regular PostgreSQL table on the TimescaleDB instance provides the required transactionality for composite supersession and the indexes needed for operator workflows, while Redis remains dedicated to ephemeral in-loop anomaly state and pub/sub fan-out.
