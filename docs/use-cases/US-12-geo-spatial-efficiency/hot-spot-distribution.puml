@@ -1,5 +1,5 @@
 @startuml hot-spot-distribution
-title US-12: Hot-Spot Distribution - High-Traffic Area Spread Across Multiple H3 Cells
+title US-12: H3 Selectivity - Historical index vs live candidate reduction
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,37 +8,40 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Position\nConsumer" as Consumer
-database "TimescaleDB\nChunk A\n(geo_cell=8a2a1072b59ffff)" as ChunkA
-database "TimescaleDB\nChunk B\n(geo_cell=8a2a1072b4fffff)" as ChunkB
-database "TimescaleDB\nChunk C\n(geo_cell=8a2a1072b58ffff)" as ChunkC
+database "TimescaleDB\nTime Chunk\n(observed_at partition)" as TimeChunk
+database "Redis\ngeo-cell:A" as CellA
+database "Redis\ngeo-cell:B" as CellB
+database "Redis\ngeo-cell:C" as CellC
+participant "Correlation\nWorker" as Correlation
 
-note over Consumer
-  Busy airspace - e.g. London Heathrow approach.
-  Hundreds of aircraft in a small area.
-  All pings arrive at the position consumer.
+Consumer -> Consumer : compute history_geo_cell\nand live_geo_cell
+Consumer -> TimeChunk : INSERT position_history\ngeo_cell = history_geo_cell
+
+note over TimeChunk
+  All rows for the same time interval can live
+  in the same TimescaleDB time chunk regardless of H3 cell.
+  geo_cell is indexed and narrows queries inside the chunk.
+  H3 does NOT distribute writes into separate TimescaleDB chunks.
 end note
 
-Consumer -> Consumer : compute H3 cell for each ping\nat resolution 5 (~252 km² per cell)
+Consumer -> CellA : ZADD nearby entity memberships
+Consumer -> CellB : ZADD nearby entity memberships
+Consumer -> CellC : ZADD nearby entity memberships
 
-note over Consumer
-  Aircraft dispersed across the
-  approach corridor map to
-  different H3 cells at resolution 5.
-  No single cell receives all writes.
+note over CellA, CellC
+  Live H3 cells are separate Redis sorted sets.
+  This is where spatial bucketing reduces
+  the candidate population for proximity detection.
 end note
 
-Consumer -> ChunkA : INSERT positions for aircraft\nin cell 8a2a1072b59ffff
-Consumer -> ChunkB : INSERT positions for aircraft\nin cell 8a2a1072b4fffff
-Consumer -> ChunkC : INSERT positions for aircraft\nin cell 8a2a1072b58ffff
+Correlation -> CellA : query current + k-ring cells\nZRANGEBYSCORE fresh members
+Correlation -> CellB : query as required
+Correlation -> CellC : query as required
 
-note over ChunkA, ChunkC
-  Write load distributed across
-  multiple chunks in parallel.
-  No single chunk is a bottleneck.
-  Compare: a single rectangular
-  grid cell covering the same area
-  would receive all writes into
-  one partition - a hot-spot.
+note over Correlation
+  H3 reduces candidates only.
+  Exact distance decides whether a pair
+  is actually within PROXIMITY_THRESHOLD_METRES.
 end note
 
 @enduml
