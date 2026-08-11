@@ -13,12 +13,13 @@ As an operator, I want to see currently tracked entities on a live map so that I
 
 ## Acceptance Criteria
 
-- All entities within the operator's saved scope whose latest position is still considered live are visible on the map.
-- Initial map load comes from Redis `entity:live:*` current-state hashes.
-- Ongoing position changes arrive via WebSocket (US-02).
-- Client-side staleness uses `last_seen_ms`; the 24h Redis TTL is only a safety net and is not the live-map expiry threshold.
-- Entities outside the configured scope are not sent to the dashboard after workspace scoping is introduced.
-- The map supports at least hundreds of simultaneous entities without unacceptable rendering degradation.
+- Initial map load comes from Redis `entity:live:*` through the API.
+- Only entities allowed by the operator's current server-side workspace scope are returned once workspace enforcement is available.
+- Ongoing position updates arrive via WebSocket (US-02).
+- An entity marker represents the latest accepted source-event position, never a stale replay that regressed Redis state.
+- Client-side staleness removes markers when `now() - last_seen_ms` exceeds the configured display/liveness threshold.
+- Redis `entity:live:*` uses a 24h TTL only as a safety net against permanent ghost keys; TTL expiry is not the live-map cleanup trigger and not the signal-loss detector.
+- Hundreds of simultaneously visible entities remain usable without requiring the dashboard to query TimescaleDB for every update.
 
 ---
 
@@ -28,30 +29,24 @@ As an operator, I want to see currently tracked entities on a live map so that I
 
 ![Write Path](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/write-path.svg)
 
-A source position travels through Kafka and the Position Consumer into durable TimescaleDB history and Redis live state.
+The Position Consumer persists history and updates monotonic Redis live state before broadcasting accepted live position updates.
 
 ### Read Path
 
 ![Read Path](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/read-path.svg)
 
-The API reads current positions from Redis for initial load and relays live updates over WebSocket.
+The API serves current Redis state on initial load and pushes subsequent updates over authenticated WebSocket connections.
 
 ### Entity Expiry
 
 ![Entity Expiry](../../../diagrams/docs/use-cases/US-01-live-entity-tracking/entity-expiry.svg)
 
-When no new position arrives, the dashboard removes the marker when its staleness rule based on `last_seen_ms` is exceeded. Redis retains the live-state key for up to 24h as a safety net so the Alert Evaluator still has state to inspect for signal loss. Redis TTL expiry is therefore not the normal dashboard cleanup trigger.
-
----
-
-## Phase Boundary Note
-
-This use case describes the **final v1 behavior**. Phase 02 establishes Redis live state and position publication. Authentication/workspace scope and full server-side scoped delivery arrive in later roadmap phases. Earlier phases should not implement future workspace functionality merely because it appears in this final-state use case.
+If an entity stops broadcasting, no new live update arrives. The dashboard removes a stale marker by comparing its `last_seen_ms` with the configured threshold. The Redis key remains available long enough for the Alert Evaluator's signal-loss scan because its 24h safety TTL is intentionally independent of alert timing.
 
 ---
 
 ## Architectural Justification
 
-Justifies: [ADR-004 - Redis for Live Entity State](../../adr/ADR-004-redis-live-state.md), [ADR-012 - Workspace Scope and Server-Side Alert Filtering](../../adr/ADR-012-workspace-scope-alert-filtering.md)
+Justifies: [ADR-004 - Redis for Live Entity State](../../adr/ADR-004-redis-live-state.md), [ADR-012 - Workspace Scope](../../adr/ADR-012-workspace-scope-alert-filtering.md)
 
-Redis is used because the map needs fast access to the latest entity state. TimescaleDB remains the durable historical store. `last_seen_ms`, not Redis TTL, defines operational freshness; the TTL only prevents permanently abandoned keys.
+Redis is used because the access pattern is "latest state by entity" plus high-frequency fan-out. TimescaleDB remains the durable history source and is used for historical/investigation queries rather than every map refresh.

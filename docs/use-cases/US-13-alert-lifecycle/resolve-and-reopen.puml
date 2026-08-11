@@ -1,5 +1,5 @@
 @startuml resolve-and-reopen
-title US-13: Resolution and Later Recurrence - New Episode Creates New Alert
+title US-13: Resolve and Recurrence - Terminal Resolution Creates New Incident on Recurrence
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,41 +8,36 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 actor Operator
+participant "Angular\nDashboard" as Dashboard
 participant "Express API" as API
-database "TimescaleDB\nalerts table" as TSDB
-participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "TimescaleDB\nalerts" as TSDB
+participant "Alert\nEvaluator" as Evaluator
 queue "Kafka\nalerts" as Kafka
 
-== Operator Resolves Alert ==
-
-Operator -> API : PATCH /alerts/VesselB:SIGNAL_LOSS:1700000000000\n{ status: RESOLVED }
-API -> TSDB : UPDATE alert to RESOLVED\nrecord resolved_at / resolved_by
-TSDB --> API : updated
-API --> Operator : 200 OK
+Operator -> Dashboard : Resolve active alert
+Dashboard -> API : PATCH /alerts/{alert_id}\n{ status: RESOLVED }
+API -> TSDB : UPDATE alert\nSET status=RESOLVED, resolved_at=..., resolved_by=...
+TSDB --> API : durable terminal state
+API --> Dashboard : lifecycle update
+Dashboard --> Operator : alert shown as RESOLVED
 
 note over TSDB
-  Resolved record remains permanent history.
   RESOLVED is terminal.
+  The row is never reopened or overwritten.
 end note
 
-== Same anomaly occurs in a later episode ==
+== Later, a new anomaly episode occurs ==
 
-note over Evaluator
-  VesselB later goes dark again.
-  New dark_since_ms means a different
-  deterministic signal-loss identity.
-end note
+Evaluator -> Kafka : publish alert with new deterministic\nepisode/window identity
+Kafka -> API : consume new logical alert
+API -> TSDB : INSERT new alert row\nON CONFLICT (alert_id) DO NOTHING
+TSDB --> API : new NEW incident
+API --> Dashboard : push new alert lifecycle event
+Dashboard --> Operator : new incident displayed separately
 
-Evaluator -> Kafka : publish SIGNAL_LOSS\nalert_id = VesselB:SIGNAL_LOSS:1700005000000
-Kafka -> API : consume new alert
-API -> TSDB : INSERT new alert row\nstatus = NEW\nON CONFLICT DO NOTHING
-
-note over TSDB
-  Two independent records exist:
-  old episode -> RESOLVED
-  new episode -> NEW
-
-  There is no reopen operation.
+note over Operator, TSDB
+  Historical filename retained for link stability.
+  Behavior is recurrence, not reopen.
 end note
 
 @enduml

@@ -1,28 +1,28 @@
 # US-13: Alert Lifecycle Management
 
-**Actor:** Operator
+**Actor:** Operator / System
 **Status:** Defined
 
 ---
 
 ## Story
 
-As an operator, I want to acknowledge and resolve alerts so that active investigation state is durable and visible, while system correlation can replace weaker active alerts with a stronger composite incident.
+As an operator, I want alerts to have durable lifecycle state so that I can distinguish unreviewed, actively investigated, resolved, and system-superseded incidents.
 
 ---
 
 ## Acceptance Criteria
 
-- Every persisted alert starts in `NEW`.
-- An operator may transition `NEW → ACKNOWLEDGED`.
-- An operator may transition `ACKNOWLEDGED → RESOLVED`.
-- Direct `NEW → RESOLVED` is allowed.
-- `SUPERSEDED` is system-only and terminal.
-- A stronger COMPOSITE may transition an active individual alert from either `NEW` or `ACKNOWLEDGED` to `SUPERSEDED`.
-- `RESOLVED` alerts are historical and are not superseded later.
-- If an anomaly recurs after resolution, a new deterministic `alert_id` is created for the new episode; the old row is never reopened or overwritten.
-- Repeating an already-applied operator transition is idempotent.
-- Lifecycle state survives restarts because it is stored durably in TimescaleDB.
+- New alerts start as `NEW`.
+- Operator may transition `NEW → ACKNOWLEDGED`.
+- Operator may transition `ACKNOWLEDGED → RESOLVED`.
+- Operator may also resolve directly with `NEW → RESOLVED`.
+- The system may transition an active individual alert from `NEW → SUPERSEDED` or `ACKNOWLEDGED → SUPERSEDED` when a COMPOSITE replaces it.
+- `RESOLVED` and `SUPERSEDED` are terminal.
+- Operators cannot manually set `SUPERSEDED`.
+- A recurring anomaly creates a new deterministic episode/window alert; terminal rows are never reopened or overwritten.
+- All lifecycle operations are idempotent and durable across restarts.
+- WebSocket lifecycle delivery is at-least-once; duplicate events must converge on the same durable status.
 
 ---
 
@@ -32,19 +32,19 @@ As an operator, I want to acknowledge and resolve alerts so that active investig
 
 ![State Transitions](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/state-transitions.svg)
 
-`NEW` and `ACKNOWLEDGED` are active states. `RESOLVED` and `SUPERSEDED` are terminal states. Supersession is a system correlation outcome, not an operator action.
+The state machine distinguishes operator handling from system correlation replacement. A COMPOSITE may supersede either a NEW or ACKNOWLEDGED individual alert, but never a RESOLVED alert.
 
 ### Acknowledge Flow
 
 ![Acknowledge Flow](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/acknowledge-flow.svg)
 
-The API persists acknowledgement metadata and broadcasts an `ALERT_STATUS_CHANGED` event so connected clients converge on the same lifecycle state.
+The operator acknowledges through the API; the API updates TimescaleDB and broadcasts the resulting lifecycle state.
 
-### Resolution and Later Recurrence
+### Resolve and Recurrence
 
-![Resolution and Later Recurrence](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/resolve-and-reopen.svg)
+![Resolve and Recurrence](../../../diagrams/docs/use-cases/US-13-alert-lifecycle/resolve-and-reopen.svg)
 
-A resolved alert remains immutable historical evidence. If the anomaly occurs again in a new episode/window, the Alert Evaluator emits a new deterministic alert identity and the API inserts a new `NEW` row.
+The historical filename is retained for diagram-link stability, but the behavior is **not reopening**: once an alert is resolved it remains terminal. A later anomaly episode produces a new `alert_id` and a new row.
 
 ---
 
@@ -52,4 +52,4 @@ A resolved alert remains immutable historical evidence. If the anomaly occurs ag
 
 Justifies: [ADR-010 - Alert State Store](../../adr/ADR-010-alert-state-store.md)
 
-Alert lifecycle state is durable, mutable, and queryable. A regular PostgreSQL table on the TimescaleDB instance provides the required transactionality for composite supersession and the indexes needed for operator workflows, while Redis remains dedicated to ephemeral in-loop anomaly state and pub/sub fan-out.
+The alerts table is the durable source of truth for lifecycle state. Redis alert-state keys serve detection-loop suppression/correlation and are not substitutes for durable operator workflow state.

@@ -7,43 +7,46 @@
 
 ## Context
 
-Kafka delivery is at-least-once. Consumers may process the same logical event more than once because of crashes, rebalances, retries, or explicit replay. Sentinel therefore requires deterministic identity for every replay-sensitive durable effect.
+Kafka processing is at-least-once. Consumers may process the same logical fact more than once because of retries, restarts, rebalances, or intentional replay. Sentinel therefore needs deterministic identities for every durable or replay-sensitive side effect.
 
-There is no single key shape that correctly identifies every domain object. Position pings, proximity episodes, and alerts have different natural identities.
+A single universal key shape is not sufficient because Sentinel stores different kinds of logical facts: single-entity positions, pair episodes, and multiple alert types.
 
 ---
 
 ## Decision
 
-Use a deterministic identity derived from source event time and the domain object's canonical identity.
+Use a deterministic identity that matches the logical fact being written.
 
-### Position events
+### Position history
 
-Logical identity:
+Logical source identity:
 
 ```text
 {entity_id}:{timestamp_ms}
 ```
 
-TimescaleDB enforces this through the unique constraint `(entity_id, observed_at)`, where `observed_at = to_timestamp(timestamp_ms / 1000.0)`.
+TimescaleDB enforces this through unique `(entity_id, observed_at)`, where `observed_at` is deterministically derived from `timestamp_ms`. Duplicate inserts use `ON CONFLICT DO NOTHING`.
 
-### Proximity episodes
+### Redis live state
 
-Canonical pair:
-
-```text
-{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}
-```
-
-Neo4j `PROXIMITY_EVENT` identity:
+Key identity is `entity_id`, but correctness additionally requires a monotonic source-time guard:
 
 ```text
-{pair_key}:{episode_start_ms}
+incoming.timestamp_ms >= stored.last_seen_ms
 ```
+
+A repeated equal-timestamp write is safe. An older event must never overwrite newer live state.
+
+### Proximity episode / Neo4j evidence
+
+```text
+pair_key = min(a,b):max(a,b)
+PROXIMITY_EVENT identity = {pair_key}:{episode_start_ms}
+```
+
+Neo4j writes use `MERGE` on this identity.
 
 ### Alerts
-
-Alert identity is deterministic **per alert type**:
 
 ```text
 SIGNAL_LOSS
@@ -59,62 +62,22 @@ COMPOSITE
 {pair_key}:COMPOSITE:{dark_since_ms}
 ```
 
-The same logical anomaly therefore produces the same `alert_id` on replay.
+Pair-based alert types include the canonical pair key so two simultaneous incidents involving the same primary entity but different counterparties cannot collide.
 
 ---
 
-## Reasoning
+## Why This Is Not Exactly-Once Transport
 
-**Identity follows the domain object.** A position ping belongs to one entity at one source timestamp. A proximity episode belongs to a canonical entity pair and an episode start. An alert belongs to the anomaly episode that caused it.
+Deterministic identity does not prevent Kafka from delivering an event twice. It makes repeated processing converge on one durable logical result.
 
-**Source event time makes replay deterministic.** Episode/window anchors come from telemetry-derived event time, not processing time. Reprocessing the same source facts therefore recreates the same identity.
+Sentinel therefore describes its guarantees as:
 
-**Canonical pair ordering prevents symmetric duplicates.** `(A,B)` and `(B,A)` must resolve to the same `pair_key` everywhere.
+- Kafka transport/processing: at-least-once;
+- durable TimescaleDB/Neo4j side effects: idempotent, producing an exactly-once **effect** for one logical identity;
+- Redis live state: monotonic by source event time;
+- WebSocket lifecycle delivery: at-least-once; client deduplication required.
 
----
-
-## Per-Store Application
-
-### TimescaleDB position history
-
-```sql
-INSERT ...
-ON CONFLICT (entity_id, observed_at) DO NOTHING
-```
-
-TimescaleDB requires the hypertable partition column in unique constraints, so `(entity_id, observed_at)` is the physical constraint while `{entity_id}:{timestamp_ms}` remains the logical identity.
-
-### TimescaleDB alerts
-
-`alert_id` is the primary key. Kafka replay may deliver the alert again, but `INSERT ... ON CONFLICT DO NOTHING` prevents a second durable alert row.
-
-### Neo4j
-
-`MERGE` on deterministic node/relationship identity prevents duplicate graph evidence under replay.
-
-### Redis live state
-
-Redis live state is not protected by a duplicate key alone. An older replayed event can overwrite a newer value, so writes require a timestamp guard:
-
-```text
-accept if incoming.timestamp_ms >= stored.last_seen_ms
-reject if incoming.timestamp_ms < stored.last_seen_ms
-```
-
-The same timestamp may be accepted as an idempotent repeat, but an older timestamp must never regress either `entity:live:*` or its `geo-cell:*` spatial membership.
-
----
-
-## Delivery Semantics
-
-Sentinel does **not** claim exactly-once transport.
-
-- Kafka processing is at-least-once.
-- Redis pub/sub / WebSocket delivery may repeat after replay.
-- Durable writes are idempotent, producing an exactly-once **durable effect** for the same logical identity.
-- Dashboard clients deduplicate repeated alert delivery by `alert_id`.
-
-Leader election reduces concurrent Alert Evaluator writers; deterministic identity remains the correctness backstop if replay or a lease race causes the same logical alert to be emitted again.
+Leader election reduces concurrent duplicate alert evaluation but does not replace deterministic durable identity.
 
 ---
 
@@ -122,35 +85,38 @@ Leader election reduces concurrent Alert Evaluator writers; deterministic identi
 
 ### Crash recovery
 
-A consumer resumes from the last committed offset. Normal processing applies. Duplicate processing is safe because durable side effects are idempotent and Redis live state is timestamp guarded.
+Consumer resumes from the last committed offset. Normal processing applies. Duplicate durable writes converge through the identities above; Redis source-time guards prevent live-state regression.
 
 ### Historical backfill
 
-Historical rebuilds use a separate consumer group or explicit backfill mode and suppress ephemeral/live side effects unless they are the target of the rebuild. In particular, historical replay must not blindly republish live WebSocket events, regress Redis live state, or recreate historical anomaly notifications as if they were current.
+Historical rebuild uses a separate consumer group or explicit backfill mode. Ephemeral side effects are suppressed unless they are the specific rebuild target:
+
+- no live Redis regression;
+- no `position-updates` fan-out;
+- no historical `deviation.candidates` / `proximity.candidates` into the live alert path;
+- no alert re-notification solely because history is being rebuilt.
 
 ---
 
 ## Alternatives Considered
 
-### Processing-time UUIDs (rejected)
+### Processing-time UUID — rejected
 
-The same event would produce a different identity on every attempt, defeating replay deduplication.
+The same source fact receives a new identity on every retry, making deduplication impossible.
 
-### Kafka offset as domain identity (rejected)
+### Kafka offset as domain identity — rejected
 
-Offsets are partition-specific broker positions, not stable business identity. They also do not survive topic recreation/repartitioning as a domain contract.
+Offsets are partition-local transport coordinates, not stable domain identities.
 
-### One universal `{entity_id}:{timestamp_ms}` key (rejected)
+### One `{entity_id}:{timestamp_ms}` rule for every store — rejected
 
-It does not correctly identify pair-based proximity episodes or composite/proximity alerts involving two entities.
+It cannot correctly identify pair episodes or pair-based alerts and can collide when one entity participates in multiple simultaneous pair incidents.
 
 ---
 
 ## Consequences
 
-- `position.normalized` must preserve source `timestamp_ms`.
-- Pair-based processing must canonicalize IDs before creating Redis, Neo4j, Kafka, or alert identities.
-- Alert producers must use the exact type-specific `alert_id` formats above.
-- `alerts.alert_id` is the durable deduplication key.
-- Redis live-state and geo-cell writes require the same timestamp guard so a stale event cannot update one without the other.
-- Tests must distinguish duplicate transport from duplicate durable effects.
+- Canonical pair ordering is required anywhere pair identity is used.
+- Alert producers and database migrations must implement the per-type `alert_id` rules exactly.
+- Tests must include duplicate delivery and out-of-order telemetry, not only duplicate equal-value writes.
+- Documentation must say "exactly-once effect" only for idempotent durable side effects, never for the whole transport pipeline.

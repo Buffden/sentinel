@@ -1,250 +1,202 @@
 # Architecture
 
-This document defines Sentinel's canonical service boundaries, event flow, persistence ownership, and cross-service contracts.
+This document defines Sentinel's service boundaries, component contracts, persistence ownership, Kafka topics, and delivery semantics. It is authoritative for who reads/writes which store and what each service is allowed to decide.
 
 ![Architecture Diagram](../diagrams/docs/architecture.svg)
 
 ---
 
-## Core Flow
+## Architectural Principles
 
-```text
-External feeds
-  → Ingestion Poller
-  → adsb.raw / ais.raw
-  → Position Consumer
-      → TimescaleDB position_history
-      → Redis entity:live:* + geo-cell:* + position-updates
-      → position.normalized
-          ├→ Deviation Detector → deviation.candidates
-          └→ Correlation Worker → Neo4j evidence → proximity.candidates
-
-Alert Evaluator
-  ← Redis scheduled scan (signal loss)
-  ← deviation.candidates
-  ← proximity.candidates
-  ← Redis anomaly episode state
-  → alerts
-
-API
-  ← alerts
-  → TimescaleDB alerts/users/workspaces
-  ↔ Redis pub/sub + live state
-  → Neo4j investigation reads
-  → REST + WebSocket
-  → Angular dashboard
-```
-
-Kafka and WebSocket transport are at-least-once where replay/reconnection can repeat logical events. Sentinel relies on deterministic identity plus idempotent durable writes for exactly-once **durable effects**, not exactly-once transport.
+- Services are independently deployable and communicate through Kafka for event flow.
+- Shared persistence is intentional where documented; private inter-service HTTP calls are not.
+- Kafka processing is at-least-once.
+- Durable side effects are made idempotent with deterministic identity and database constraints.
+- Redis live state is monotonic by source event time; stale telemetry cannot overwrite newer state.
+- Leader election prevents concurrent active Alert Evaluators, but deterministic alert identity remains the durable deduplication backstop.
+- WebSocket delivery is at-least-once. Clients must tolerate and deduplicate replayed lifecycle events.
 
 ---
 
-## Ingestion Poller
+## Services
+
+### Ingestion Poller
+
+**Runtime:** Node.js (ADR-013)
+
+**Concern:** Fetch raw ADS-B/AIS telemetry and publish it to Kafka without domain normalization or anomaly logic.
+
+| Direction | Contract |
+| --- | --- |
+| Reads | OpenSky Network REST API, AISHub |
+| Publishes | `adsb.raw`, `ais.raw` |
+| Writes stores | None |
+
+The poller may unwrap a provider response envelope and split it into per-entity records. Field coercion, canonical naming, validation, persistence, and DLQ handling belong to the Position Consumer.
+
+---
+
+### Position Consumer
 
 **Runtime:** Node.js
 
-**Consumes/reads:** OpenSky and AISHub external feeds.
+**Concern:** Normalize raw telemetry, persist history, maintain current live state and live spatial index, and publish normalized position events.
 
-**Publishes:** `adsb.raw`, `ais.raw`.
+| Direction | Contract |
+| --- | --- |
+| Consumes | `adsb.raw`, `ais.raw` — group `position-consumer` |
+| Publishes Kafka | `position.normalized`, `adsb.dlq`, `ais.dlq` |
+| Writes TimescaleDB | `position_history` |
+| Writes Redis | `entity:live:{entity_id}`, `geo-cell:{live_geo_cell}`, `recent-loss:{entity_id}` |
+| Deletes Redis | `alert-state:{entity_id}` after writing `recent-loss` on resume |
+| Publishes Redis | `position-updates` |
 
-Contract:
+**Contract:**
 
-- forwards source telemetry without domain normalization;
-- may split provider response envelopes into individual source records;
-- performs no anomaly logic and no persistence writes;
-- owns polling cadence and provider rate-limit compliance.
+- `position_history` is idempotent on `(entity_id, observed_at)` where `observed_at` is deterministically derived from source `timestamp_ms`.
+- Redis live state is updated only when the incoming source timestamp is not older than the stored `last_seen_ms`.
+- Compute `history_geo_cell` at `HISTORY_H3_RESOLUTION` for historical queries and `live_geo_cell` at `LIVE_H3_RESOLUTION` for the Redis proximity index.
+- When an entity changes live H3 cells: read the previous `live_geo_cell`, `ZREM` the entity from the old sorted set, then `ZADD` it to the current set with score=`last_seen_ms`.
+- Malformed/unparseable records go to the source-specific DLQ. Valid source records with no position are skipped with observability, not treated as parse failures.
+- Historical backfill suppresses ephemeral live side effects and uses a separate consumer group/mode.
+- The Position Consumer does not evaluate anomalies and does not write Neo4j.
 
 ---
 
-## Position Consumer
+### Correlation Worker
 
 **Runtime:** Node.js
 
-**Consumes:** `adsb.raw`, `ais.raw` (`position-consumer` group).
+**Concern:** Detect proximity episodes, maintain graph evidence, filter expected relationships, and publish unscheduled-proximity candidates.
 
-**Publishes:** `position.normalized`, `adsb.dlq`, `ais.dlq`, Redis `position-updates`.
+| Direction | Contract |
+| --- | --- |
+| Consumes | `position.normalized` — group `correlation-worker` |
+| Reads Redis | `geo-cell:*`, `entity:live:*`, `proximity-episode:{pair_key}` |
+| Writes Redis | `proximity-episode:{pair_key}` |
+| Reads Neo4j | `KNOWN_ASSOCIATE` for the specific candidate pair |
+| Writes Neo4j | `Entity`, `PROXIMITY_EVENT` |
+| Publishes | `proximity.candidates` |
 
-**Writes:** TimescaleDB `position_history`; Redis `entity:live:{entity_id}`, `geo-cell:{h3_cell_id}`, and resume-related `recent-loss:{entity_id}` state.
+**Contract:**
 
-Contract:
-
-- parses/normalizes source telemetry;
-- preserves source `timestamp_ms`;
-- computes `history_geo_cell` and `live_geo_cell` independently;
-- writes `position_history` idempotently;
-- updates Redis live state only when `incoming.timestamp_ms >= stored.last_seen_ms`;
-- updates `entity:live:*` and `geo-cell:*` consistently under the same freshness decision;
-- when an accepted ping changes H3 cell, reads the old `live_geo_cell`, `ZREM`s the entity from the old sorted set, then `ZADD`s it to the current cell with score = `last_seen_ms`;
-- malformed/unparseable source events go to DLQ; valid source records with no usable position are skipped with an observable metric/log rather than treated as parser failure;
-- on entity resume after signal loss, writes `recent-loss:{entity_id}` before deleting `alert-state:{entity_id}`;
-- does not evaluate anomaly rules or write Neo4j.
-
-Historical backfill uses a separate consumer group/mode and suppresses live Redis/pub-sub/anomaly side effects unless explicitly rebuilding that state.
+- Candidate search uses the incoming entity's live H3 cell plus a computed k-ring based on `PROXIMITY_THRESHOLD_METRES` and `LIVE_H3_RESOLUTION`.
+- `geo-cell:*` members are sorted by `last_seen_ms`; `ZRANGEBYSCORE` filters stale members before exact distance calculation.
+- Pair identity is canonical: `pair_key = min(a,b):max(a,b)`.
+- One continuous encounter maps to one `proximity-episode:{pair_key}` and one Neo4j `PROXIMITY_EVENT` edge keyed by `{pair_key}:{episode_start_ms}`.
+- On a new pair episode, check `KNOWN_ASSOCIATE` before publishing a candidate.
+- Known associates may retain graph/episode evidence but never publish `proximity.candidates`.
+- Unscheduled pair write order is: Neo4j `MERGE` → create episode with `candidate_published=0` → Kafka publish → set `candidate_published=1`.
+- If Kafka publication fails, the next qualifying ping retries because `candidate_published` remains `0`.
+- The Correlation Worker does not read alert/composite state and does not decide whether a candidate becomes UNSCHEDULED_PROXIMITY or COMPOSITE.
 
 ---
 
-## Deviation Detector
+### Deviation Detector
 
 **Runtime:** Node.js
 
-**Consumes:** `position.normalized` (`deviation-detector` group).
+**Concern:** Statelessly compare eligible positions with deterministic reference-route segments and publish deviation classifications.
 
-**Reads:** `route_references`, `route_reference_points` in TimescaleDB.
+| Direction | Contract |
+| --- | --- |
+| Consumes | `position.normalized` — group `deviation-detector` |
+| Reads TimescaleDB | `route_references`, `route_reference_points` |
+| Publishes | `deviation.candidates` |
 
-**Publishes:** `deviation.candidates`.
+**Contract:**
 
-Contract:
-
-- synthetic entities only in v1;
-- stateless per ping;
-- computes minimum point-to-route-segment distance;
-- publishes `OUT_OF_RANGE` or `IN_RANGE` for every eligible ping;
-- does not own sustained-deviation episode state;
-- does not emit alerts.
+- v1 applies route deviation to synthetic entities with assigned reference routes only.
+- For each eligible ping, calculate minimum point-to-segment distance to the reference route.
+- Publish `OUT_OF_RANGE` or `IN_RANGE` on every eligible ping.
+- The detector is stateless. Sustained-ping counting, episode state, replay guards, and alert emission belong to the Alert Evaluator.
 
 ---
 
-## Correlation Worker
+### Alert Evaluator
 
 **Runtime:** Node.js
 
-**Consumes:** `position.normalized` (`correlation-worker` group).
+**Concern:** Own anomaly-rule interpretation and publish deterministic alert events.
 
-**Reads:** Redis `geo-cell:*`, `entity:live:*`, `proximity-episode:*`; Neo4j `KNOWN_ASSOCIATE` relationships.
+The Alert Evaluator remains the complete Alert Layer. Removing its direct Neo4j read does **not** remove the service; it removes a redundant dependency because known associates are already filtered by the Correlation Worker.
 
-**Writes:** Redis `proximity-episode:*`; Neo4j `PROXIMITY_EVENT` evidence.
+| Direction | Contract |
+| --- | --- |
+| Consumes | `deviation.candidates`, `proximity.candidates` — group `alert-evaluator` |
+| Reads Redis | `entity:live:*`, `alert-state:*`, `recent-loss:*`, `deviation-state:*`, leader lease |
+| Writes Redis | `alert-state:*`, `deviation-state:*`; consumes qualifying `recent-loss:*` |
+| Reads TimescaleDB | `position_history` only for last-known signal-loss position payload |
+| Publishes | `alerts` |
+| Coordination | Redis lease `alert-evaluator:leader` |
 
-**Publishes:** `proximity.candidates` for unscheduled pairs only.
+**Contract:**
 
-Contract:
-
-- uses `LIVE_H3_RESOLUTION` to query nearby fresh entities from Redis sorted sets;
-- computes the k-ring radius from `PROXIMITY_THRESHOLD_METRES` and H3 geometry rather than hardcoding it;
-- performs exact distance checks after H3 candidate reduction;
-- canonicalizes pairs as `min(a,b):max(a,b)`;
-- checks `KNOWN_ASSOCIATE` before publishing `proximity.candidates`;
-- known-associate proximity may be recorded as graph evidence but is never forwarded as an unscheduled candidate;
-- creates one `proximity.candidates` event per unscheduled proximity episode;
-- Neo4j write precedes Kafka publication; `candidate_published` enables safe retry after a publish failure;
-- does not emit alerts or read signal-loss/composite state.
-
----
-
-## Alert Evaluator
-
-**Runtime:** Node.js
-
-**Purpose:** Convert qualified anomaly facts plus live anomaly state into canonical alert events.
-
-**Consumes:**
-
-- `deviation.candidates`;
-- `proximity.candidates`.
-
-**Reads/writes Redis:**
-
-- scans `entity:live:*` for signal loss;
-- owns `alert-state:*`, `deviation-state:*` and leader lease state;
-- reads/consumes `recent-loss:*` for composite correlation.
-
-**Reads TimescaleDB:** `position_history` only when constructing last-known signal-loss payload data.
-
-**Publishes:** `alerts`.
-
-**Does not read Neo4j.** The Correlation Worker already filters `KNOWN_ASSOCIATE` pairs before `proximity.candidates` is emitted, and the candidate event carries the immutable episode data needed for the proximity/composite rule.
-
-### Signal loss
-
-A leader-only scheduled Redis scan detects `now - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS`. `alert-state:{entity_id}` prevents re-emitting the same dark episode.
-
-### Route deviation
-
-The evaluator consumes stateless `OUT_OF_RANGE` / `IN_RANGE` facts and owns `deviation-state:{entity_id}` including replay guard, sustained count, episode start, and `alert_emitted`.
-
-### Proximity / composite
-
-Every `proximity.candidates` message already represents an unscheduled pair.
-
-When one arrives, the evaluator checks both entities for:
-
-- active signal-loss state (`alert-state:*`), or
-- recent-loss state (`recent-loss:*`).
-
-If a qualifying loss episode exists within `COMPOSITE_CORRELATION_WINDOW_MS`, emit COMPOSITE with `supersedes_alert_ids`; otherwise emit UNSCHEDULED_PROXIMITY.
-
-One signal-loss episode may produce at most one COMPOSITE.
-
-### Leadership
-
-Only the Redis lease holder joins/polls the `alert-evaluator` Kafka group and runs scheduled signal-loss evaluation. Lease renewal/release use ownership-safe compare-and-expire / compare-before-delete logic.
-
-Leader election reduces concurrent writers; deterministic alert IDs remain the replay/race correctness backstop.
+- Only the current lease holder joins/polls the `alert-evaluator` Kafka consumer group.
+- Lease renewal and release are ownership-safe compare-and-expire / compare-and-delete operations.
+- Signal loss is detected by a scheduled Redis scan because absence of telemetry does not generate a Kafka event.
+- Route deviation state lives in `deviation-state:{entity_id}`. Replayed/out-of-order classifications cannot regress or double-increment an episode.
+- `proximity.candidates` already means: exact proximity confirmed, new episode, and no `KNOWN_ASSOCIATE` relationship. The evaluator therefore does **not** query Neo4j again.
+- When a proximity candidate arrives, inspect `alert-state` / `recent-loss` for both entities:
+  - qualifying active/recent signal loss → `COMPOSITE`;
+  - otherwise → `UNSCHEDULED_PROXIMITY`.
+- A signal-loss episode can produce at most one composite correlation opportunity.
+- The evaluator publishes deterministic logical alerts. Kafka may redeliver/replay them; duplicate durable rows are prevented downstream by deterministic `alert_id` and database constraints.
 
 ---
 
-## API
+### API
 
-**Runtime:** Node.js / Express
+**Runtime:** Node.js / Express (ADR-008)
 
-**Consumes:** `alerts` (`api` consumer group).
+**Concern:** Persist alerts, authenticate operators, expose REST, serve WebSockets, enforce workspace scope, and provide investigation reads.
 
-**Writes:** TimescaleDB `alerts`, `users`, `user_workspaces`.
+| Direction | Contract |
+| --- | --- |
+| Consumes | `alerts` — group `api` |
+| Reads Redis | live entity state; subscribes `position-updates`, `alert-events` |
+| Publishes Redis | `alert-events` |
+| Reads TimescaleDB | positions, alerts, users, workspaces |
+| Writes TimescaleDB | alerts, users, workspaces |
+| Reads Neo4j | relationship/proximity evidence for investigation |
+| Auth | Google OAuth 2.0 ID-token verification + application JWT |
 
-**Reads:** Redis live entity state; TimescaleDB histories/alerts/workspaces; Neo4j relationship evidence for investigation.
+**Alert consume ordering:**
 
-**Pub/sub:** subscribes to `position-updates` and `alert-events`; publishes `alert-events` after durable alert/lifecycle writes.
+1. Persist the alert transactionally/idempotently in TimescaleDB.
+2. Publish the resulting alert lifecycle event to Redis `alert-events`.
+3. Commit the Kafka offset.
 
-**Auth:** Google OAuth ID-token verification + application JWT.
+If the process crashes after the DB write but before offset commit, replay is safe. Redis/WebSocket events may be observed more than once; clients deduplicate.
 
-### Alert consume ordering
+**Composite supersession:** insertion of a COMPOSITE and supersession of every referenced active individual alert occur in one DB transaction. Active means `NEW` or `ACKNOWLEDGED`; `RESOLVED` is terminal and is not later superseded.
 
-```text
-1. durable TimescaleDB write / transaction
-2. publish alert-events
-3. commit Kafka offset
-```
-
-If the process crashes before offset commit, Kafka may replay the alert. The durable insert remains idempotent and Redis/WebSocket delivery may repeat. Clients deduplicate alert delivery by `alert_id`.
-
-### Composite supersession
-
-When a COMPOSITE alert arrives, the API transaction:
-
-1. inserts the COMPOSITE idempotently;
-2. marks referenced active individual alert(s) `SUPERSEDED` and sets `superseded_by`;
-3. commits atomically;
-4. publishes lifecycle events to `alert-events`.
-
-`SUPERSEDED` is system-only and may replace an individual alert while it is `NEW` or `ACKNOWLEDGED`.
-
-### Operator lifecycle
-
-Operators may acknowledge and resolve alerts through the API. `RESOLVED` and `SUPERSEDED` are terminal states. A later recurrence creates a new deterministic alert identity for the new anomaly episode rather than reopening history.
+**Phase boundaries:** Phase 03 proves first-instance authenticated alert delivery. Workspace scoping arrives in Phase 07; multi-instance `alert-events` fan-out and full lifecycle transitions arrive in Phase 08. Final-state use-case diagrams may show the completed behavior.
 
 ---
 
-## Dashboard
+### Dashboard
 
-**Runtime:** Angular + Leaflet
+**Runtime:** Angular + Leaflet (ADR-009)
 
-The dashboard communicates only with the API. It renders live positions, alert feed, lifecycle state, workspace scope, and investigation data.
-
-Repeated WebSocket alert delivery is harmless because the client deduplicates by `alert_id`.
+The dashboard communicates only with the API. It renders live positions, alert feed, workspace-scoped data, and investigation evidence. WebSocket clients must tolerate duplicate alert lifecycle events and converge by `alert_id` plus status/version semantics.
 
 ---
 
 ## Kafka Topics
 
-| Topic | Producer | Consumer(s) | Purpose |
-|---|---|---|---|
-| `adsb.raw` | Ingestion Poller | Position Consumer | Raw ADS-B source records |
-| `ais.raw` | Ingestion Poller | Position Consumer | Raw AIS source records |
-| `adsb.dlq` | Position Consumer | Manual inspection | Unparseable ADS-B records |
-| `ais.dlq` | Position Consumer | Manual inspection | Unparseable AIS records |
+| Topic | Producer | Consumer | Purpose |
+| --- | --- | --- | --- |
+| `adsb.raw` | Ingestion Poller | Position Consumer | Raw ADS-B records |
+| `ais.raw` | Ingestion Poller | Position Consumer | Raw AIS records |
+| `adsb.dlq` | Position Consumer | Manual inspection | Rejected ADS-B records |
+| `ais.dlq` | Position Consumer | Manual inspection | Rejected AIS records |
 | `position.normalized` | Position Consumer | Correlation Worker, Deviation Detector | Canonical position facts |
-| `deviation.candidates` | Deviation Detector | Alert Evaluator | Stateless route classification facts |
-| `proximity.candidates` | Correlation Worker | Alert Evaluator | One unscheduled proximity fact per episode |
-| `alerts` | Alert Evaluator | API | Canonical anomaly alerts |
+| `deviation.candidates` | Deviation Detector | Alert Evaluator | Per-ping route classification |
+| `proximity.candidates` | Correlation Worker | Alert Evaluator | New unscheduled proximity episode |
+| `alerts` | Alert Evaluator | API | Deterministic logical alerts |
+
+Derived candidate topics have short retention because they are transient rule inputs, not the durable historical source of truth.
 
 ---
 
@@ -253,53 +205,95 @@ Repeated WebSocket alert delivery is harmless because the client deduplicates by
 ### TimescaleDB
 
 | Object | Writer | Readers |
-|---|---|---|
+| --- | --- | --- |
 | `position_history` | Position Consumer | Alert Evaluator, API |
-| `route_references` / `route_reference_points` | seed/load generator | Deviation Detector |
+| `route_references`, `route_reference_points` | Synthetic/manual seed | Deviation Detector |
 | `alerts` | API | API |
-| `users` | API | API |
-| `user_workspaces` | API | API |
+| `users`, `user_workspaces` | API | API |
 
-TimescaleDB partitions `position_history` by `observed_at` only. `geo_cell` is an indexed query column, not a partition/sharding dimension.
+TimescaleDB partitions `position_history` by `observed_at` only. `geo_cell` is an indexed query column, not a spatial partition/shard dimension.
 
 ### Neo4j
 
 | Object | Writer | Readers |
-|---|---|---|
+| --- | --- | --- |
 | `Entity` | Correlation Worker | API |
 | `PROXIMITY_EVENT` | Correlation Worker | API |
-| `KNOWN_ASSOCIATE` | manual/future import | Correlation Worker, API |
+| `KNOWN_ASSOCIATE` | Manual/future import | Correlation Worker, API |
+
+The Alert Evaluator does not read Neo4j in the current v1 contract.
 
 ### Redis
 
-| Key/channel | Writer | Reader |
-|---|---|---|
-| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API |
-| `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker |
-| `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker |
-| `alert-state:{entity_id}` | Alert Evaluator; deleted by Position Consumer on resume | Alert Evaluator |
-| `recent-loss:{entity_id}` | Position Consumer | Alert Evaluator |
-| `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator |
-| `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator |
-| `position-updates` | Position Consumer | API instances |
-| `alert-events` | API | API instances |
+| Key / Channel | Writer | Reader | Purpose |
+| --- | --- | --- | --- |
+| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Latest monotonic live state |
+| `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Live H3 sorted-set candidate index |
+| `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker | Encounter episode/retry state |
+| `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Active signal-loss/composite state |
+| `recent-loss:{entity_id}` | Position Consumer | Alert Evaluator | Bounded post-resume correlation state |
+| `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Sustained deviation episode state |
+| `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | Ownership-safe lease |
+| `position-updates` | Position Consumer | API instances | Live position pub/sub |
+| `alert-events` | API | API instances | Alert lifecycle fan-out |
 
 ---
 
-## Canonical Deterministic Alert IDs
+## Canonical Data Flow
 
 ```text
-SIGNAL_LOSS
-{entity_id}:SIGNAL_LOSS:{dark_since_ms}
+External feeds
+  → Ingestion Poller
+  → adsb.raw / ais.raw
+  → Position Consumer
+      → TimescaleDB position_history
+      → Redis entity:live + geo-cell sorted sets
+      → Redis position-updates
+      → position.normalized
+          ├→ Deviation Detector
+          │    → deviation.candidates
+          └→ Correlation Worker
+               → Redis live/H3 lookup
+               → Neo4j relationship evidence + KNOWN_ASSOCIATE check
+               → proximity.candidates (unscheduled pairs only)
 
-ROUTE_DEVIATION
-{entity_id}:ROUTE_DEVIATION:{episode_start_ms}
+Redis entity:live scan ─────────────────────────┐
+deviation.candidates ───────────────────────────┤
+proximity.candidates ───────────────────────────┤
+Redis alert-state / recent-loss / deviation-state ─→ Alert Evaluator
+                                                     → alerts
+                                                     → API
+                                                         → TimescaleDB alerts
+                                                         → Redis alert-events
+                                                         → REST/WebSocket
+                                                         → Angular dashboard
 
-UNSCHEDULED_PROXIMITY
-{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
-
-COMPOSITE
-{pair_key}:COMPOSITE:{dark_since_ms}
+API → Neo4j only for operator investigation/evidence reads.
 ```
 
-See ADR-007 and `DATA_MODEL.md` for the corresponding schema contracts.
+---
+
+## Delivery Guarantees
+
+| Boundary | Guarantee |
+| --- | --- |
+| Kafka consumption | At-least-once |
+| TimescaleDB position write | Idempotent / exactly-once effect |
+| Neo4j proximity evidence | Idempotent `MERGE` by episode identity |
+| Redis live state | Monotonic by source event time |
+| Alert durable persistence | Idempotent / exactly-once effect by deterministic `alert_id` |
+| WebSocket lifecycle delivery | At-least-once; client deduplication required |
+| Alert Evaluator leadership | Single active evaluator under normal lease ownership; durable idempotency remains the correctness backstop |
+
+---
+
+## ADR Index
+
+See `docs/adr/ADR-001` through `ADR-015`. In particular:
+
+- ADR-005 — Alert Evaluator leader election
+- ADR-006 — H3 geo-cell indexing strategy
+- ADR-007 — deterministic idempotency identities
+- ADR-010 — durable alert lifecycle store
+- ADR-014 — hybrid Alert Evaluator input model
+- ADR-015 — v1 deterministic reference routes

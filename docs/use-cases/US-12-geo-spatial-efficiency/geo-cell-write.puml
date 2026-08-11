@@ -1,5 +1,5 @@
 @startuml geo-cell-write
-title US-12: Geo-Cell Write - Historical index + live Redis spatial membership
+title US-12: Geo-Cell Write - Historical Index + Live Redis Spatial Membership
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,44 +9,44 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
+database "Redis\nentity:live:{id}" as LiveState
+database "Redis\ngeo-cell:{cell}\n(sorted set)" as GeoCell
 database "TimescaleDB\nposition_history" as TSDB
-database "Redis\nentity:live:{id}" as Live
-database "Redis\ngeo-cell:{cell}\n(sorted sets)" as GeoCell
+queue "Kafka\nposition.normalized" as Normalized
 
-Kafka -> Consumer : consume event\n{ entity_id, lat, lon, timestamp_ms }
-Consumer -> Consumer : compute history_geo_cell\nand live_geo_cell
+Kafka -> Consumer : consume raw event\n{ entity_id, lat, lon, timestamp_ms, ... }
+Consumer -> Consumer : normalize + compute\nhistory_geo_cell = H3(..., HISTORY_H3_RESOLUTION)\nlive_geo_cell = H3(..., LIVE_H3_RESOLUTION)
 
-Consumer -> Live : HGET last_seen_ms, live_geo_cell
-Live --> Consumer : previous timestamp + previous live cell
+Consumer -> LiveState : read stored last_seen_ms + live_geo_cell
+LiveState --> Consumer : previous state or nil
 
 alt incoming.timestamp_ms < stored.last_seen_ms
-  note over Consumer
-    Stale/out-of-order event.
-    Do not regress live hash or geo-cell membership.
-    Historical TimescaleDB insert remains independently idempotent.
-  end note
-else current/newer event
-  Consumer -> TSDB : INSERT position_history\ngeo_cell = history_geo_cell\nON CONFLICT DO NOTHING
-
-  alt previous live cell exists AND changed
-    Consumer -> GeoCell : ZREM geo-cell:{old_cell} entity_id
+  Consumer -> Consumer : stale/out-of-order event\ndo not regress Redis live state or geo-cell membership
+else event accepted for live state
+  alt previous live_geo_cell exists AND changed
+    Consumer -> GeoCell : ZREM geo-cell:{old_live_geo_cell} entity_id
   end
 
-  Consumer -> GeoCell : ZADD geo-cell:{live_geo_cell}\ntimestamp_ms entity_id
-  Consumer -> Live : HSET latest position + last_seen_ms\n+ live_geo_cell; refresh safety TTL
+  Consumer -> GeoCell : ZADD geo-cell:{new_live_geo_cell}\nscore=timestamp_ms member=entity_id
+  Consumer -> LiveState : HSET latest position + last_seen_ms + live_geo_cell\nrefresh 24h safety TTL
 end
 
+Consumer -> TSDB : INSERT position_history\n(entity_id, observed_at, timestamp_ms, geo_cell=history_geo_cell, ...)\nON CONFLICT (entity_id, observed_at) DO NOTHING
+
 note over TSDB
-  TimescaleDB partitions by observed_at only.
-  history_geo_cell is an indexed query column,
-  not a chunk/partition dimension.
+  Hypertable partitions by observed_at only.
+  geo_cell is an indexed column used to narrow rows
+  inside selected time chunks.
+  There is no TimescaleDB chunk per H3 cell.
 end note
 
+Consumer -> Normalized : publish accepted canonical event\n{ entity_id, timestamp_ms, history_geo_cell, live_geo_cell, ... }
+
 note over GeoCell
-  score = last_seen_ms
+  Sorted-set score is last_seen_ms.
   Correlation Worker uses ZRANGEBYSCORE
-  over nearby LIVE_H3_RESOLUTION cells,
-  then performs exact distance checks.
+  across the current cell + computed k-ring.
+  Stale members age out logically by score.
 end note
 
 @enduml

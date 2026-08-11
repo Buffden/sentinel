@@ -1,4 +1,4 @@
-# US-12: Efficient Geospatial Access
+# US-12: Efficient Regional Position Queries and Live Spatial Scoping
 
 **Actor:** System
 **Status:** Defined
@@ -7,19 +7,18 @@
 
 ## Story
 
-As the system, I want historical regional queries and live proximity candidate lookup to avoid unnecessary full scans as entity volume grows.
+As the system, I want historical regional queries and live proximity candidate lookup to avoid scanning irrelevant entities so that both investigation queries and proximity detection remain efficient as entity count grows.
 
 ---
 
 ## Acceptance Criteria
 
-- Historical region + time-window queries use TimescaleDB time chunk exclusion plus the `(geo_cell, observed_at DESC)` index.
-- `geo_cell` is explicitly treated as an indexed column, not a TimescaleDB partition/sharding dimension.
-- The API translates a requested historical region into `HISTORY_H3_RESOLUTION` cells before querying `position_history`.
-- Live proximity lookup uses Redis `geo-cell:*` sorted sets at `LIVE_H3_RESOLUTION` rather than scanning every live entity.
-- When an entity crosses a live H3 boundary, its old-cell membership is removed and its new-cell membership is added.
-- Stale/out-of-order events cannot regress Redis live state or spatial membership.
-- The Correlation Worker queries a computed k-ring of live cells and performs exact distance checks after candidate reduction.
+- `position_history` remains partitioned by `observed_at` only.
+- Historical regional queries translate geographic bounds to H3 cells at `HISTORY_H3_RESOLUTION` and filter using `(geo_cell, observed_at)`.
+- Query plans demonstrate time-chunk exclusion plus indexed geo-cell filtering within selected chunks.
+- Redis maintains a separate live H3 index using sorted sets `geo-cell:{live_geo_cell}` with score=`last_seen_ms`.
+- When an entity crosses a live H3 boundary, the Position Consumer removes it from the previous cell and adds it to the new cell.
+- Correlation Worker scans only the incoming cell plus the computed neighboring k-ring, filters stale members by score, then calculates exact distance.
 - `HISTORY_H3_RESOLUTION` and `LIVE_H3_RESOLUTION` can be tuned independently.
 
 ---
@@ -30,24 +29,29 @@ As the system, I want historical regional queries and live proximity candidate l
 
 ![Geo-Cell Write](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/geo-cell-write.svg)
 
-The Position Consumer computes historical and live H3 cells. Historical H3 is persisted as an indexed TimescaleDB column. Live H3 membership is maintained in Redis sorted sets under the same timestamp guard as the live entity hash.
+The Position Consumer computes `history_geo_cell` for TimescaleDB and `live_geo_cell` for Redis. The historical cell is an indexed column, while the live cell controls membership in the Redis sorted-set spatial index. Movement across a live cell boundary performs `ZREM` from the old set before `ZADD` to the current set.
 
 ### Regional Query
 
 ![Regional Query](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/regional-query.svg)
 
-A historical query maps the requested region to H3 cells, filters `position_history.geo_cell`, and combines that filter with an `observed_at` time range. TimescaleDB eliminates irrelevant time chunks; the composite index narrows rows within the selected chunks.
+The API translates the requested geographic region into H3 cells, then queries `position_history` using both cell IDs and an `observed_at` range. TimescaleDB prunes time chunks; the geo-cell index narrows rows inside those chunks.
 
-### Historical vs Live Spatial Indexing
+### Live Candidate Distribution
 
-![H3 Selectivity](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/hot-spot-distribution.svg)
+![Live Candidate Distribution](../../../diagrams/docs/use-cases/US-12-geo-spatial-efficiency/hot-spot-distribution.svg)
 
-H3 does not create separate TimescaleDB chunks. The historical H3 value is an indexed column inside time chunks. Spatial bucketing into separate keys happens in Redis for the live proximity candidate index.
+The live Redis index distributes currently tracked entities across H3 sorted sets. This is where geo-cell distribution reduces proximity candidate density. It does **not** create separate TimescaleDB chunks per H3 cell.
 
 ---
 
 ## Architectural Justification
 
-Justifies: [ADR-006 - H3 Spatial Indexing](../../adr/ADR-006-geo-cell-sharding-key.md)
+Justifies: [ADR-006 - H3 Geo-Cell Indexing Strategy](../../adr/ADR-006-geo-cell-sharding-key.md)
 
-Sentinel deliberately uses H3 in two different ways. TimescaleDB remains time-partitioned and uses H3 to improve historical query selectivity. Redis uses separate H3 sorted sets to reduce the live proximity search space from all entities to fresh entities in nearby cells. Exact distance remains the final proximity test.
+H3 serves two distinct purposes:
+
+- historical query filtering inside TimescaleDB time chunks;
+- live proximity candidate reduction in Redis.
+
+Keeping these responsibilities explicit prevents a common modeling error: treating `geo_cell` as though it were a TimescaleDB sharding dimension. Sentinel's hypertable is time-partitioned only.

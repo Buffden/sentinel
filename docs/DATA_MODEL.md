@@ -1,478 +1,350 @@
 # Data Model
 
-Canonical schemas for every store Sentinel uses. This is the reference for schema migrations and service implementation. All field names here are authoritative — use them consistently in code.
+Canonical schemas for Sentinel's persistent stores, Redis state, and Kafka contracts. Field names and identity rules here are authoritative for implementation.
+
+---
+
+## Global Time and Replay Rules
+
+- Source telemetry time is carried as `timestamp_ms`.
+- Episode anchors, replay guards, correlation windows, and deterministic identities use source event time.
+- Operational audit timestamps such as database `created_at` / `updated_at` may use processing time.
+- Kafka processing is at-least-once. Durable writes must therefore be idempotent.
+- Historical backfill uses a separate consumer group/mode and suppresses ephemeral live side effects.
 
 ---
 
 ## TimescaleDB
 
-TimescaleDB runs as a PostgreSQL extension (`timescale/timescaledb-ha`). It hosts hypertables and continuous aggregates for time-series data, and plain PostgreSQL tables for relational data that does not need time-based chunking.
+### `position_history` — hypertable
 
----
-
-### `position_history` (hypertable)
-
-Primary write target for every normalised position ping. Partitioned by TimescaleDB on `observed_at`. Chunk interval: **1 day**. Retention: **30 days**.
+Partitioned on `observed_at` only. Default chunk interval: 1 day. Default retention: 30 days.
 
 | Column | Type | Nullable | Description |
-|---|---|---|---|
-| `entity_id` | TEXT | No | Entity identifier — ICAO hex for aircraft, MMSI for vessels |
-| `entity_type` | TEXT | No | `aircraft` or `vessel` — synthetic entities are classified by what they represent (aircraft or vessel), not by their source |
-| `observed_at` | TIMESTAMPTZ | No | Canonical hypertable time column — `to_timestamp(timestamp_ms / 1000.0)` computed at ingest; TimescaleDB partitions on this column |
-| `timestamp_ms` | BIGINT | No | Unix ms from source telemetry; idempotency key component; preserved as source metadata |
-| `geo_cell` | TEXT | No | H3 cell ID at resolution 5 (~252 km² per cell); computed at ingest from lat/lon |
+| --- | --- | --- | --- |
+| `entity_id` | TEXT | No | ICAO hex, MMSI, or synthetic entity ID |
+| `entity_type` | TEXT | No | `aircraft` or `vessel` |
+| `observed_at` | TIMESTAMPTZ | No | `to_timestamp(timestamp_ms / 1000.0)`; hypertable time column |
+| `timestamp_ms` | BIGINT | No | Source event time in Unix ms |
+| `geo_cell` | TEXT | No | H3 cell at `HISTORY_H3_RESOLUTION`; indexed query column, not partition dimension |
 | `lat` | DOUBLE PRECISION | No | Decimal degrees |
 | `lon` | DOUBLE PRECISION | No | Decimal degrees |
-| `altitude` | REAL | Yes | Metres; NULL for vessels |
+| `altitude` | REAL | Yes | Metres; null for vessels |
 | `source` | TEXT | No | `adsb`, `ais`, or `synthetic` |
 
-**Constraints and indexes:**
-- Unique constraint on `(entity_id, observed_at)` — `ON CONFLICT DO NOTHING` makes every insert idempotent (ADR-007). TimescaleDB requires the partition column (`observed_at`) in every unique constraint on a hypertable. `timestamp_ms` is the logical idempotency key; `observed_at = to_timestamp(timestamp_ms / 1000.0)` is deterministically derived from it, so the constraint is equivalent in practice.
-- Index on `(entity_id, observed_at DESC)` — serves single-entity timeline queries
-- Index on `(geo_cell, observed_at DESC)` — serves regional time-window queries
+Constraints/indexes:
 
-**Design notes:**
-- `observed_at` is the TimescaleDB partition column. Sentinel uses TIMESTAMPTZ for clearer time semantics and convenient time-oriented querying — `to_timestamp(timestamp_ms / 1000.0)` computed at ingest. `timestamp_ms` is kept as source metadata and the idempotency key component.
-- `geo_cell` is a query index column, not a partition dimension. TimescaleDB partitions on time only (`observed_at`); geo_cell narrows queries within a chunk. See ADR-006.
-- `geo_cell` is computed by the position consumer using the H3 library before the insert. The database never derives it.
-- Daily chunks are chosen for the expected write rate (1–10 pings/s across hundreds to thousands of entities). Validate and tune during implementation if observed chunk sizes diverge significantly.
-- Retention is 30 days. Older data has no active query pattern in v1.
+- unique `(entity_id, observed_at)`; duplicates use `ON CONFLICT DO NOTHING`;
+- `(entity_id, observed_at DESC)`;
+- `(geo_cell, observed_at DESC)`.
 
----
+TimescaleDB does **not** create separate chunks by `geo_cell`. H3 narrows rows inside time chunks through the index.
 
-### `route_references` (plain table)
+### `route_references`
 
-Route header records for synthetic entities. Seeded from the synthetic generator at startup. Only synthetic entities have reference routes — real ADS-B and AIS entities do not have route deviation detection in v1. See ADR-015.
+| Column | Type | Nullable |
+| --- | --- | --- |
+| `route_id` | TEXT PK | No |
+| `entity_id` | TEXT | No |
+| `route_name` | TEXT | No |
+| `corridor_threshold_metres` | REAL | No |
+| `source` | TEXT | No |
+| `created_at` | TIMESTAMPTZ | No |
 
-| Column | Type | Nullable | Description |
-|---|---|---|---|
-| `route_id` | TEXT | No | Primary key — unique route identifier |
-| `entity_id` | TEXT | No | Synthetic entity identifier |
-| `route_name` | TEXT | No | Human-readable route label |
-| `corridor_threshold_metres` | REAL | No | Acceptable lateral deviation from the route before `OUT_OF_RANGE` is emitted |
-| `source` | TEXT | No | `synthetic` or `manual` |
-| `created_at` | TIMESTAMPTZ | No | Creation timestamp |
+Index `entity_id`.
 
-**Constraints and indexes:**
-- Primary key on `route_id`
-- Index on `entity_id` — Deviation Detector fetches the route for an entity by ID
+### `route_reference_points`
 
----
+| Column | Type | Nullable |
+| --- | --- | --- |
+| `route_id` | TEXT | No |
+| `sequence_no` | INTEGER | No |
+| `lat` | DOUBLE PRECISION | No |
+| `lon` | DOUBLE PRECISION | No |
 
-### `route_reference_points` (plain table)
+Primary key `(route_id, sequence_no)`. Adjacent points define route segments. Route deviation uses minimum point-to-segment distance.
 
-Ordered waypoints for each route. The Deviation Detector fetches all points for a route and computes the minimum perpendicular distance from the current position to each route segment (point[i] → point[i+1]).
+### `alerts`
 
-| Column | Type | Nullable | Description |
-|---|---|---|---|
-| `route_id` | TEXT | No | FK → `route_references.route_id` |
-| `sequence_no` | INTEGER | No | Waypoint order (0-based) — adjacent pairs define route segments |
-| `lat` | DOUBLE PRECISION | No | Waypoint latitude |
-| `lon` | DOUBLE PRECISION | No | Waypoint longitude |
-
-**Constraints and indexes:**
-- Primary key on `(route_id, sequence_no)`
-
-**Design notes:**
-- The Deviation Detector fetches the full waypoint list, then for each ping finds the nearest route **segment** (not nearest waypoint) by computing minimum perpendicular distance from the entity's position to each segment (point[i] → point[i+1]). If the perpendicular foot falls outside the segment, the distance is the minimum of the two endpoint distances.
-- Route deviation detection is **synthetic-only in v1**. Real entities produce no deviation alerts. This eliminates the 30-day cold-start problem of statistical baselines and gives deterministic, injectable anomalies for demos.
-- The `route_baseline` continuous aggregate originally planned here was dropped — averaging lat/lon per hour does not produce a meaningful route corridor.
-
----
-
-### `alerts` (plain table)
-
-Durable alert lifecycle state. Written by the API on Kafka consume. Not a hypertable — alert volume is low and does not warrant time-based chunking. See ADR-010.
+Plain PostgreSQL table on the TimescaleDB instance; not a hypertable.
 
 | Column | Type | Nullable | Description |
-|---|---|---|---|
-| `alert_id` | TEXT | No | Primary key — format: `{entity_id}:{alert_type}:{window_start_ms}` |
-| `entity_id` | TEXT | No | The entity the alert is about |
-| `counterparty_entity_id` | TEXT | Yes | The second entity for multi-entity alerts (`UNSCHEDULED_PROXIMITY`, `COMPOSITE`); NULL for single-entity alerts (`SIGNAL_LOSS`, `ROUTE_DEVIATION`) |
+| --- | --- | --- | --- |
+| `alert_id` | TEXT PK | No | Deterministic logical alert identity; rules below |
+| `entity_id` | TEXT | No | Primary entity |
+| `counterparty_entity_id` | TEXT | Yes | Second entity for proximity/composite alerts |
 | `entity_type` | TEXT | No | `aircraft` or `vessel` |
-| `alert_type` | TEXT | No | `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, or `COMPOSITE` |
-| `priority` | TEXT | No | `STANDARD` or `ELEVATED` (COMPOSITE alerts are always ELEVATED) |
-| `status` | TEXT | No | `NEW`, `ACKNOWLEDGED`, `RESOLVED`, or `SUPERSEDED`; defaults to `NEW` |
-| `superseded_by` | TEXT | Yes | FK → `alerts.alert_id`; set when a COMPOSITE alert supersedes this alert |
-| `payload` | JSONB | No | Type-specific fields (see Kafka alert schema below) |
-| `detected_at` | TIMESTAMPTZ | No | When the anomaly was first detected |
-| `updated_at` | TIMESTAMPTZ | No | Last status change timestamp |
-| `acknowledged_at` | TIMESTAMPTZ | Yes | When the alert was acknowledged; NULL until acknowledged |
-| `acknowledged_by` | UUID | Yes | FK → `users.user_id`; NULL until acknowledged |
-| `resolved_at` | TIMESTAMPTZ | Yes | When the alert was resolved; NULL until resolved |
-| `resolved_by` | UUID | Yes | FK → `users.user_id`; NULL until resolved |
+| `alert_type` | TEXT | No | `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, `COMPOSITE` |
+| `priority` | TEXT | No | `STANDARD` or `ELEVATED` |
+| `status` | TEXT | No | `NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED` |
+| `superseded_by` | TEXT | Yes | FK to composite `alert_id` when system-superseded |
+| `payload` | JSONB | No | Type-specific evidence |
+| `detected_at` | TIMESTAMPTZ | No | Persistence/detection processing timestamp |
+| `updated_at` | TIMESTAMPTZ | No | Last lifecycle update |
+| `acknowledged_at` | TIMESTAMPTZ | Yes | Operator acknowledgement time |
+| `acknowledged_by` | UUID | Yes | FK to user |
+| `resolved_at` | TIMESTAMPTZ | Yes | Resolution time |
+| `resolved_by` | UUID | Yes | FK to user |
 
-**Constraints and indexes:**
-- Primary key on `alert_id`
-- Index on `(entity_id, detected_at DESC)` — investigation panel queries (find alerts by primary entity)
-- Index on `(counterparty_entity_id, detected_at DESC)` — find multi-entity alerts involving a given counterparty
-- Index on `(status, detected_at DESC)` — operator alert feed filtered by status
-- Index on `(alert_type, detected_at DESC)` — alert type filter
+Canonical deterministic `alert_id` rules:
 
-**Design notes:**
-- `alert_id` is deterministic: derived from the Kafka alert event, so `ON CONFLICT DO NOTHING` makes Kafka replay fully idempotent.
-- `SUPERSEDED` status: a SIGNAL_LOSS or UNSCHEDULED_PROXIMITY alert may be superseded by a COMPOSITE alert after correlation. When the API inserts the COMPOSITE alert, it atomically marks the referenced individual alert(s) as `SUPERSEDED` and records the composite `alert_id` in `superseded_by`. The dashboard shows the COMPOSITE as the active incident; superseded alerts appear in the evidence/history view linked from the composite.
-- This table is the durable dedup layer (Kafka replay idempotency). It is distinct from `alert-state:{entity_id}` in Redis, which is the in-loop suppression layer.
+```text
+SIGNAL_LOSS
+{entity_id}:SIGNAL_LOSS:{dark_since_ms}
 
----
+ROUTE_DEVIATION
+{entity_id}:ROUTE_DEVIATION:{episode_start_ms}
 
-### `users` (plain table)
+UNSCHEDULED_PROXIMITY
+{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
 
-One row per authenticated operator. Written by the API on first Google OAuth login. See ADR-011.
+COMPOSITE
+{pair_key}:COMPOSITE:{dark_since_ms}
+```
 
-| Column | Type | Nullable | Description |
-|---|---|---|---|
-| `user_id` | UUID | No | Primary key; generated at insert |
-| `google_sub` | TEXT | No | Stable Google user ID from ID token `sub` claim; unique |
-| `email` | TEXT | No | From verified Google ID token |
-| `last_login_at` | TIMESTAMPTZ | No | Updated on every login |
-| `created_at` | TIMESTAMPTZ | No | Set once at first login |
+`pair_key = min(entity_a_id, entity_b_id):max(entity_a_id, entity_b_id)`.
 
----
+These type-specific identities avoid collisions between two simultaneous pair incidents involving the same primary entity.
 
-### `user_workspaces` (plain table)
+Lifecycle:
 
-One row per operator. Holds the operator's saved scope for server-side alert filtering and dashboard state restore. See ADR-012.
+- operator path: `NEW → ACKNOWLEDGED → RESOLVED`, with optional `NEW → RESOLVED`;
+- system composite replacement: `NEW → SUPERSEDED` or `ACKNOWLEDGED → SUPERSEDED`;
+- `RESOLVED` and `SUPERSEDED` are terminal;
+- a recurring anomaly creates a new deterministic episode/window identity rather than reopening a terminal row.
 
-| Column | Type | Nullable | Description |
-|---|---|---|---|
-| `user_id` | UUID | No | Primary key; FK → `users.user_id` |
-| `scope` | JSONB | No | See scope shape below |
-| `updated_at` | TIMESTAMPTZ | No | Updated on every scope change |
+When a COMPOSITE is persisted, the API atomically inserts it and marks referenced active individual alerts (`NEW` or `ACKNOWLEDGED`) `SUPERSEDED`. A resolved alert is not retroactively superseded.
 
-**Scope JSONB shape:**
+Indexes:
 
-| Field | Type | Description |
-|---|---|---|
-| `geo_region.name` | string | Named region (e.g. `France`) |
-| `geo_region.bounds` | object | `min_lat`, `max_lat`, `min_lon`, `max_lon` |
-| `entity_types` | string[] | `aircraft`, `vessel`, or both |
-| `alert_types` | string[] | Subset of `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, `COMPOSITE` — must use `UNSCHEDULED_PROXIMITY` (not `PROXIMITY`) to match the canonical `alert_type` enum |
+- `(entity_id, detected_at DESC)`;
+- `(counterparty_entity_id, detected_at DESC)`;
+- `(status, detected_at DESC)`;
+- `(alert_type, detected_at DESC)`.
+
+### `users`
+
+| Column | Type | Nullable |
+| --- | --- | --- |
+| `user_id` | UUID PK | No |
+| `google_sub` | TEXT UNIQUE | No |
+| `email` | TEXT | No |
+| `last_login_at` | TIMESTAMPTZ | No |
+| `created_at` | TIMESTAMPTZ | No |
+
+### `user_workspaces`
+
+| Column | Type | Nullable |
+| --- | --- | --- |
+| `user_id` | UUID PK/FK | No |
+| `scope` | JSONB | No |
+| `updated_at` | TIMESTAMPTZ | No |
+
+Canonical scope contains geographic bounds plus `entity_types` and `alert_types` filters.
 
 ---
 
 ## Neo4j
 
-Neo4j stores the entity relationship graph. All writes use `MERGE` on an idempotency key — replay safe. See ADR-003.
+### Node `Entity`
 
----
+Properties: `id` (unique), `type`, optional `name`.
 
-### Node: `Entity`
+### Edge `PROXIMITY_EVENT`
 
-One node per tracked entity. Created by the correlation worker on first encounter.
+One edge per proximity episode.
 
-| Property | Type | Description |
-|---|---|---|
-| `id` | String | Entity identifier — ICAO hex for aircraft, MMSI for vessels |
-| `type` | String | `aircraft` or `vessel` |
-| `name` | String | Callsign or vessel name; nullable |
+| Property | Description |
+| --- | --- |
+| `idempotency_key` | `{pair_key}:{episode_start_ms}` |
+| `episode_start_ms` | Source event time for encounter start |
+| `last_seen_ms` | Latest source event time confirming encounter |
+| `min_distance_metres` | Closest observed distance |
+| `lat`, `lon` | Midpoint at detection |
+| `distance_at_detection` | Distance at episode start |
 
-Unique index on `Entity.id`.
+Correlation Worker writes with `MERGE` on `idempotency_key`.
 
----
+### Edge `KNOWN_ASSOCIATE`
 
-### Edge: `PROXIMITY_EVENT`
+Represents a pre-existing expected relationship such as same fleet or scheduled pairing.
 
-Written by the correlation worker when a new proximity episode begins between two entities. One edge per episode — not one per ping. `MERGE` on `idempotency_key` — replay safe.
+The **Correlation Worker** checks this edge before publishing `proximity.candidates`. Known-associate encounters may be recorded as evidence, but they do not become unscheduled-proximity candidates.
 
-| Property | Type | Description |
-|---|---|---|
-| `idempotency_key` | String | `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}:{episode_start_ms}` — one edge per proximity episode; canonical pair ordering ensures (A,B) and (B,A) map to the same key |
-| `episode_start_ms` | Long | Unix ms when this proximity episode began |
-| `last_seen_ms` | Long | Unix ms of the most recent ping confirming proximity (updated during episode) |
-| `min_distance_metres` | Float | Closest approach distance observed during the episode (updated during episode) |
-| `lat` | Float | Latitude of the midpoint at episode start |
-| `lon` | Float | Longitude of the midpoint at episode start |
-| `distance_at_detection` | Float | Distance between the two entities at first detection |
+Properties include `established_at` and `relationship_type`. v1 seeds these manually; no runtime service creates them.
 
----
-
-### Edge: `KNOWN_ASSOCIATE`
-
-Marks a pre-existing, expected relationship between two entities (e.g. same fleet). The Correlation Worker checks for a `KNOWN_ASSOCIATE` edge before publishing `proximity.candidates`; known-associate proximity is recorded as relationship evidence but is not forwarded as an unscheduled-proximity candidate.
-
-| Property | Type | Description |
-|---|---|---|
-| `established_at` | Long | Unix ms when the relationship was recorded |
-| `relationship_type` | String | e.g. `same_fleet`, `scheduled_route_pair` |
-
-In v1, `KNOWN_ASSOCIATE` edges are seeded manually. No service creates them at runtime.
+The Alert Evaluator does not read Neo4j in the current v1 contract.
 
 ---
 
 ## Redis
 
-Redis holds high-frequency ephemeral state. All keys and their lifecycle are defined here. See ADR-004.
+### `entity:live:{entity_id}` — hash
 
----
+Fields: `lat`, `lon`, optional `altitude`, `entity_type`, `last_seen_ms`, `live_geo_cell`.
 
-### `entity:live:{entity_id}` (hash)
+- Writer: Position Consumer.
+- Readers: Alert Evaluator, Correlation Worker, API.
+- TTL: 24h safety net, deliberately longer than signal-loss timing.
+- Timestamp guard: stale/out-of-order telemetry cannot replace a newer `last_seen_ms` state.
 
-Current position and liveness state for each tracked entity.
+### `geo-cell:{h3_cell_id}` — sorted set
 
-| Field | Type | Description |
-|---|---|---|
-| `lat` | String (float) | Latest latitude |
-| `lon` | String (float) | Latest longitude |
-| `altitude` | String (float) | Latest altitude in metres; absent for vessels |
-| `entity_type` | String | `aircraft` or `vessel` |
-| `last_seen_ms` | String (int) | Unix ms of the last received ping from source telemetry |
-| `live_geo_cell` | String | Current H3 cell at `LIVE_H3_RESOLUTION` — used by the Position Consumer to `ZREM` the entity from its previous `geo-cell:*` sorted set when the entity moves cells |
+Member=`entity_id`, score=`last_seen_ms`.
 
-- **Writer:** Position consumer on every normalised ping
-- **Readers:** Alert evaluator (scheduled scan for signal loss detection), Correlation Worker (position fetch for H3-scoped proximity candidates), API (initial map load, investigation panel, scope geo-check)
-- **TTL:** 24h — safety-net only; prevents permanent ghost keys if an entity disappears before the evaluator detects it. The key must outlive `SIGNAL_LOSS_THRESHOLD_MS` or the evaluator's scan finds nothing to inspect. Dashboard cleanup is client-side via `last_seen_ms` comparison.
+Position Consumer update sequence:
 
----
+1. read previous `live_geo_cell` before replacing the live hash;
+2. if the cell changed, `ZREM geo-cell:{old_cell} {entity_id}`;
+3. `ZADD geo-cell:{new_cell} {last_seen_ms} {entity_id}`.
 
-### `geo-cell:{h3_cell_id}` (sorted set)
+Correlation Worker reads the incoming entity cell plus computed k-ring using `ZRANGEBYSCORE` with a freshness lower bound. No TTL is required; stale members age out logically by score.
 
-Spatial index for live proximity candidate scoping. One key per occupied H3 cell at `LIVE_H3_RESOLUTION`; value is a sorted set of `entity_id` members with score = `last_seen_ms`.
+### `alert-state:{entity_id}` — hash
 
-- **Writer:** Position consumer — on each normalised ping: `ZREM geo-cell:{old_geo_cell} {entity_id}` then `ZADD geo-cell:{new_geo_cell} {last_seen_ms} {entity_id}` (old cell retrieved from `live_geo_cell` field in `entity:live:{entity_id}` hash before it is overwritten)
-- **Reader:** Correlation Worker — `ZRANGEBYSCORE geo-cell:{cell} {(now - LIVE_PROXIMITY_MAX_AGE_MS)} +inf` for the entity's cell and all cells within the computed k-ring; returns only fresh members. After fetching positions from `entity:live:*`, rechecks `last_seen_ms` and skips any stale candidate.
-- **TTL:** None — stale members age out logically via the `ZRANGEBYSCORE` lower-bound score filter. Members from permanently disappeared entities are never returned.
+Fields:
 
-**Design notes:**
-- Using a sorted set (score = `last_seen_ms`) replaces the plain SET. A plain SET accumulates members from permanently disappeared entities with no way to age them out — entities that stop broadcasting never trigger a `ZREM`. The score filter makes staleness implicit without requiring explicit cleanup.
-- `LIVE_PROXIMITY_MAX_AGE_MS` is the freshness threshold for proximity candidate lookup — independent of `SIGNAL_LOSS_THRESHOLD_MS`. Tune during implementation based on expected ping frequency and acceptable detection latency.
-- The k-ring radius is computed from `PROXIMITY_THRESHOLD_METRES` and the H3 cell edge length at `LIVE_H3_RESOLUTION` — not hardcoded. Validate the required radius during implementation.
+- `dark_since_ms`;
+- `signal_loss_alert_id`;
+- `composite_issued` (`0|1`).
 
----
+Writer/reader: Alert Evaluator only. No TTL. Position Consumer deletes it when the entity resumes, after writing `recent-loss`.
 
-### `alert-state:{entity_id}` (hash)
+### `recent-loss:{entity_id}` — hash
 
-In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a signal loss alert on every evaluation cycle while an entity remains dark. Also carries the `alert_id` of the emitted signal loss alert for use in composite supersession.
+Fields: `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`.
 
-| Field | Type | Description |
-|---|---|---|
-| `dark_since_ms` | String (int) | Unix ms of the entity's last received ping — copied from `entity:live:{entity_id}.last_seen_ms` at detection time; anchors the composite correlation window in source event time |
-| `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this dark episode |
-| `composite_issued` | String (`0` or `1`) | Whether a COMPOSITE alert has been issued for this signal-loss episode — prevents issuing a second COMPOSITE if a subsequent proximity event arrives for the same episode |
+- Writer: Position Consumer on first accepted resume position.
+- Reader/consumer: Alert Evaluator.
+- TTL: `COMPOSITE_CORRELATION_WINDOW_MS`.
 
-- **Writer:** Alert evaluator on first signal loss emission; sets `composite_issued=1` when a COMPOSITE is issued
-- **Reader:** Alert evaluator only (signal-loss suppression plus active-dark composite correlation/idempotency when `proximity.candidates` arrives)
-- **TTL:** None — key lives indefinitely
-- **Deleted by:** Position consumer — before deleting, writes `recent-loss:{entity_id}` (see below) so the correlation window survives the entity coming back online; then DEL this key
+A qualifying composite consumes/deletes the key.
 
----
+### `deviation-state:{entity_id}` — hash
 
-### `recent-loss:{entity_id}` (hash)
+Fields: `count`, `episode_start_ms`, `last_processed_ms`, `alert_emitted`.
 
-Short-lived record of a recently resolved signal loss episode. Written by the Position Consumer when an entity resumes broadcasting, so that a subsequent proximity event arriving after the entity comes back online can still trigger a COMPOSITE alert within the correlation window.
+Writer/reader: Alert Evaluator. Safety TTL `DEVIATION_STATE_TTL_MS`; explicit delete on `IN_RANGE`.
 
-| Field | Type | Description |
-|---|---|---|
-| `dark_since_ms` | String (int) | Unix ms when the dark episode began |
-| `resumed_at_ms` | String (int) | Unix ms when the entity first resumed broadcasting |
-| `signal_loss_alert_id` | String | The `alert_id` of the SIGNAL_LOSS alert emitted for this episode |
+### `proximity-episode:{pair_key}` — hash
 
-- **Writer:** Position consumer — written atomically before deleting `alert-state:{entity_id}` when the entity resumes
-- **Reader:** Alert Evaluator — checked when a `proximity.candidates` event arrives; if present and proximity `episode_start_ms` falls within the correlation window of `resumed_at_ms`, emit COMPOSITE and supersede the referenced SIGNAL_LOSS alert
-- **Consumed by:** Alert Evaluator — DELs this key after successfully emitting a COMPOSITE, consuming the correlation opportunity; subsequent proximity events for the same entity find no `recent-loss` and produce UNSCHEDULED_PROXIMITY as independent incidents
-- **TTL:** `COMPOSITE_CORRELATION_WINDOW_MS` — expires automatically if no qualifying proximity arrives; after expiry the opportunity is gone and proximity produces UNSCHEDULED_PROXIMITY only
+Fields: `episode_start_ms`, `last_seen_ms`, optional `candidate_published`.
 
----
+Writer/reader: Correlation Worker. TTL `PROXIMITY_EPISODE_GAP_MS`.
 
-### `deviation-state:{entity_id}` (hash)
+- unscheduled pair: `candidate_published=0` before Kafka publish and `1` after success;
+- known associate: field omitted because no candidate is ever published.
 
-Route deviation episode state for sustained deviation detection (US-04). Owns all episode state on behalf of the stateless Deviation Detector.
+### `alert-evaluator:leader` — string
 
-| Field | Type | Description |
-|---|---|---|
-| `count` | String (int) | Consecutive `OUT_OF_RANGE` ping count in the current episode |
-| `episode_start_ms` | String (int) | Unix ms when the current deviation episode began (first OUT_OF_RANGE ping) |
-| `last_processed_ms` | String (int) | Unix ms of the last `deviation.candidates` event processed — replay guard |
-| `alert_emitted` | String (`0` or `1`) | Whether an alert has been emitted for the current episode — prevents re-emission on subsequent pings |
+Value=`instance_id`.
 
-- **Writer:** Alert evaluator — on `OUT_OF_RANGE`: guard `timestamp_ms > last_processed_ms`; `HINCRBY count 1`; set `episode_start_ms` on count==1; set `alert_emitted=1` after emitting; update `last_processed_ms`; on `IN_RANGE`: DEL
-- **Reader:** Alert evaluator only
-- **TTL:** Safety TTL of `DEVIATION_STATE_TTL_MS` (default: 24h) — prevents abandoned state if the entity goes dark or the Deviation Detector stops publishing; decoupled from signal-loss timing so deviation state survives brief gaps; the evaluator also deletes explicitly on `IN_RANGE`
+Acquire: `SET NX PX`. Renewal/release must compare current ownership before `PEXPIRE` / `DEL`.
 
-**Design notes:**
-- The Deviation Detector is stateless — it emits `OUT_OF_RANGE` or `IN_RANGE` on **every** eligible ping, not just on transitions. `BACK_IN_RANGE` does not exist; the Detector simply classifies each ping. Episode state lives entirely here.
-- `last_processed_ms` is the replay guard: if a `deviation.candidates` event arrives with `timestamp_ms <= last_processed_ms`, it is ignored. This prevents out-of-order or replayed events from resetting or double-incrementing the counter.
-- `alert_emitted` prevents re-emission: once the threshold is crossed and an alert is emitted, subsequent `OUT_OF_RANGE` pings increment `count` but do not re-emit until the episode resets via `IN_RANGE`.
+### `position-updates` — pub/sub
 
----
+Publisher: Position Consumer. Subscribers: API instances.
 
-### `proximity-episode:{pair_key}` (hash)
+### `alert-events` — pub/sub
 
-Active proximity episode state for a specific entity pair. Defines an encounter episode — a continuous period during which two entities remain within threshold of each other. Prevents the Correlation Worker from publishing repeated `proximity.candidates` events for one sustained encounter.
+Publisher: API. Subscribers: all API instances.
 
-| Field | Type | Description |
-|---|---|---|
-| `episode_start_ms` | String (int) | Unix ms when this encounter episode began |
-| `last_seen_ms` | String (int) | Unix ms of the most recent position ping that confirmed proximity |
-| `candidate_published` | String (`0` or `1`) | Whether a `proximity.candidates` event has been successfully published for this episode — set to `0` immediately after creating the hash (before Kafka publish), updated to `1` after successful publish; if `0` on next ping, triggers a re-publish retry |
-
-- **Canonical pair key:** `{min(entity_a_id, entity_b_id)}:{max(entity_a_id, entity_b_id)}` — alphabetically ordered; symmetric regardless of which entity triggered detection
-- **Writer:** Correlation Worker — created on first proximity detection for any pair (including KNOWN_ASSOCIATE pairs); `last_seen_ms` updated on each subsequent ping within the episode
-- **Reader:** Correlation Worker — checked on every proximity detection; if episode exists, refresh TTL and update `last_seen_ms` only; for unscheduled pairs, also check `candidate_published` (0 = retry Kafka publish; 1 = skip)
-- **TTL:** `PROXIMITY_EPISODE_GAP_MS` — refreshed on each within-threshold detection; when it expires the pair is treated as a new episode on the next detection
-
-**Design notes:**
-- One episode per continuous encounter, regardless of associate status. KNOWN_ASSOCIATE pairs also get a `proximity-episode` hash so the Correlation Worker avoids redundant Neo4j writes on every ping. The difference: KNOWN_ASSOCIATE episodes never publish to `proximity.candidates` and never set `candidate_published`.
-- Without this key, every `position.normalized` ping from either entity while they are within threshold triggers another `proximity.candidates` event (for unscheduled pairs) or another Neo4j MERGE (for known associates), producing redundant work per ping.
-- The canonical pair ordering (`min:max`) ensures (A,B) and (B,A) map to the same key regardless of which entity's ping arrived first.
-- The `candidate_published` field makes Kafka publish recoverable (unscheduled pairs only): if the Correlation Worker writes to Neo4j but crashes before Kafka publish succeeds, the next ping for the pair finds `candidate_published=0` and retries the publish.
-- Write order for unscheduled pairs: Neo4j MERGE first → set `candidate_published=0` → Kafka publish → set `candidate_published=1`.
-- If the TTL expires and the pair later comes close again, that is a distinct episode with a new `episode_start_ms`. The new episode produces a new Neo4j edge and (for unscheduled pairs) a new `proximity.candidates` event.
-- Neo4j idempotency key for the edge: `{pair_key}:{episode_start_ms}` — one edge per episode, not one per ping.
-
----
-
-### `alert-evaluator:leader` (string)
-
-Leader election lease key. Held by the active alert evaluator instance. See ADR-005.
-
-| Value | Description |
-|---|---|
-| `{instance_id}` | Unique identifier of the holding instance |
-
-- **Pattern:** SET NX PX — atomic acquire with TTL; renewed on each heartbeat
-- **Expires:** Automatically if the leader crashes; follower acquires on next poll
-
----
-
-### `position-updates` (pub/sub channel)
-
-Broadcast channel for live position events. Every normalised ping is published here after the Redis hash write.
-
-- **Publisher:** Position consumer
-- **Subscribers:** All API instances — fan out to scoped WebSocket connections
-
-**Message fields:** `entity_id`, `entity_type`, `lat`, `lon`, `altitude`, `last_seen_ms`
-
----
-
-### `alert-events` (pub/sub channel)
-
-Broadcast channel for alert lifecycle events. Published by the API instance that consumed the alert from Kafka or processed a status change, after writing to TimescaleDB. All API instances subscribe and fan out to scope-matched WebSocket connections.
-
-- **Publisher:** API (the instance that wrote to TimescaleDB)
-- **Subscribers:** All API instances — fan out to scope-matched WebSocket connections
-
-**Why this exists:** The `alerts` Kafka topic is consumed by consumer group `api`, so Kafka assigns each alert to exactly one API instance. WebSocket connections are local to each instance. Without this channel, users connected to non-consuming instances would never receive alert pushes. This mirrors the `position-updates` pattern. Status changes (acknowledge, resolve, supersede) must also fan out via this channel so all instances update their WebSocket clients.
-
-**Message envelope:**
+Canonical envelope:
 
 ```json
 {
   "type": "ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED",
-  "payload": { ... full alert fields ... }
+  "payload": {}
 }
 ```
 
-- `ALERT_CREATED`: new alert consumed from Kafka and written to TimescaleDB
-- `ALERT_STATUS_CHANGED`: operator acknowledged or resolved an alert
-- `ALERT_SUPERSEDED`: a COMPOSITE alert was created; the superseded SIGNAL_LOSS or UNSCHEDULED_PROXIMITY alert is marked SUPERSEDED
-
-**Message fields in `payload`:** `alert_id`, `entity_id`, `entity_type`, `alert_type`, `priority`, `status`, `detected_at_ms`, `payload`
+Redis pub/sub and WebSocket delivery are at-least-once from the client's perspective; duplicate lifecycle messages are allowed and must be safe.
 
 ---
 
 ## Kafka Event Schemas
 
-TypeScript field definitions for these schemas live in a shared internal package imported by the ingestion poller, position consumer, correlation worker, deviation detector, alert evaluator, and API. See ADR-013.
-
-**Event-time invariant:** All `timestamp_ms` values in these schemas are source event times — the timestamp from the originating telemetry or synthetic feed. Processing time (when the event was consumed or written) is never used as an episode/window anchor. `alert_id` generation, episode start times, replay guards, and correlation windows all derive from `timestamp_ms`, not from wall clock at consumption time. This makes all processing replay-safe: reprocessing a Kafka event with the same source timestamp produces the same logical outcome.
-
----
-
 ### `adsb.raw` / `ais.raw`
 
-Raw bytes from the source feed, unparsed. No schema constraint imposed by Sentinel — format fidelity only. The position consumer owns parsing.
-
----
+Provider-fidelity records. Position Consumer owns parsing/normalization.
 
 ### `position.normalized`
 
-Published by the position consumer. Consumed by the correlation worker and deviation detector.
+| Field | Type |
+| --- | --- |
+| `entity_id` | string |
+| `entity_type` | string |
+| `timestamp_ms` | number |
+| `lat` | number |
+| `lon` | number |
+| `altitude` | number \| null |
+| `source` | string |
+| `history_geo_cell` | string |
+| `live_geo_cell` | string |
 
-| Field | Type | Description |
-|---|---|---|
-| `entity_id` | string | ICAO hex or MMSI |
-| `entity_type` | string | `aircraft` or `vessel` |
-| `timestamp_ms` | number | Unix ms from source telemetry — idempotency key component |
-| `lat` | number | Decimal degrees |
-| `lon` | number | Decimal degrees |
-| `altitude` | number \| null | Metres; null for vessels |
-| `source` | string | `adsb`, `ais`, or `synthetic` |
-| `history_geo_cell` | string | H3 cell ID at `HISTORY_H3_RESOLUTION` — written to the `geo_cell` column in `position_history` (TimescaleDB) |
-| `live_geo_cell` | string | H3 cell ID at `LIVE_H3_RESOLUTION` — used as the `geo-cell:*` sorted set key suffix in Redis; may differ from `history_geo_cell` if the two resolutions are configured differently (see ADR-006) |
-
----
+Published by Position Consumer; consumed by Correlation Worker and Deviation Detector.
 
 ### `deviation.candidates`
 
-Published by the deviation detector. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; durable facts remain in `position_history` and `reference_routes`). See ADR-014.
+Published on every eligible synthetic-entity ping by the stateless Deviation Detector.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `entity_id` | string | ICAO hex or MMSI |
-| `timestamp_ms` | number | Unix ms of the position ping |
-| `status` | string | `OUT_OF_RANGE` or `IN_RANGE` — emitted on **every** eligible ping, not just transitions; the Detector is stateless |
-| `current_position` | object | `{ lat, lon }` — position at time of event |
-| `nearest_segment_index` | number | Index `i` of the first waypoint of the nearest route segment (segment from `route_reference_points[i]` to `route_reference_points[i+1]`); omitted on `IN_RANGE` |
-| `deviation_metres` | number | Minimum perpendicular distance from the current position to the nearest route segment; omitted on `IN_RANGE` |
-
-**Design notes:**
-- `BACK_IN_RANGE` is replaced by `IN_RANGE`. The Detector no longer tracks transition state — it classifies every ping independently. The Alert Evaluator owns episode state via `deviation-state:{entity_id}`.
-- `baseline_position` is removed — route deviation now compares against `route_reference_points` segments using minimum perpendicular distance (point-to-segment), not a lat/lon average. The nearest segment index is included so the evaluator can log which segment of the route was deviated from.
-
----
+Fields: `entity_id`, `timestamp_ms`, `status` (`OUT_OF_RANGE|IN_RANGE`), `current_position`, optional `nearest_segment_index`, optional `deviation_metres`.
 
 ### `proximity.candidates`
 
-Published by the correlation worker when a **new** proximity episode begins between an unscheduled pair (no `KNOWN_ASSOCIATE` edge). One event per episode — not one per ping. Consumed by the alert evaluator. Retention: **1 hour** (short — stale candidates have no value; the durable edge remains in Neo4j). See ADR-014.
+Published once per **new unscheduled** proximity episode. Known associates are already filtered upstream.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `pair_key` | string | `{min(a,b)}:{max(a,b)}` — canonical pair ordering |
-| `entity_a_id` | string | Lexicographically smaller entity identifier |
-| `entity_b_id` | string | Lexicographically larger entity identifier |
-| `episode_start_ms` | number | Unix ms when this proximity episode began |
-| `lat` | number | Latitude of the midpoint at first detection |
-| `lon` | number | Longitude of the midpoint |
-| `distance_at_detection` | number | Distance between the two entities at first detection |
+Fields:
 
----
+- `pair_key`;
+- `entity_a_id` (lexicographically smaller);
+- `entity_b_id`;
+- `episode_start_ms`;
+- `lat`, `lon` midpoint;
+- `distance_at_detection`.
+
+This event already contains everything required to trigger proximity/composite evaluation; the Alert Evaluator does not perform a second Neo4j known-associate check.
 
 ### `alerts`
 
-Published by the alert evaluator. Consumed by the API.
+Published by Alert Evaluator; consumed by API.
 
-| Field | Type | Description |
-|---|---|---|
-| `alert_id` | string | `{entity_id}:{alert_type}:{window_start_ms}` |
-| `entity_id` | string | |
-| `entity_type` | string | `aircraft` or `vessel` |
-| `alert_type` | string | `SIGNAL_LOSS`, `ROUTE_DEVIATION`, `UNSCHEDULED_PROXIMITY`, or `COMPOSITE` |
-| `priority` | string | `STANDARD` or `ELEVATED` |
-| `detected_at_ms` | number | Unix ms |
-| `payload` | object | Type-specific fields — see below |
+| Field | Type |
+| --- | --- |
+| `alert_id` | string |
+| `entity_id` | string |
+| `counterparty_entity_id` | string \| null |
+| `entity_type` | string |
+| `alert_type` | string |
+| `priority` | string |
+| `detected_at_ms` | number |
+| `payload` | object |
 
-**Payload fields by alert type:**
+Payload evidence:
 
-| Alert type | Payload fields |
-|---|---|
-| `SIGNAL_LOSS` | `dark_since_ms`, `last_lat`, `last_lon` |
-| `ROUTE_DEVIATION` | `current_lat`, `current_lon`, `nearest_segment_index`, `deviation_metres`, `sustained_cycles` |
-| `UNSCHEDULED_PROXIMITY` | `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`, `episode_start_ms` |
-| `COMPOSITE` | `signal_loss` (nested — `dark_since_ms`, `last_lat`, `last_lon`), `proximity` (nested — `pair_key`, `entity_b_id`, `lat`, `lon`, `distance_at_detection`), `correlation_window_ms`, `supersedes_alert_ids` (array of alert_ids being superseded) |
-
----
+- SIGNAL_LOSS: `dark_since_ms`, last known location;
+- ROUTE_DEVIATION: route segment/deviation data and sustained count;
+- UNSCHEDULED_PROXIMITY: `pair_key`, counterparty, location, distance, `episode_start_ms`;
+- COMPOSITE: nested signal-loss + proximity evidence, correlation window, `supersedes_alert_ids`.
 
 ### `adsb.dlq` / `ais.dlq`
 
-Dead-letter queue for events the position consumer could not parse. See ADR-001.
+Fields: `raw_payload`, `rejection_reason`, `source_topic`, `source_offset`, `consumer_id`, operational `timestamp_ms`.
 
-| Field | Type | Description |
-|---|---|---|
-| `raw_payload` | string (base64) | Original unparseable bytes |
-| `rejection_reason` | string | Human-readable parse failure description |
-| `source_topic` | string | `adsb.raw` or `ais.raw` |
-| `source_offset` | number | Kafka partition offset of the original event |
-| `consumer_id` | string | Instance ID of the consuming process |
-| `timestamp_ms` | number | Unix ms when the event was routed to the DLQ |
+---
+
+## Canonical Idempotency Identities
+
+Do not use one universal key shape for every write. Use the identity of the logical fact being stored:
+
+| Fact | Identity |
+| --- | --- |
+| Position history | `(entity_id, observed_at)` derived from source `timestamp_ms` |
+| Redis live state | `entity_id` plus monotonic `last_seen_ms` guard |
+| Proximity episode / Neo4j evidence | `{pair_key}:{episode_start_ms}` |
+| Signal-loss alert | `{entity_id}:SIGNAL_LOSS:{dark_since_ms}` |
+| Route-deviation alert | `{entity_id}:ROUTE_DEVIATION:{episode_start_ms}` |
+| Unscheduled-proximity alert | `{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}` |
+| Composite alert | `{pair_key}:COMPOSITE:{dark_since_ms}` |
+
+These identities provide deterministic replay behavior without claiming exactly-once transport.

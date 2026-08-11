@@ -1,5 +1,5 @@
 @startuml hot-spot-distribution
-title US-12: H3 Selectivity - Historical index vs live candidate reduction
+title US-12: Live H3 Candidate Distribution - Redis Spatial Index
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,40 +8,43 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Position\nConsumer" as Consumer
-database "TimescaleDB\nTime Chunk\n(observed_at partition)" as TimeChunk
 database "Redis\ngeo-cell:A" as CellA
 database "Redis\ngeo-cell:B" as CellB
 database "Redis\ngeo-cell:C" as CellC
 participant "Correlation\nWorker" as Correlation
 
-Consumer -> Consumer : compute history_geo_cell\nand live_geo_cell
-Consumer -> TimeChunk : INSERT position_history\ngeo_cell = history_geo_cell
-
-note over TimeChunk
-  All rows for the same time interval can live
-  in the same TimescaleDB time chunk regardless of H3 cell.
-  geo_cell is indexed and narrows queries inside the chunk.
-  H3 does NOT distribute writes into separate TimescaleDB chunks.
+note over Consumer
+  Busy airspace or shipping lane.
+  Each accepted live position is mapped to
+  LIVE_H3_RESOLUTION independently from history indexing.
 end note
 
-Consumer -> CellA : ZADD nearby entity memberships
-Consumer -> CellB : ZADD nearby entity memberships
-Consumer -> CellC : ZADD nearby entity memberships
+Consumer -> CellA : ZADD score=last_seen_ms entity_A
+Consumer -> CellB : ZADD score=last_seen_ms entity_B
+Consumer -> CellC : ZADD score=last_seen_ms entity_C
 
 note over CellA, CellC
-  Live H3 cells are separate Redis sorted sets.
-  This is where spatial bucketing reduces
-  the candidate population for proximity detection.
+  These are Redis sorted sets, not TimescaleDB chunks.
+  Spatial distribution reduces the candidate population
+  that must be considered for exact proximity checks.
 end note
 
-Correlation -> CellA : query current + k-ring cells\nZRANGEBYSCORE fresh members
-Correlation -> CellB : query as required
-Correlation -> CellC : query as required
+Correlation -> CellB : ZRANGEBYSCORE current cell\n(now - freshness) +inf
+Correlation -> CellA : query neighboring k-ring cell
+Correlation -> CellC : query neighboring k-ring cell
+
+CellA --> Correlation : fresh candidate IDs
+CellB --> Correlation : fresh candidate IDs
+CellC --> Correlation : fresh candidate IDs
+
+Correlation -> Correlation : fetch live positions\nrecheck freshness\ncompute exact distance
 
 note over Correlation
-  H3 reduces candidates only.
-  Exact distance decides whether a pair
-  is actually within PROXIMITY_THRESHOLD_METRES.
+  k-ring radius is computed from
+  PROXIMITY_THRESHOLD_METRES and
+  LIVE_H3_RESOLUTION.
+  Exact distance remains the anomaly criterion;
+  H3 is only candidate reduction.
 end note
 
 @enduml

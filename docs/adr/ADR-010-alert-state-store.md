@@ -7,54 +7,36 @@
 
 ## Context
 
-Alert events are delivered through Kafka, but operators need durable lifecycle state that survives restarts and supports querying, acknowledgement, resolution, and composite supersession.
+Alert events are produced by the Alert Evaluator and consumed by the API. Operator workflow requires durable state beyond transient Kafka delivery or Redis detection-loop state.
 
-Requirements:
+Required lifecycle states:
 
-- durable states: `NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`;
-- query by status, entity, type, and time;
-- idempotent insertion under Kafka replay;
-- atomic composite insertion + weaker-alert supersession;
-- no separate database service for low alert volume.
+- `NEW`
+- `ACKNOWLEDGED`
+- `RESOLVED`
+- `SUPERSEDED`
+
+The state must survive restarts, support indexed queries, remain replay-safe, and allow composite correlation to replace active individual alerts atomically.
 
 ---
 
 ## Decision
 
-Store alert lifecycle state in a plain PostgreSQL table on the existing TimescaleDB instance.
+Store alert lifecycle state in a regular PostgreSQL table on the existing TimescaleDB instance.
 
-The API is the sole writer of durable alert records:
+The table is not a hypertable because alert volume is low relative to position telemetry and lifecycle access is relational rather than chunk-oriented.
 
-- consumes canonical alert events from Kafka;
-- inserts new alerts idempotently by deterministic `alert_id`;
-- processes operator lifecycle updates;
-- performs composite supersession transactionally;
-- broadcasts resulting lifecycle events through Redis `alert-events` for WebSocket fan-out.
+The API owns all durable alert writes:
 
-The table is not a hypertable because alert volume is low and lifecycle updates are relational/mutable rather than a high-rate append-only time series.
+- initial insert when consuming `alerts` from Kafka;
+- operator acknowledgement/resolution;
+- atomic composite insertion + active individual-alert supersession.
 
 ---
 
-## State Machine
+## Deterministic Alert Identity
 
-```text
-NEW → ACKNOWLEDGED → RESOLVED
- │          │
- └──────────┴────→ SUPERSEDED
-```
-
-- `NEW` and `ACKNOWLEDGED` are active states.
-- `RESOLVED` is an operator terminal state.
-- `SUPERSEDED` is a system-only terminal state used when a stronger COMPOSITE incident replaces an active individual alert.
-- A resolved alert is never reopened. A later anomaly episode creates a new deterministic `alert_id` and a new row.
-
----
-
-## Deterministic Identity
-
-Alert identity is defined per anomaly type in ADR-007 and `DATA_MODEL.md`.
-
-Examples:
+Use type-specific deterministic IDs:
 
 ```text
 SIGNAL_LOSS
@@ -70,67 +52,68 @@ COMPOSITE
 {pair_key}:COMPOSITE:{dark_since_ms}
 ```
 
-`alert_id` is the primary key, so replaying the same logical alert produces an `ON CONFLICT DO NOTHING` durable no-op.
+`pair_key = min(a,b):max(a,b)`.
+
+This prevents pair-alert collisions and makes Kafka replay converge on one durable row via `INSERT ... ON CONFLICT DO NOTHING`.
 
 ---
 
-## Composite Supersession
+## Lifecycle Rules
 
-When the API consumes a COMPOSITE alert, one database transaction:
+Operator transitions:
 
-1. inserts the COMPOSITE idempotently;
-2. updates each referenced individual alert that is still active (`NEW` or `ACKNOWLEDGED`) to `SUPERSEDED`;
-3. sets `superseded_by` to the composite `alert_id`;
-4. commits atomically.
+```text
+NEW → ACKNOWLEDGED → RESOLVED
+NEW → RESOLVED
+```
 
-After commit, the API publishes the appropriate `ALERT_CREATED` / `ALERT_SUPERSEDED` events to Redis pub/sub.
+System composite replacement:
 
-If a referenced alert is already `RESOLVED`, it remains resolved historical evidence rather than being rewritten.
+```text
+NEW → SUPERSEDED
+ACKNOWLEDGED → SUPERSEDED
+```
+
+`RESOLVED` and `SUPERSEDED` are terminal.
+
+A resolved alert is never reopened. A recurring anomaly creates a new episode/window identity and therefore a new alert row.
+
+When a COMPOSITE is consumed, the API performs one DB transaction:
+
+1. insert the COMPOSITE idempotently;
+2. update every referenced active individual alert (`NEW` or `ACKNOWLEDGED`) to `SUPERSEDED`;
+3. set `superseded_by = composite_alert_id`.
+
+A referenced alert that is already `RESOLVED` remains resolved.
 
 ---
 
 ## Delivery Semantics
 
-Kafka and Redis/WebSocket delivery are not exactly-once.
+Kafka processing is at-least-once. The alerts table provides an idempotent exactly-once **durable effect**, not exactly-once transport.
 
-The API consume order is:
+After the DB transaction, the API publishes lifecycle updates to Redis `alert-events` so every API instance can fan them out to local WebSocket clients.
 
-```text
-1. durable DB write / transaction
-2. Redis alert-events publish
-3. Kafka offset commit
-```
-
-A crash before step 3 can replay the same alert and republish a WebSocket event. The database remains duplicate-free because of deterministic identity; clients deduplicate repeated delivery by `alert_id`.
-
-This is at-least-once transport with idempotent durable effects.
+WebSocket lifecycle delivery is at-least-once. Duplicate lifecycle messages are allowed; clients converge by `alert_id` and current durable status/version semantics.
 
 ---
 
-## Alternatives Considered
+## Why TimescaleDB/PostgreSQL
 
-### Redis as the alert store (rejected)
+- durable across application/Redis restart;
+- indexed filtering by status/entity/type/time;
+- transactional composite supersession;
+- no additional infrastructure;
+- low alert write volume fits a plain PostgreSQL table.
 
-Redis is appropriate for ephemeral anomaly-loop state and pub/sub, but durable mutable alert history requires stronger relational querying and transaction semantics.
-
-### Dedicated PostgreSQL instance (rejected)
-
-Correct at larger scale/isolation requirements, but unnecessary for v1 alert volume when TimescaleDB already provides PostgreSQL tables and transactions.
-
-### Kafka-only state projection (rejected)
-
-Would require a separate projection/compaction/CQRS layer for current lifecycle state with no benefit at this scale.
-
-### Dedicated alert-state microservice (rejected)
-
-Adds a deployment/failure boundary without improving the current access pattern; operator lifecycle already belongs at the API boundary.
+Redis remains appropriate for ephemeral in-loop state such as `alert-state`, `recent-loss`, and `deviation-state`, but not for durable operator lifecycle history.
 
 ---
 
 ## Consequences
 
-- `alerts` is the source of truth for durable current lifecycle state.
-- Redis `alert-state:*`, `recent-loss:*`, and `deviation-state:*` remain separate ephemeral anomaly-evaluation state.
-- The API owns lifecycle transitions and composite supersession transactions.
-- WebSocket clients must tolerate repeated lifecycle delivery.
-- Tests must verify both replay-safe durable insertion and atomic supersession from active states.
+- API is the only writer of durable alert lifecycle state.
+- Alert Evaluator never reads lifecycle status to perform operator workflow.
+- Composite supersession is transactional.
+- Clients must tolerate duplicate lifecycle notifications.
+- Tests must cover replay after DB write/before Kafka offset commit and ACKNOWLEDGED → SUPERSEDED behavior.

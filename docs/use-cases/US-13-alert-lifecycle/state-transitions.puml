@@ -1,45 +1,49 @@
 @startuml state-transitions
-title US-13: Alert State Machine
+title US-13: Alert Lifecycle State Machine
 
 skinparam stateBorderColor #555555
 skinparam stateBackgroundColor #F8F8F8
 skinparam stateArrowColor #333333
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
 
-[*] --> NEW : alert persisted
+[*] --> NEW : API persists new alert
 
-NEW --> ACKNOWLEDGED : operator acknowledges
-ACKNOWLEDGED --> RESOLVED : operator resolves
-NEW --> RESOLVED : operator resolves directly
+NEW --> ACKNOWLEDGED : operator acknowledge
+NEW --> RESOLVED : operator resolve directly
+ACKNOWLEDGED --> RESOLVED : operator resolve
 
-NEW --> SUPERSEDED : system correlation\nstronger COMPOSITE replaces individual alert
-ACKNOWLEDGED --> SUPERSEDED : system correlation\nstronger COMPOSITE replaces individual alert
+NEW --> SUPERSEDED : system creates COMPOSITE\nand atomically supersedes active individual alert
+ACKNOWLEDGED --> SUPERSEDED : system creates COMPOSITE\nand atomically supersedes active individual alert
 
 RESOLVED --> [*]
 SUPERSEDED --> [*]
 
 note right of NEW
-  Initial durable state.
-  Replayed delivery does not create another row
-  because alert_id is deterministic.
+  Deterministic alert IDs:
+  SIGNAL_LOSS = entity + dark_since_ms
+  ROUTE_DEVIATION = entity + episode_start_ms
+  UNSCHEDULED_PROXIMITY = pair_key + episode_start_ms
+  COMPOSITE = pair_key + dark_since_ms
 end note
 
 note right of ACKNOWLEDGED
-  Operator handling state.
-  A later composite may still supersede it;
-  acknowledgement does not freeze correlation.
-end note
-
-note right of SUPERSEDED
-  System-only terminal state.
-  Used when a stronger COMPOSITE incident
-  replaces an active individual alert.
-  superseded_by points to the composite alert.
+  Operator acknowledgement does not prevent
+  later system correlation. If the individual
+  incident is upgraded to COMPOSITE while active,
+  ACKNOWLEDGED may transition to SUPERSEDED.
 end note
 
 note right of RESOLVED
-  Operator terminal state.
-  A recurrence creates a new alert_id;
-  the old row is never reopened or overwritten.
+  Terminal. Never reopened and never
+  retroactively superseded. A recurrence
+  creates a new alert identity and row.
+end note
+
+note right of SUPERSEDED
+  Terminal system-only state.
+  superseded_by references the COMPOSITE alert.
+  Operator PATCH cannot set this state directly.
 end note
 
 @enduml

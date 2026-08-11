@@ -7,9 +7,9 @@
 
 ## Context
 
-The correlation worker needs to track relationships between entities  - specifically, which entities have been in proximity to each other, when, and where. The alert evaluator then queries these relationships to detect composite anomalies (e.g. signal loss followed by proximity to a previously unrelated entity).
+Sentinel needs a durable graph of entity relationships and proximity evidence. The Correlation Worker must answer graph-oriented questions about a specific entity pair, especially whether a pre-existing `KNOWN_ASSOCIATE` relationship exists before treating proximity as anomalous.
 
-The core query is: "Given entity X, find all entities that have been within distance D of X during the last N hours, and return any that have no prior relationship with X."
+The API also needs relationship/proximity evidence for operator investigation.
 
 ---
 
@@ -17,38 +17,59 @@ The core query is: "Given entity X, find all entities that have been within dist
 
 Use Neo4j as the entity relationship graph store.
 
+Neo4j is owned operationally by the Correlation Worker for runtime relationship/evidence writes and by the API for investigation reads. The Alert Evaluator does not read Neo4j in the current v1 contract.
+
+---
+
+## Graph Model
+
+### `Entity`
+
+One node per tracked entity.
+
+### `PROXIMITY_EVENT`
+
+One edge per continuous proximity episode, keyed by:
+
+```text
+{min(a,b)}:{max(a,b)}:{episode_start_ms}
+```
+
+Episode properties include start time, latest confirmation time, minimum distance, detection location, and distance at detection.
+
+### `KNOWN_ASSOCIATE`
+
+Represents a pre-existing expected relationship such as same fleet or scheduled pairing.
+
+The Correlation Worker checks this relationship **before** publishing `proximity.candidates`. Known-associate proximity may remain as graph evidence, but it is not forwarded as an unscheduled-proximity candidate.
+
 ---
 
 ## Reasoning
 
-**Proximity queries are graph traversals, not table scans.** The question "who has been near whom" is naturally expressed as: find all nodes connected to node X by a PROXIMITY_EVENT edge within a time window. In a relational model, this requires a self-join on a proximity events table  - expensive as the entity count grows. In Neo4j, it's a single Cypher traversal starting from the entity node.
-
-**Relationship metadata is a first-class citizen.** Each PROXIMITY_EVENT edge can carry properties: timestamp, location, distance, duration. Querying "find all proximity events between entity A and entity B in the last 24 hours" is a direct edge property filter, not a join.
-
-**Variable-depth traversal.** If future requirements include "find all entities that are two hops away from a flagged entity" (e.g. entities that were near entities that were near a flagged vessel), Neo4j handles this natively. Relational models require recursive CTEs or application-level BFS.
-
-**Prior experience.** The existing RingNet project established Neo4j competency for graph-modeled fraud detection. This reuses that skill in a different access pattern (streaming proximity vs. static relationship queries).
+- Relationship metadata is first-class and naturally modeled on edges.
+- Pair-history and neighborhood investigation are direct Cypher traversals.
+- `MERGE` on deterministic episode identity provides replay-safe edge creation.
+- The graph remains useful for operator investigation without forcing the Alert Evaluator to depend on another database for final rule interpretation.
 
 ---
 
 ## Alternatives Considered
 
-### PostgreSQL with adjacency table (rejected)
-- Possible for simple "who was near whom" queries with a self-join
-- Variable-depth traversal requires recursive CTEs  - correct but slow and awkward
-- Relationship metadata (edge properties) must be stored in extra columns, losing the natural graph model
-- Does not scale gracefully as relationship density increases
+### PostgreSQL adjacency/proximity tables — rejected
 
-### Amazon Neptune / ArangoDB (rejected)
-- Neptune: managed graph database, but adds AWS dependency at a stage where local Docker Compose is the target environment
-- ArangoDB: multi-model (document + graph), but the graph query language (AQL) is less mature than Cypher and the community/tooling is smaller
+Possible for simple pair lookups, but less natural for relationship-centric investigation and future bounded traversals.
+
+### Neptune / ArangoDB — rejected
+
+Would add either cloud coupling or another less-familiar graph stack without improving the v1 access pattern.
 
 ---
 
 ## Consequences
 
-- Neo4j requires a separate Docker container and sufficient heap allocation (default JVM settings are too low for sustained load)
-- The Cypher query language must be used  - no ORM abstraction; queries are written explicitly
-- Neo4j's transaction model differs from RDBMS — idempotency on edge creation must be handled with MERGE, not INSERT (addressed in ADR-007)
-- `PROXIMITY_EVENT` edges represent proximity episodes, not individual pings. Idempotency key: `{min(a,b)}:{max(a,b)}:{episode_start_ms}` — one edge per episode. Edge properties are updated during the episode (`last_seen_ms`, `min_distance_metres`) without changing the idempotency key.
-- Pair canonicalization (`min(a,b):max(a,b)`) ensures (A,B) and (B,A) always produce the same key and the same edge.
+- Correlation Worker performs targeted `KNOWN_ASSOCIATE` reads and `PROXIMITY_EVENT`/Entity writes.
+- API performs relationship/proximity evidence reads for investigation.
+- Alert Evaluator consumes already-filtered `proximity.candidates`; it does not repeat the known-associate lookup.
+- Pair canonicalization is mandatory everywhere graph episode identity is used.
+- Neo4j failure can delay/block creation of new proximity facts, but should not independently disable signal-loss or route-deviation rules in the Alert Evaluator.

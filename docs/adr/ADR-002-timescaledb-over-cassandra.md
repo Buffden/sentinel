@@ -7,55 +7,56 @@
 
 ## Context
 
-Position history is the highest-volume write in the system. Every entity broadcasts a position ping every 0.5–10 seconds. Queries against this store are always of the form:
+Position history is Sentinel's highest-volume durable write. Primary queries are:
 
-- "Give me all positions for entity X in the last N hours"
-- "Give me all entities that were in geo-region R between time T1 and T2"
+- positions for one entity over a time range;
+- positions for entities inside a geographic region over a time range.
 
-The store needs to handle high ingest throughput, efficient time-range queries, and geo-spatial filtering.
+The store must support sustained ingest, time-window filtering, indexed regional filtering, and replay-safe duplicate handling without introducing unnecessary operational complexity.
 
 ---
 
 ## Decision
 
-Use TimescaleDB (PostgreSQL extension) as the position history store. The hypertable is partitioned by `observed_at TIMESTAMPTZ` (daily chunks). `geo_cell` is an indexed query column, not a partition dimension.
+Use TimescaleDB as the position-history store.
+
+`position_history` is a hypertable partitioned by `observed_at TIMESTAMPTZ` only, with a default one-day chunk interval. `geo_cell` is an indexed query column, not a partition/shard dimension.
 
 ---
 
 ## Reasoning
 
-**Query shape matches hypertable sharding.** TimescaleDB's hypertables partition data automatically by time. Within each time chunk, a `geo_cell` index narrows spatial queries — queries for "entities in region R during window T1–T2" use chunk exclusion on time and index scanning on geo_cell. `geo_cell` is an indexed column, not a partition dimension.
+**Time-window access matches hypertables.** TimescaleDB automatically partitions by time, allowing chunk exclusion for bounded historical queries.
 
-**SQL with geospatial extensions.** PostGIS integrates directly with TimescaleDB, giving full geospatial query capability (bounding-box filters, distance calculations) without a separate geo-indexing service.
+**Regional queries remain indexed.** Sentinel computes `history_geo_cell` in application code and stores it in `geo_cell`. Queries filter by both H3 cell IDs and `observed_at`, using time chunk exclusion plus the `(geo_cell, observed_at DESC)` index inside selected chunks.
 
-**`observed_at` as the partition column.** Sentinel partitions on `observed_at TIMESTAMPTZ` for clearer time semantics and convenient time-oriented querying. `observed_at` is computed at ingest as `to_timestamp(timestamp_ms / 1000.0)`. `timestamp_ms` is kept as source metadata and the idempotency key component. A pre-bucketed `time_bucket` column stored alongside the data would be redundant — TimescaleDB's `time_bucket()` function operates on `observed_at` at query time.
+**SQL and PostgreSQL tooling are sufficient.** The required access patterns fit SQL well and reuse familiar migration, inspection, backup, and query-planning tools.
 
-**Route deviation uses reference routes, not continuous aggregates.** The `route_baseline` continuous aggregate was originally planned here but dropped. Averaging lat/lon per entity per 1-hour bucket does not produce a meaningful route corridor — the average of A→B→C positions lands somewhere in the middle of the route. Statistical route modeling is deferred to future work. Route deviation in v1 uses a static `reference_routes` table seeded from the synthetic generator's known route definition, giving deterministic and injectable anomalies.
-
-**Operational familiarity.** PostgreSQL tooling (psql, pg_dump, standard JDBC/pgx drivers) is widely understood. Cassandra requires a separate mental model and operational runbook.
+**Route deviation does not need a statistical continuous aggregate.** The earlier `route_baseline` idea was rejected because averaging historical latitude/longitude does not describe a route corridor. v1 uses deterministic `route_references` and `route_reference_points` seeded for synthetic entities; see ADR-015.
 
 ---
 
 ## Alternatives Considered
 
-### Apache Cassandra (rejected)
-- Excellent write throughput at scale, but query flexibility is severely constrained by the partition key chosen at schema design time
-- Cassandra does not support arbitrary range scans efficiently  - every query pattern must be anticipated at schema time
-- No native geospatial support; geo-filtering would require application-level post-processing or a secondary index hack
-- Operational complexity (tuning compaction, repair, consistency levels) is high relative to the benefit at this scale
-- The right choice if write volume is in the tens of millions of events per second and geo-queries are not required  - not the case here
+### Cassandra — rejected
 
-### InfluxDB (rejected)
-- Purpose-built time-series, good write throughput
-- Limited relational query capability  - joining position history with entity metadata is awkward
-- No geospatial support without external tooling
-- Less control over sharding strategy compared to TimescaleDB hypertables
+Excellent high-scale writes but more rigid query-shape design and substantially more operational complexity than the portfolio-scale access pattern requires.
+
+### InfluxDB — rejected
+
+Strong time-series focus, but Sentinel benefits from PostgreSQL relational semantics and straightforward coexistence of plain relational tables such as alerts/users/workspaces.
+
+### TimescaleDB spatial partitioning by H3 — rejected for v1
+
+Sentinel deliberately uses time partitioning only. H3 is an indexed filter for historical queries and a separate Redis live-index strategy; see ADR-006.
 
 ---
 
 ## Consequences
 
-- TimescaleDB runs as a PostgreSQL extension  - Docker image is `timescale/timescaledb-ha`
-- Geo-cell is an indexed query column on `position_history` — not a partition dimension. The hypertable partitions on `observed_at` only. See ADR-006 for geo-cell design rationale.
-- `route_references` and `route_reference_points` tables replace the `route_baseline` continuous aggregate. Their schema is documented in DATA_MODEL.md and ADR-015. Seeded from the synthetic generator at startup.
-- `observed_at` and `timestamp_ms` are both stored. `observed_at` is the partition/query column; `timestamp_ms` is the idempotency key component and source fidelity record.
+- `observed_at` is the hypertable time/partition column.
+- `timestamp_ms` is retained as source event-time metadata.
+- duplicate position writes converge through unique `(entity_id, observed_at)` + `ON CONFLICT DO NOTHING`.
+- `geo_cell` is an ordinary indexed column inside time chunks.
+- `route_references` + `route_reference_points` are plain PostgreSQL tables on the same TimescaleDB instance.
+- query performance must be validated with `EXPLAIN ANALYZE` using realistic time ranges and H3 cell sets.

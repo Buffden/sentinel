@@ -7,51 +7,47 @@
 
 ## Story
 
-As an operator, I want to receive an alert when an entity stops broadcasting beyond a configurable threshold so that I can investigate a potential signal-loss event.
+As an operator, I want an alert when an entity has not broadcast within its configured liveness threshold so that I can investigate the loss of telemetry.
 
 ---
 
 ## Acceptance Criteria
 
-- Signal loss is detected from Redis `entity:live:*` using `last_seen_ms`, not Redis TTL expiry.
-- Thresholds are configurable by entity type.
-- One SIGNAL_LOSS alert is emitted per dark episode.
-- The alert includes deterministic identity, last known position, and dark-since time.
-- Alert persistence is replay-safe through deterministic `alert_id` + idempotent API insert.
-- A later entity resume clears the active `alert-state:*` only after the Position Consumer writes `recent-loss:*` for the composite correlation window.
+- Alert Evaluator scans Redis `entity:live:*` on a schedule and compares current time with `last_seen_ms`.
+- Signal-loss thresholds are configurable by entity type.
+- Redis key TTL is a 24h safety net and is deliberately longer than the signal-loss threshold; TTL expiry is not the detector.
+- A signal-loss episode emits one deterministic SIGNAL_LOSS logical alert keyed by `{entity_id}:SIGNAL_LOSS:{dark_since_ms}`.
+- `alert-state:{entity_id}` suppresses repeated emission while the entity remains dark.
+- Last-known position is read from TimescaleDB only for alert evidence/payload assembly.
+- When the entity resumes, the Position Consumer writes bounded `recent-loss:{entity_id}` state before deleting `alert-state` so Phase 06 composite correlation can still occur.
+- Durable alert persistence is idempotent under Kafka replay.
 
 ---
 
-## Detection
+## Flow Diagrams
+
+### Detection
 
 ![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-The leader Alert Evaluator periodically scans Redis live-state hashes and compares current time with `last_seen_ms`. A 24h Redis TTL is only a safety net; the key deliberately outlives the loss threshold so the evaluator can inspect it.
+Signal loss is an absence-of-events rule, so it remains a scheduled Redis scan rather than a Kafka-only detector.
 
----
-
-## Alert Delivery
+### Alert Delivery
 
 ![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
 
-The final v1 flow is Kafka `alerts` → API → durable TimescaleDB alert row → Redis `alert-events` → all API instances → scope-matched WebSockets.
+This diagram shows **final v1 delivery**. Phase 03 proves authenticated delivery through the API instance that consumes the alert. Workspace scoping is added in Phase 07 and multi-instance Redis `alert-events` fan-out is completed in Phase 08.
 
-**Roadmap boundary:** Phase 03 proves the first vertical slice with one API instance and authenticated delivery. Cross-instance Redis fan-out is completed in Phase 08, while saved workspace scope and server-side filtering are introduced in Phase 07. The final-state diagram must not be interpreted as a requirement to implement those later capabilities during Phase 03.
-
-Kafka/WebSocket transport can repeat after replay. The durable alert row is duplicate-free because `alert_id` is deterministic; clients deduplicate repeated delivery by `alert_id`.
-
----
-
-## Alert Suppression
+### Alert Suppression
 
 ![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
 
-After first emission, the evaluator writes `alert-state:{entity_id}` with `dark_since_ms`, `signal_loss_alert_id`, and `composite_issued=0`. Repeated scheduled scans skip re-emission for the same dark episode.
-
-When the entity resumes, the Position Consumer writes `recent-loss:{entity_id}` before deleting `alert-state:{entity_id}`. This preserves a short correlation opportunity if an unscheduled proximity episode arrives shortly after resume.
+`alert-state` is detection-loop state, separate from the durable `alerts` table. The Redis key prevents repeated rule emission; the database prevents duplicate durable rows under replay.
 
 ---
 
 ## Architectural Justification
 
-Signal-loss detection is an absence-of-events problem and therefore remains a scheduled Redis live-state scan (ADR-014). TimescaleDB is used only to retrieve the last-known historical position for the alert payload and to persist the resulting alert through the API.
+Justifies: [ADR-004 - Redis Live State](../../adr/ADR-004-redis-live-state.md), [ADR-005 - Leader Election](../../adr/ADR-005-leader-election-alert-evaluator.md), [ADR-010 - Alert State Store](../../adr/ADR-010-alert-state-store.md), [ADR-014 - Hybrid Input Model](../../adr/ADR-014-alert-evaluator-hybrid-input-model.md)
+
+Redis is the correct detector input because the rule asks whether the latest live timestamp is too old. TimescaleDB is not scanned to discover signal loss; it is consulted only when assembling historical evidence such as the last known position.

@@ -7,17 +7,36 @@
 
 ## Story
 
-As the system, I want every write to every store to be safe to repeat so that replaying Kafka events or restarting consumers never produces duplicate or inconsistent records.
+As the system, I want repeated processing of the same logical fact to converge on one durable result and never regress newer live state, so Kafka's at-least-once behavior remains safe.
 
 ---
 
 ## Acceptance Criteria
 
-- Writing the same position event to TimescaleDB twice produces exactly one row (`ON CONFLICT (entity_id, observed_at) DO NOTHING`)
-- Writing the same proximity episode to Neo4j twice produces exactly one edge (`MERGE` on `{pair_key}:{episode_start_ms}`)
-- Writing an older event to Redis after a newer one has been stored does NOT overwrite the newer state — the timestamp guard (`incoming.timestamp_ms > stored.last_seen_ms`) is checked before every `HSET entity:live:*` write
-- The TimescaleDB and Neo4j idempotency guarantees require no coordination between instances — enforced by the write operation itself
-- The Redis timestamp guard requires a read-before-write; use a Lua script if atomicity is required
+- Reprocessing one position fact produces one durable `position_history` row.
+- Reprocessing one proximity episode produces one Neo4j `PROXIMITY_EVENT` edge.
+- Reprocessing one logical alert produces one durable alert row.
+- Pair-based facts use canonical pair identity; they do not reuse a single-entity key shape.
+- Redis live state cannot be regressed by older source-event timestamps.
+- Equal-timestamp duplicate live writes are harmless.
+- Historical backfill does not accidentally republish old live side effects or alerts.
+- No claim is made that Kafka itself delivers exactly once.
+
+---
+
+## Canonical Identities
+
+| Logical fact | Identity / protection |
+| --- | --- |
+| Position history | `(entity_id, observed_at)` derived from source `timestamp_ms` |
+| Redis live state | `entity_id` + monotonic `last_seen_ms` guard |
+| Proximity episode | `{pair_key}:{episode_start_ms}` |
+| SIGNAL_LOSS | `{entity_id}:SIGNAL_LOSS:{dark_since_ms}` |
+| ROUTE_DEVIATION | `{entity_id}:ROUTE_DEVIATION:{episode_start_ms}` |
+| UNSCHEDULED_PROXIMITY | `{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}` |
+| COMPOSITE | `{pair_key}:COMPOSITE:{dark_since_ms}` |
+
+`pair_key = min(a,b):max(a,b)`.
 
 ---
 
@@ -27,18 +46,18 @@ As the system, I want every write to every store to be safe to repeat so that re
 
 ![Per-Store Idempotency](../../../diagrams/docs/use-cases/US-11-idempotent-writes/per-store-idempotency.svg)
 
-Shows how each store enforces idempotency using a different mechanism: `ON CONFLICT DO NOTHING` in TimescaleDB, `MERGE` on the idempotency key in Neo4j, and natural overwrite semantics via `HSET` in Redis.
+Each store uses the mechanism appropriate to the logical fact: SQL uniqueness/`ON CONFLICT`, Neo4j `MERGE`, or monotonic Redis source-time state.
 
 ### Duplicate Delivery
 
 ![Duplicate Delivery](../../../diagrams/docs/use-cases/US-11-idempotent-writes/duplicate-delivery.svg)
 
-End-to-end scenario where Kafka redelivers the same event twice after a consumer restart; the Position Consumer's writes to TimescaleDB and Redis are each a no-op on the second delivery, and the Correlation Worker applies the same guarantee for Neo4j - all without coordination between instances.
+Kafka may redeliver an event after a crash or rebalance. The repeated processing is safe because durable writes converge and live state refuses source-time regression.
 
 ---
 
 ## Architectural Justification
 
-Justifies: [ADR-007 - Idempotency Key Schema](../../adr/ADR-007-idempotency-key-schema.md)
+Justifies: [ADR-007 - Deterministic Idempotency Identity](../../adr/ADR-007-idempotency-key-schema.md)
 
-Kafka provides at-least-once delivery — every consumer must handle duplicate message delivery. The idempotency key `{entity_id}:{timestamp_ms}` is derived deterministically from the source event. This key is used in TimescaleDB via `ON CONFLICT (entity_id, observed_at) DO NOTHING` (the unique constraint must include the partition column `observed_at`, which is deterministically derived from `timestamp_ms`) and as a MERGE key in Neo4j. Redis live state is NOT unconditionally idempotent: `HSET` with an older value overwrites a newer one. A timestamp guard (`incoming.timestamp_ms > stored.last_seen_ms`) is required before every Redis live-state write to prevent out-of-order or replayed events from regressing the current position. Pair-based events (proximity) use a canonical pair key `{min(a,b)}:{max(a,b)}:{episode_start_ms}` for Neo4j idempotency.
+Idempotency is defined per logical fact, not by forcing every store to use one universal `{entity_id}:{timestamp_ms}` string. This matters for pair episodes and pair-based alerts, where the counterparty is part of the incident identity.

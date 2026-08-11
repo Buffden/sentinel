@@ -7,116 +7,96 @@
 
 ## Context
 
-The Alert Evaluator combines scheduled signal-loss scans with Kafka-driven deviation/proximity facts and owns shared anomaly episode state. Multiple simultaneously active evaluator instances could race on the same state and emit conflicting logical outcomes.
+The Alert Evaluator combines scheduled Redis scanning with Kafka-driven rule inputs and maintains stateful anomaly episodes. Running multiple fully active evaluators would create concurrent writers over the same rule state and could emit duplicate/conflicting logical alerts.
 
-Kafka consumer groups alone do not solve this because scheduled signal-loss work is not partition-assigned and composite state spans entities rather than one Kafka partition.
+Kafka consumer groups alone do not coordinate the scheduled signal-loss scan, so Sentinel needs one active evaluator at a time while retaining failover capacity.
 
 ---
 
 ## Decision
 
-Use a Redis lease so only one Alert Evaluator instance is active at a time.
+Use a Redis lease at `alert-evaluator:leader` so exactly one evaluator instance is the active rule evaluator under normal lease ownership.
 
-The lease key is:
+Followers remain alive but do not join/poll the `alert-evaluator` Kafka consumer group until they acquire the lease.
 
-```text
-alert-evaluator:leader
-```
+---
 
-with value = `instance_id`.
+## Lease Protocol
 
-Acquire with `SET NX PX`.
-
-Renew with an ownership-safe Lua compare-and-expire operation:
+### Acquire
 
 ```text
-if GET(key) == instance_id
-then PEXPIRE(key, LEADER_TTL_MS)
+SET alert-evaluator:leader {instance_id} NX PX {LEADER_TTL_MS}
 ```
 
-Release with compare-before-DEL.
+### Renew
+
+Renew only if the caller still owns the lease. Use an atomic compare-and-expire Lua script:
+
+```text
+if GET(key) == instance_id then
+  PEXPIRE(key, LEADER_TTL_MS)
+end
+```
+
+Do not use unconditional `SET XX PX` for renewal because a stale former leader could overwrite a new owner's value.
+
+### Release
+
+Delete only if the current value still matches the releasing instance. A slow shutdown must never delete another instance's newly acquired lease.
 
 ---
 
 ## Kafka Consumer Lifecycle
 
-Only the current lease holder joins and polls the `alert-evaluator` Kafka consumer group.
+Only the lease holder creates/joins the `alert-evaluator` consumer group.
 
-On lease acquisition:
+On acquisition:
 
-1. create/join the consumer;
+1. create Kafka consumer;
 2. subscribe to `deviation.candidates` and `proximity.candidates`;
-3. start polling;
-4. start/continue scheduled signal-loss evaluation.
+3. start polling/evaluation.
 
 On lease loss:
 
 1. stop accepting new evaluation work;
-2. pause/stop Kafka polling;
-3. finish or safely abandon in-flight work according to the implementation policy;
+2. stop/pause Kafka polling;
+3. finish or cancel in-flight work according to an explicit implementation policy;
 4. close/leave the consumer group;
-5. return to follower lease polling.
-
-Followers must not remain idle members of the Kafka group because that creates unnecessary rebalances and does not provide useful standby behavior.
+5. return to follower acquire loop.
 
 ---
 
 ## What Leader Election Guarantees
 
-Leader election provides a **single active evaluator** under normal lease operation. It prevents two healthy evaluator instances from intentionally processing the shared anomaly state concurrently.
+Leader election prevents **concurrent active Alert Evaluators** from independently mutating the same anomaly-rule state under normal operation.
 
-It does **not** create exactly-once transport.
+It does **not** create exactly-once Kafka transport and is not the sole duplicate-protection mechanism.
 
-Kafka may redeliver after crashes or offset replay, and lease edge cases can theoretically cause the same logical alert to be attempted more than once. Correctness therefore also relies on:
-
-- deterministic alert IDs (ADR-007);
-- Redis replay/episode guards;
-- idempotent API persistence (`alerts.alert_id` primary key).
-
-The system guarantee is duplicate-free **durable alert state for the same logical identity**, not exactly-once message delivery.
-
----
-
-## Why Ownership-Safe Renewal Matters
-
-`SET XX PX` is unsafe for renewal because it can overwrite a lease value after ownership has changed.
-
-Example:
-
-1. evaluator A's lease expires;
-2. evaluator B acquires the key;
-3. delayed evaluator A runs an unconditional `SET XX PX`;
-4. A overwrites B's value and effectively steals the lease.
-
-Comparing the stored value before `PEXPIRE` prevents this stale-owner renewal.
-
-The same reasoning applies to clean shutdown: a stale instance must not delete a lease now owned by another evaluator.
+The correctness backstop remains deterministic alert identity plus idempotent durable persistence in the API/TimescaleDB path. If a failover race or Kafka replay republishes the same logical alert, the database converges on one durable row.
 
 ---
 
 ## Alternatives Considered
 
-### Application-level check-then-act dedup (rejected)
+### Application-level check-then-set dedup only — rejected
 
-Two instances can both observe "not emitted" before either writes. This does not coordinate scheduled/shared rule evaluation.
+Without single-writer coordination, independent rule evaluations can race before a durable dedup boundary is reached.
 
-### Kafka consumer group only (rejected)
+### ZooKeeper/etcd — rejected
 
-Does not coordinate scheduled signal-loss scans and does not create one global owner for cross-entity rule state.
+Strong coordination primitives but unnecessary new infrastructure for this portfolio-scale single-service election problem.
 
-### ZooKeeper / etcd (rejected)
+### One evaluator instance with no election — rejected
 
-Provides stronger dedicated coordination primitives but adds infrastructure that is unnecessary for this single-service v1 coordination problem.
-
-### Single evaluator with no standby (rejected)
-
-Simpler, but creates an avoidable service availability gap on process failure.
+Simple but creates an avoidable availability gap when the evaluator process fails.
 
 ---
 
 ## Consequences
 
-- Redis availability is required for alert evaluation leadership.
-- Lease TTL/heartbeat cadence affects failover latency and must be validated experimentally.
-- Implementation tests must cover stale renewal, stale release, leader crash, follower takeover, and Kafka consumer handoff.
-- The API's deterministic durable dedup remains the final backstop if a logical alert is attempted more than once.
+- Redis failure disables evaluator leadership; acceptable because Redis is already a core live-state dependency.
+- Failover latency is bounded by lease TTL/poll timing.
+- Ownership-safe renewal/release must be tested under stale-leader scenarios.
+- Exactly one evaluator should normally be active, but durable alert idempotency must still be correct if duplicate logical publication occurs.
+- Production-hardening tests should include leader crash, stale-owner renewal attempt, clean shutdown, and replay around failover.

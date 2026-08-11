@@ -1,5 +1,5 @@
 @startuml signal-correlation
-title US-06: Signal Correlation - Qualified proximity fact + Redis loss state
+title US-06: Signal Correlation - Kafka Proximity Fact + Redis Loss State
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,44 +11,45 @@ queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nalert-state:{id}" as AlertState
 database "Redis\nrecent-loss:{id}" as RecentLoss
+queue "Kafka\nalerts" as Alerts
 
-note over Evaluator
-  proximity.candidates contains only unscheduled pairs.
-  Correlation Worker already performed exact-distance
-  detection and KNOWN_ASSOCIATE filtering.
-  No Neo4j lookup is required here.
+note over ProxKafka
+  Candidate already means:
+  - exact proximity confirmed
+  - new proximity episode
+  - KNOWN_ASSOCIATE filtered upstream
 end note
 
-ProxKafka -> Evaluator : consume proximity.candidates\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
+ProxKafka -> Evaluator : consume { pair_key, entity_a_id, entity_b_id,\n episode_start_ms, lat, lon, distance_at_detection }
 
 Evaluator -> AlertState : HGETALL alert-state:{entity_a_id}
 AlertState --> Evaluator : active loss state or nil
 Evaluator -> AlertState : HGETALL alert-state:{entity_b_id}
 AlertState --> Evaluator : active loss state or nil
 
-alt qualifying active signal loss exists AND composite_issued == 0
-  Evaluator -> Evaluator : verify episode_start_ms within\nCOMPOSITE_CORRELATION_WINDOW_MS\nof dark_since_ms
-  Evaluator -> AlertState : HSET composite_issued 1
-  Evaluator -> Evaluator : emit COMPOSITE\nwith supersedes_alert_ids
+alt qualifying active signal loss AND composite_issued == 0
+  Evaluator -> Evaluator : verify episode_start_ms within\nCOMPOSITE_CORRELATION_WINDOW_MS
+  Evaluator -> Alerts : publish deterministic COMPOSITE\nwith supersedes_alert_ids
+  Evaluator -> AlertState : HSET qualifying entity\ncomposite_issued = 1
 else no qualifying active loss
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_a_id}
   RecentLoss --> Evaluator : recent loss state or nil
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_b_id}
   RecentLoss --> Evaluator : recent loss state or nil
 
-  alt qualifying recent loss exists
-    Evaluator -> Evaluator : verify episode_start_ms within\nconfigured correlation window
-    Evaluator -> RecentLoss : DEL recent-loss:{entity_id}\nconsume correlation opportunity
-    Evaluator -> Evaluator : emit COMPOSITE\nwith supersedes_alert_ids
-  else no qualifying signal loss for either entity
-    Evaluator -> Evaluator : emit UNSCHEDULED_PROXIMITY
+  alt qualifying recent loss within bounded window
+    Evaluator -> Alerts : publish deterministic COMPOSITE\nwith supersedes_alert_ids
+    Evaluator -> RecentLoss : DEL consumed recent-loss:{entity_id}
+  else no qualifying signal loss
+    Evaluator -> Alerts : publish deterministic\nUNSCHEDULED_PROXIMITY
   end
 end
 
 note over Evaluator
-  SIGNAL_LOSS was emitted immediately when the entity went dark.
-  Composite correlation upgrades/supersedes that incident;
-  it does not delay initial signal-loss notification.
+  No Neo4j lookup here.
+  Relationship filtering is owned by Correlation Worker.
+  The candidate carries proximity timing/location evidence;
+  Redis carries active/recent signal-loss episode state.
 end note
 
 @enduml

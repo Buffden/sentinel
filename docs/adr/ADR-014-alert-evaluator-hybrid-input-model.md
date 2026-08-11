@@ -7,154 +7,108 @@
 
 ## Context
 
-The Alert Evaluator was originally designed to pull directly from multiple persistence stores to detect every anomaly. That made one service responsible for too much raw fact discovery and coupled it to unrelated storage models.
+The original Alert Evaluator design directly queried Redis, TimescaleDB, and Neo4j for multiple anomaly types. That concentrated detection logic and persistence coupling in one service.
 
-Some anomaly inputs naturally fit event streams, while signal loss does not: an entity that stops broadcasting produces no event announcing its absence.
-
-This ADR defines a hybrid model where dedicated services publish derived facts to Kafka and the Alert Evaluator owns only anomaly-rule state and final alert decisions.
+Some anomaly inputs naturally fit event streams; signal loss does not because it is the absence of an event. The design therefore separates **fact detection** from **alert interpretation** while keeping signal-loss scanning where it belongs.
 
 ---
 
 ## Decision
 
-The Alert Evaluator receives:
+Use a hybrid input model:
 
-- **Signal loss input:** scheduled Redis scan over `entity:live:*` because silence is an absence of events.
-- **Route deviation input:** `deviation.candidates` from the stateless Deviation Detector.
-- **Proximity input:** `proximity.candidates` from the Correlation Worker.
-- **Composite correlation state:** Redis `alert-state:{entity_id}` and `recent-loss:{entity_id}`.
+- Signal loss: scheduled Redis scan of `entity:live:*` by the Alert Evaluator.
+- Route deviation: stateless Deviation Detector publishes `deviation.candidates`.
+- Unscheduled proximity: Correlation Worker publishes `proximity.candidates` after exact distance confirmation and `KNOWN_ASSOCIATE` filtering.
+- Composite interpretation: Alert Evaluator combines `proximity.candidates` with Redis `alert-state` / `recent-loss`.
 
-The Alert Evaluator does **not** query Neo4j as part of alert evaluation.
-
-The Correlation Worker owns graph-level proximity fact discovery and `KNOWN_ASSOCIATE` filtering. Therefore, every `proximity.candidates` event already means:
-
-1. an exact-distance proximity episode was detected;
-2. the pair is not a `KNOWN_ASSOCIATE`;
-3. the event contains the canonical pair, `episode_start_ms`, detection location, and distance needed by the alert rule.
-
-Neo4j remains the durable relationship/evidence store and is read by the API during investigation.
+The Alert Evaluator does **not** query Neo4j in the current v1 contract.
 
 ---
 
 ## Deviation Detector
 
-`services/deviation-detector/` consumes `position.normalized`, reads the assigned reference route for synthetic entities, and publishes one classification per eligible ping.
+A Node.js service consumes `position.normalized`, reads deterministic reference routes, and publishes one classification per eligible synthetic ping.
 
-| Direction | What |
-|---|---|
-| Consumes | `position.normalized` |
-| Reads | TimescaleDB `route_references` + `route_reference_points` |
+| Direction | Contract |
+| --- | --- |
+| Consumes | `position.normalized` — group `deviation-detector` |
+| Reads TimescaleDB | `route_references`, `route_reference_points` |
 | Publishes | `deviation.candidates` |
 
-Contract:
+It is stateless and emits `OUT_OF_RANGE` or `IN_RANGE` on every eligible ping. Sustained-ping counting, replay guards, and alert episode state belong to the Alert Evaluator in `deviation-state:{entity_id}`.
 
-- stateless per ping;
-- publishes `OUT_OF_RANGE` or `IN_RANGE`;
-- does not own sustained-deviation episode state;
-- skips entities without a v1 reference route;
-- does not emit alerts.
-
-The Alert Evaluator owns sustained-deviation state in `deviation-state:{entity_id}`.
+`route_baseline` does not exist in the accepted v1 design; see ADR-015.
 
 ---
 
 ## Correlation Worker
 
-The Correlation Worker consumes `position.normalized`, uses Redis H3 live indexes to reduce candidate pairs, performs exact-distance checks, records `PROXIMITY_EVENT` evidence in Neo4j, and checks `KNOWN_ASSOCIATE` before publishing.
+The Correlation Worker consumes `position.normalized`, uses Redis H3 live indexes to reduce candidate pairs, computes exact distance, and owns graph-specific relationship filtering.
 
-For known associates:
+For a new proximity episode:
 
-```text
-record/refresh proximity episode evidence
-→ no proximity.candidates event
-```
+1. canonicalize the pair;
+2. check Neo4j `KNOWN_ASSOCIATE` for that specific pair;
+3. persist/update proximity evidence;
+4. publish `proximity.candidates` **only if no known-associate relationship exists**.
 
-For unscheduled pairs:
+The candidate event therefore already means:
 
-```text
-record proximity episode evidence
-→ publish one proximity.candidates event per episode
-```
+> a new exact proximity episode exists and the pair is unscheduled in v1.
 
-The published event carries:
-
-```text
-pair_key
-entity_a_id
-entity_b_id
-episode_start_ms
-lat
-lon
-distance_at_detection
-```
-
-No additional Neo4j lookup is required downstream to decide whether the episode is unscheduled or to recover its start time.
+The Alert Evaluator must not perform the same known-associate query again.
 
 ---
 
 ## Alert Evaluator
 
-| Detection | Input | Evaluator state/dependency |
-|---|---|---|
-| Signal Loss | scheduled Redis scan | `entity:live:*`, `alert-state:*`, TimescaleDB `position_history` for last-known payload |
-| Route Deviation | `deviation.candidates` | `deviation-state:*` |
-| Unscheduled Proximity | `proximity.candidates` | no graph lookup |
-| Composite | `proximity.candidates` | `alert-state:*` and `recent-loss:*` |
+| Detection | Input | Evaluator responsibility |
+| --- | --- | --- |
+| Signal loss | Scheduled Redis scan | detect absence, suppress repeated emission with `alert-state` |
+| Route deviation | `deviation.candidates` | own sustained episode state and emit ROUTE_DEVIATION |
+| Proximity | `proximity.candidates` | emit UNSCHEDULED_PROXIMITY unless qualifying loss state exists |
+| Composite | candidate + `alert-state` / `recent-loss` | emit COMPOSITE and reference individual alerts to supersede |
 
-### Composite rule
-
-When `proximity.candidates` arrives, check both entities for qualifying signal-loss context.
-
-**Active-dark path:**
-- qualifying `alert-state:{entity_id}` exists;
-- proximity `episode_start_ms` falls within `COMPOSITE_CORRELATION_WINDOW_MS` of `dark_since_ms`;
-- `composite_issued == 0`;
-- emit COMPOSITE and set `composite_issued=1`.
-
-**Recent-loss path:**
-- qualifying `recent-loss:{entity_id}` exists;
-- proximity episode falls within the configured correlation window;
-- emit COMPOSITE and consume the `recent-loss` marker.
-
-If neither path qualifies, emit `UNSCHEDULED_PROXIMITY`.
-
-The `proximity.candidates` event already proves that the pair is unscheduled, so the evaluator does not re-check `KNOWN_ASSOCIATE` in Neo4j.
+The evaluator's only TimescaleDB read is `position_history` when a last-known signal-loss position is needed for the alert payload.
 
 ---
 
-## Why Signal Loss Remains a Direct Redis Read
+## Why No Direct Neo4j Read in Alert Evaluator
 
-Signal loss is the detection of an absence of events. A stream-only design would require artificial heartbeat/timer machinery without improving correctness. A scheduled scan of `last_seen_ms` is simpler and accurately models the problem.
+The old design retained a targeted Neo4j lookup during composite assembly. That became redundant once the Correlation Worker contract was strengthened:
+
+- `KNOWN_ASSOCIATE` is already checked before candidate publication;
+- `proximity.candidates` already carries canonical pair identity, `episode_start_ms`, midpoint location, and distance at detection;
+- composite timing/state is owned in Redis, not Neo4j.
+
+Keeping the second lookup would duplicate authorization of the same domain fact and add an unnecessary database dependency/failure mode to the Alert Evaluator.
+
+Neo4j remains essential for:
+
+- Correlation Worker relationship/evidence writes and known-associate filtering;
+- API investigation and historical relationship evidence.
 
 ---
 
-## Why Neo4j Is Not an Alert-Evaluator Dependency
+## Why Signal Loss Remains a Redis Scan
 
-Neo4j is still essential, but its responsibility is different:
-
-- Correlation Worker writes/query-checks relationship evidence while discovering proximity facts.
-- API reads graph evidence for operator investigation.
-- Alert Evaluator consumes the already-qualified proximity fact from Kafka and combines it with Redis anomaly state.
-
-Removing the evaluator's graph read eliminates duplicated `KNOWN_ASSOCIATE` checks, reduces service coupling, and makes composite-rule tests independent of Neo4j availability.
+An entity that stops transmitting emits no event announcing its silence. A scheduled last-seen scan is therefore the simplest correct model. Artificial heartbeats or per-entity timer events would add components without improving correctness for v1.
 
 ---
 
-## Kafka Topics
+## Candidate Topic Retention
 
-| Topic | Producer | Consumer | Retention | Purpose |
-|---|---|---|---|---|
-| `deviation.candidates` | Deviation Detector | Alert Evaluator | 1h | Per-ping route classification |
-| `proximity.candidates` | Correlation Worker | Alert Evaluator | 1h | One unscheduled proximity fact per episode |
-
-These are transient derived facts. Durable source/evidence remains in TimescaleDB and Neo4j.
+`deviation.candidates` and `proximity.candidates` are derived transient rule inputs and use short retention (target 1 hour). Durable facts remain in TimescaleDB/Neo4j. Historical backfill must not route old candidate streams into the live alert path.
 
 ---
 
 ## Consequences
 
-- Alert Evaluator depends on Redis, Kafka, and a narrow TimescaleDB read for signal-loss payload construction; it does not depend on Neo4j.
-- Correlation Worker is the single owner of `KNOWN_ASSOCIATE` filtering before `proximity.candidates` publication.
-- `proximity.candidates` must contain enough immutable episode data for proximity/composite alert creation without a graph round-trip.
-- Neo4j remains available to the API investigation path.
-- Service-level Neo4j failure cannot block route-deviation or composite rule evaluation after a valid proximity candidate has already been published.
+- Alert Evaluator remains the full Alert Layer and owns final rule interpretation.
+- Alert Evaluator no longer depends on Neo4j.
+- Correlation Worker owns `KNOWN_ASSOCIATE` filtering before Kafka publication.
+- Deviation Detector owns stateless geometric classification only.
+- Redis owns active/recent loss and sustained deviation state.
+- The `alerts` Kafka topic remains the sole alert output consumed by the API.
+- Failure tests should prove that a Neo4j outage blocks new proximity fact creation in the Correlation Worker but does not independently disable signal-loss or route-deviation evaluation in the Alert Evaluator.

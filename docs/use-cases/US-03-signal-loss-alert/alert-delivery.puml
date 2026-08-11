@@ -1,5 +1,5 @@
 @startuml alert-delivery
-title US-03: Alert Delivery - Final v1 delivery path
+title US-03: Final v1 Alert Delivery - Durable Persist + Distributed WebSocket Fan-Out
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -15,35 +15,38 @@ participant "API\n(all instances)" as APIAll
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-note over APIConsumer, APIAll
-  This diagram shows final v1 delivery.
-  Phase 03 proves one API instance + authenticated WebSocket.
-  Phase 07 adds workspace scope.
-  Phase 08 adds cross-instance Redis fan-out.
+note over Kafka, APIConsumer
+  Final v1 behavior is shown here.
+  Phase 03 proves authenticated delivery through the consuming API instance.
+  Workspace scope arrives in Phase 07.
+  Multi-instance Redis fan-out arrives in Phase 08.
 end note
 
-Kafka -> APIConsumer : consume SIGNAL_LOSS\n{ alert_id, entity_id, alert_type, payload... }
-APIConsumer -> TSDB : INSERT alert\nON CONFLICT (alert_id) DO NOTHING
-TSDB --> APIConsumer : inserted or replay no-op
+Kafka -> APIConsumer : consume deterministic SIGNAL_LOSS alert
+APIConsumer -> TSDB : INSERT alert status=NEW\nON CONFLICT (alert_id) DO NOTHING
+TSDB --> APIConsumer : inserted or existing durable row
 
-APIConsumer -> RedisPubSub : PUBLISH ALERT_CREATED\n{ alert_id, ... }
-RedisPubSub --> APIAll : broadcast to subscribers
-APIAll --> Dashboard : push WebSocket event\nwhen connection scope matches
-Dashboard --> Operator : display SIGNAL_LOSS
+APIConsumer -> RedisPubSub : PUBLISH ALERT_CREATED\n(full current alert state)
+RedisPubSub --> APIAll : all API instances receive lifecycle event
 
 note over APIConsumer
-  Commit ordering:
-  1. durable DB write
-  2. Redis publish
+  Consume ordering:
+  1. durable DB effect
+  2. lifecycle pub/sub
   3. Kafka offset commit
 
-  Crash/replay can repeat WebSocket delivery.
-  Durable row remains duplicate-free.
+  Crash after DB write can replay the Kafka event.
+  DB row remains one logical alert;
+  pub/sub/WebSocket notification may repeat.
 end note
 
+APIAll --> Dashboard : push to authorized/scope-matched WebSocket
+Dashboard --> Operator : display SIGNAL_LOSS status=NEW
+
 note over Dashboard
-  Deduplicate repeated alert events by alert_id.
-  Transport is at-least-once, not exactly-once.
+  WebSocket delivery is at-least-once.
+  Client deduplicates/converges by alert_id
+  and current lifecycle status/version semantics.
 end note
 
 @enduml

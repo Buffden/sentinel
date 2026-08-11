@@ -7,53 +7,92 @@
 
 ## Context
 
-The dashboard, alert evaluator, and correlation worker all need the current position of every tracked entity with the lowest possible read latency. This is the highest-frequency read in the system  - every map refresh, every alert evaluation, and every proximity computation reads current state for potentially thousands of entities.
+The dashboard, Alert Evaluator, and Correlation Worker need low-latency access to current entity state. TimescaleDB is the durable position-history source, but repeatedly querying latest-row-per-entity would add unnecessary load and latency.
 
-The source of truth for position history is TimescaleDB, but querying it for the latest row per entity on every dashboard tick is expensive and adds unnecessary load to the primary store.
+Sentinel also needs ephemeral state for live H3 candidate lookup, anomaly episodes, leader election, and API fan-out.
 
 ---
 
 ## Decision
 
-Use Redis as a live entity state cache. The position consumer writes the current position to Redis on every ingest, keyed as `entity:live:{entity_id}`.
+Use Redis for ephemeral live state and coordination:
+
+- `entity:live:{entity_id}` hashes for latest accepted position/liveness state;
+- `geo-cell:{live_geo_cell}` sorted sets for live spatial candidate lookup;
+- alert/deviation/proximity episode keys defined in `DATA_MODEL.md`;
+- `alert-evaluator:leader` lease;
+- `position-updates` and `alert-events` pub/sub channels.
+
+Redis is not the durable source of truth for historical position or alert lifecycle state.
 
 ---
 
-## Reasoning
+## Live Entity State
 
-**Latency.** Redis sub-millisecond reads are the right fit for the highest-frequency read in the system. TimescaleDB is optimised for range queries, not point lookups at high frequency.
+`entity:live:{entity_id}` includes location, entity type, `last_seen_ms`, and `live_geo_cell`.
 
-**Cache, not source of truth.** Redis holds only the latest position. If Redis is lost, the system re-warms from Kafka (replay) or TimescaleDB (latest row per entity). No data is permanently lost.
+The Position Consumer must reject source-time regression: an event older than the stored `last_seen_ms` cannot replace current live state or move the entity backward into an older live H3 cell.
 
-**Simple key schema.** `entity:live:{entity_id}` is a flat key pointing to a hash of position fields including `last_seen_ms`. No complex data structures required — straightforward GET/HGETALL on read, HSET on write.
+The key uses a 24h TTL as a safety net only. It must outlive signal-loss thresholds so the Alert Evaluator still has state to inspect.
 
-**`last_seen_ms` for signal loss detection.** The hash stores `last_seen_ms` (Unix timestamp in milliseconds from the source telemetry). The alert evaluator runs on a fixed schedule and scans `entity:live:*` keys, flagging any where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS`. This is intentionally separate from the Redis TTL — the TTL controls dashboard ghost cleanup, not alert evaluation.
+Dashboard marker cleanup and signal-loss detection both compare `last_seen_ms`; neither relies on Redis TTL expiry.
 
-**TTL as a safety-net, not a detection trigger.** The Redis key `entity:live:{entity_id}` carries a **24-hour TTL** — a safety-net to prevent permanent ghost keys if an entity disappears and is never scanned again (e.g. before the alert evaluator has a chance to process it). The TTL must be substantially longer than `SIGNAL_LOSS_THRESHOLD_MS`; if it were set equal to the threshold, the key could expire in the gap between two evaluator scan cycles, leaving nothing to detect. Dashboard ghost cleanup is handled client-side: the Angular dashboard tracks `last_seen_ms` per entity and removes the marker when `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS`. These are two separate mechanisms with different timings — Redis TTL is a safety-net; the dashboard timer is the visual cleanup trigger.
+---
 
-**Pub/sub for live position push.** The position consumer publishes every normalised position event to the `position-updates` Redis pub/sub channel after writing to the hash. All API instances subscribe to this channel and fan out updates to their in-memory WebSocket connections after applying per-operator scope filtering. This is what enables horizontal scaling of the API layer without a separate pub/sub infrastructure component — Redis serves both the hash cache and the broadcast channel.
+## Live H3 Spatial Index
+
+Each `geo-cell:{h3_cell_id}` is a sorted set with:
+
+- member=`entity_id`;
+- score=`last_seen_ms`.
+
+On accepted cell movement the Position Consumer removes the entity from the previous live cell and adds it to the new one. Correlation Worker uses score-bounded reads across the current cell plus computed neighbors, then calculates exact distance.
+
+---
+
+## Recovery
+
+Redis loss does not destroy durable history, but live state must be reconstructed carefully.
+
+Preferred recovery options:
+
+1. latest-row-per-entity reconstruction from TimescaleDB; or
+2. a deliberately bounded recent Kafka tail if it is known to contain only relevant current state.
+
+Do **not** replay arbitrary full historical telemetry through normal live processing merely to warm Redis, because that can generate stale ephemeral side effects. Historical backfill uses a separate mode/group and suppresses live-state/pub-sub/alert side effects.
+
+---
+
+## Pub/Sub
+
+`position-updates` distributes accepted live position changes to API instances.
+
+`alert-events` distributes durable alert lifecycle changes between API instances once Phase 08 enables multi-instance fan-out.
+
+Redis pub/sub is not durable messaging. Kafka/TimescaleDB remain the recovery boundaries for durable facts.
 
 ---
 
 ## Alternatives Considered
 
-### Query TimescaleDB directly for latest position (rejected)
-- Correct, but expensive  - "latest row per entity" is a `DISTINCT ON` or window function query, not a point lookup
-- Adds read load to the primary time-series store
-- Higher latency than Redis for dashboard refresh rates
+### Query TimescaleDB for every current-state read — rejected
 
-### Memcached (rejected)
-- No native TTL per key (Redis has it)
-- No hash data structure  - would require serialising the full position object to a string
-- Less operational tooling and observability than Redis
+Correct but unnecessarily expensive and higher-latency for high-frequency current-position access.
+
+### Memcached — rejected
+
+Does not provide the sorted sets, pub/sub, or lease primitives Sentinel already needs.
+
+### Redis as durable alert/history store — rejected
+
+Sentinel requires relational queryability and transactional lifecycle operations for durable alerts; those belong in TimescaleDB/PostgreSQL.
 
 ---
 
 ## Consequences
 
-- Redis is a cache, not a store — the position consumer must write to both TimescaleDB (durable) and Redis (fast read) on every ingest event
-- Redis data is lost on restart unless persistence (RDB/AOF) is enabled — for v1, this is acceptable; the cache re-warms on next ingest
-- The key schema `entity:live:{entity_id}` must be used consistently across all writers and readers — documented in CLAUDE.md conventions
-- The hash must include `last_seen_ms` on every write — the alert evaluator depends on this field for signal loss detection
-- The `position-updates` pub/sub channel must be published to by the position consumer on every ingest — all API instances subscribe to it for live WebSocket push
-- TTL on `entity:live:{entity_id}` is set to **24h** (safety-net only — must be longer than `SIGNAL_LOSS_THRESHOLD_MS` so the key cannot expire before the alert evaluator scans it; dashboard ghost cleanup is client-side via `last_seen_ms` comparison)
+- Redis state is explicitly ephemeral and reconstructible.
+- All live-state writers must enforce source-time monotonicity.
+- H3 live membership is a Redis concern, not a TimescaleDB partitioning concern.
+- Redis restart is a required failure-lab scenario.
+- The developer must know how to inspect hashes, sorted sets, TTLs, and leader ownership directly.
