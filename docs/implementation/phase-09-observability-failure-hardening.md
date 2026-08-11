@@ -1,22 +1,26 @@
-# Phase 09 — Observability + Failure Hardening
+# Phase 09 — Production Hardening + Observability Completion
 
 ## Goal
 
-Make Sentinel debuggable and verifiably correct under failure.
+Complete Sentinel's system-wide observability and harden the full pipeline under realistic failure conditions.
 
-Avoid enterprise observability overengineering. The goal is practical: the developer should be able to answer "is this working?" for every meaningful component without reading source code.
+Observability is **not introduced for the first time in this phase**. Earlier phases should already include enough logs, metrics, health checks, CLI inspection, and failure experiments to prove each checkpoint works. This phase standardizes those signals across services, closes gaps, and exercises the completed system as a whole.
+
+Avoid enterprise observability overengineering. The goal is practical: the developer should be able to answer "is this working?" and "what failed?" for every meaningful component without reading source code.
 
 ---
 
-## Observability
+## Observability Completion
 
-Add to every service:
+Review every service and standardize or add what is still missing:
 
 - structured JSON logs with `service`, `level`, and `correlation_id` on every line
 - error counters (DLQ events, parse failures, write errors)
 - consumer lag visibility (Redpanda console or `kafka-consumer-groups`)
 - `/health` endpoint with dependency checks (TimescaleDB, Redis, Neo4j, Kafka reachability)
 - meaningful log lines at every important state transition (alert emitted, leader acquired, episode created, offset committed)
+
+The objective is consistency across the completed system, not retrofitting basic visibility that should have existed while each earlier phase was being built.
 
 ---
 
@@ -69,7 +73,7 @@ Then run it and compare.
 ### Duplicate delivery
 
 - produce the same Kafka event twice
-- confirm exactly one row in `position_history`, one Redis write, one Neo4j edge
+- confirm exactly one row in `position_history`, one Redis live-state outcome, and one Neo4j edge for the same logical episode
 
 ---
 
@@ -81,6 +85,7 @@ Then run it and compare.
 - the difference between data loss and processing delay
 - why idempotency makes replay safe
 - distributed debugging without a unified trace
+- the distinction between building observability continuously and performing final production hardening
 
 ---
 
@@ -88,5 +93,7 @@ Then run it and compare.
 
 - every service has a `/health` endpoint that reports dependency status
 - structured logs make it possible to trace a single entity's event through the pipeline
-- the developer can answer "is the pipeline working?" using only CLI tools and logs
+- metrics and broker tooling make backlog, parsing failures, and write failures visible
+- the developer can answer "is the pipeline working?" using only CLI tools, metrics, and logs
 - all failure lab experiments have been run and the developer can explain what happened and why
+- observability behavior is consistent across services rather than implemented as a one-off final-phase retrofit
