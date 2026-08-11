@@ -7,43 +7,51 @@
 
 ## Story
 
-As an operator, I want to receive an alert when an entity's transponder goes dark beyond a configurable time threshold so that I can investigate a potential signal loss event.
+As an operator, I want to receive an alert when an entity stops broadcasting beyond a configurable threshold so that I can investigate a potential signal-loss event.
 
 ---
 
 ## Acceptance Criteria
 
-- The system detects when an entity has not broadcast a position update within `SIGNAL_LOSS_THRESHOLD_MS`
-- An alert is emitted with the entity ID, last known position, and time since last update
-- The threshold is configurable per entity type (ADS-B and AIS have different expected broadcast intervals)
-- The alert is not re-emitted on every evaluation cycle once it has been raised - only once per loss event
+- Signal loss is detected from Redis `entity:live:*` using `last_seen_ms`, not Redis TTL expiry.
+- Thresholds are configurable by entity type.
+- One SIGNAL_LOSS alert is emitted per dark episode.
+- The alert includes deterministic identity, last known position, and dark-since time.
+- Alert persistence is replay-safe through deterministic `alert_id` + idempotent API insert.
+- A later entity resume clears the active `alert-state:*` only after the Position Consumer writes `recent-loss:*` for the composite correlation window.
 
 ---
 
-## Flow Diagrams
-
-### Detection
+## Detection
 
 ![Detection](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/detection.svg)
 
-The alert evaluator runs on a fixed schedule (every 10s), scans all `entity:live:*` keys in Redis, and checks the `last_seen_ms` field in each hash. Any entity where `now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS` is flagged. The evaluator then fetches the last known position from TimescaleDB and emits an alert to Kafka. Detection is driven by `last_seen_ms`, not by Redis TTL expiry. The key carries a 24h TTL (safety-net only) — it is deliberately longer than `SIGNAL_LOSS_THRESHOLD_MS` so the key cannot expire between scan cycles before the evaluator has a chance to inspect `last_seen_ms`. Dashboard ghost cleanup is separate and client-side (US-01).
+The leader Alert Evaluator periodically scans Redis live-state hashes and compares current time with `last_seen_ms`. A 24h Redis TTL is only a safety net; the key deliberately outlives the loss threshold so the evaluator can inspect it.
 
-### Alert Delivery
+---
+
+## Alert Delivery
 
 ![Alert Delivery](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-delivery.svg)
 
-The API instance that consumes the alert from Kafka writes it to the `alerts` table in TimescaleDB (idempotent on replay), then publishes it to the `alert-events` Redis pub/sub channel. All API instances subscribe to `alert-events` and fan out to scope-matched WebSocket connections. This mirrors the `position-updates` pattern and solves the fan-out problem: the Kafka consumer group `api` delivers each alert to exactly one instance, but WebSocket connections are local per instance — without the Redis broadcast, users on non-consuming instances would never receive the push.
+The final v1 flow is Kafka `alerts` → API → durable TimescaleDB alert row → Redis `alert-events` → all API instances → scope-matched WebSockets.
 
-### Alert Suppression
+**Roadmap boundary:** Phase 03 proves the first vertical slice with one API instance and authenticated delivery. Cross-instance Redis fan-out is completed in Phase 08, while saved workspace scope and server-side filtering are introduced in Phase 07. The final-state diagram must not be interpreted as a requirement to implement those later capabilities during Phase 03.
+
+Kafka/WebSocket transport can repeat after replay. The durable alert row is duplicate-free because `alert_id` is deterministic; clients deduplicate repeated delivery by `alert_id`.
+
+---
+
+## Alert Suppression
 
 ![Alert Suppression](../../../diagrams/docs/use-cases/US-03-signal-loss-alert/alert-suppression.svg)
 
-Once an alert is raised for an entity, the alert evaluator writes an `alert-state:{entity_id}` hash to Redis (no TTL) containing `dark_since_ms` and `signal_loss_alert_id`. Subsequent evaluation cycles check for this hash first and skip re-emission if it is present. When the entity comes back online, the position consumer: (1) writes `recent-loss:{entity_id}` hash (TTL = `COMPOSITE_CORRELATION_WINDOW_MS`) containing the dark episode details for potential composite correlation; (2) then deletes `alert-state:{entity_id}`. The `recent-loss` key enables composite supersession even after the entity has resumed broadcasting. This is distinct from the durable dedup in the `alerts` table (TimescaleDB), which handles Kafka replay idempotency — not in-loop suppression.
+After first emission, the evaluator writes `alert-state:{entity_id}` with `dark_since_ms`, `signal_loss_alert_id`, and `composite_issued=0`. Repeated scheduled scans skip re-emission for the same dark episode.
+
+When the entity resumes, the Position Consumer writes `recent-loss:{entity_id}` before deleting `alert-state:{entity_id}`. This preserves a short correlation opportunity if an unscheduled proximity episode arrives shortly after resume.
 
 ---
 
 ## Architectural Justification
 
-Justifies: [ADR-002 - TimescaleDB for Position History](../../adr/ADR-002-timescaledb-over-cassandra.md)
-
-Signal loss detection requires comparing the latest known position timestamp against the current time across all tracked entities. This is a time-range query on historical position data - the exact access pattern TimescaleDB hypertables are optimised for. Redis holds the most recent position per entity (US-01), enabling the alert evaluator to check last-seen timestamps without hitting TimescaleDB on every evaluation cycle.
+Signal-loss detection is an absence-of-events problem and therefore remains a scheduled Redis live-state scan (ADR-014). TimescaleDB is used only to retrieve the last-known historical position for the alert payload and to persist the resulting alert through the API.
