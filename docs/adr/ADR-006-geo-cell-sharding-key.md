@@ -1,4 +1,4 @@
-# ADR-006: Geo-Cell Sharding Key Design and Hot-Spot Mitigation
+# ADR-006: H3 Spatial Indexing for Historical Queries and Live Proximity
 
 **Status:** Accepted
 **Date:** 2026-08-05
@@ -7,56 +7,103 @@
 
 ## Context
 
-TimescaleDB partitions position history by time (hypertables). Within each time partition, we need a spatial partitioning strategy so that queries for "all entities in region R during time window T" hit a minimal set of chunks.
+Sentinel has two different geospatial access patterns:
 
-The naive approach  - partitioning only by time  - means a geo-region query must scan all entities in the time window regardless of location. At high entity counts, this is expensive.
+1. historical queries such as "all positions in region R during time window T";
+2. live proximity detection, where each incoming entity should be compared only with nearby fresh entities rather than the entire live population.
 
-We also need to avoid hot-spots: a single cell covering a busy airspace (e.g. over London or JFK) would receive a disproportionate share of writes, creating a bottleneck.
+These access patterns use H3 for different purposes and must not be confused with TimescaleDB partitioning.
+
+TimescaleDB partitions `position_history` by `observed_at` only. H3 does **not** create separate TimescaleDB chunks or distribute writes across H3 cells. Historical H3 values are ordinary indexed columns inside time chunks.
 
 ---
 
 ## Decision
 
-Use `geo_cell` (H3 resolution 5) as an indexed query column on `position_history`. TimescaleDB partitions the hypertable by `observed_at` (time only). `geo_cell` narrows queries within time chunks — it is not a partition dimension.
+Use two independently configurable H3 resolutions:
+
+- `HISTORY_H3_RESOLUTION` — used to compute `position_history.geo_cell`, an indexed query column in TimescaleDB;
+- `LIVE_H3_RESOLUTION` — used to maintain Redis `geo-cell:{h3_cell_id}` sorted sets for live proximity candidate lookup.
+
+For v1, `HISTORY_H3_RESOLUTION` starts at 5 and is validated experimentally. `LIVE_H3_RESOLUTION` is tuned independently based on entity density and `PROXIMITY_THRESHOLD_METRES`.
+
+---
+
+## Historical Query Model
+
+`position_history` is a TimescaleDB hypertable partitioned only by `observed_at`.
+
+A regional query translates the requested region into H3 cells in application code and executes a query shaped like:
+
+```sql
+WHERE geo_cell IN (...)
+  AND observed_at BETWEEN $t1 AND $t2
+```
+
+TimescaleDB chunk exclusion reduces the **time** dimension. The `(geo_cell, observed_at DESC)` index narrows the **spatial** scan inside the selected time chunks.
+
+H3 therefore improves query selectivity; it is not a second partition dimension and is not a write-sharding mechanism for TimescaleDB.
+
+---
+
+## Live Proximity Model
+
+The Position Consumer computes `live_geo_cell` and maintains Redis sorted sets:
+
+```text
+geo-cell:{live_geo_cell}
+member = entity_id
+score  = last_seen_ms
+```
+
+On an accepted newer/current ping:
+
+1. read the entity's previous `live_geo_cell` before overwriting live state;
+2. if the cell changed, `ZREM` the entity from the previous `geo-cell:*` sorted set;
+3. `ZADD` the entity to the current cell with score = `last_seen_ms`;
+4. update `entity:live:{entity_id}` consistently with the same timestamp guard.
+
+The Correlation Worker queries the incoming entity's cell plus a computed H3 k-ring using `ZRANGEBYSCORE`, then performs exact distance calculations only for fresh candidate entities.
+
+The k-ring radius is derived from `PROXIMITY_THRESHOLD_METRES` and H3 cell geometry at `LIVE_H3_RESOLUTION`; it is not hardcoded.
 
 ---
 
 ## Reasoning
 
-**H3 hexagonal grid.** H3 (Uber's geospatial indexing system) divides the world into hexagonal cells at configurable resolutions. Hexagons have the property of equal area and equidistant neighbours, which avoids the distortion of rectangular grid cells near the poles and produces more uniform write distribution for geographically spread entities.
+**Separate access patterns deserve separate resolutions.** Historical regional queries and live proximity lookup optimize for different things. A resolution that is useful for a TimescaleDB index may be too coarse or too fine for Redis candidate density.
 
-**Resolution choice.** H3 resolution 5 produces cells of approximately 250 km²  - large enough that most regional queries fit within a small number of adjacent cells, small enough that busy airspaces are spread across multiple cells rather than concentrated in one.
+**H3 is a candidate-reduction mechanism, not the final distance test.** Cell membership narrows the search space. Exact geodesic distance still determines whether a pair is within `PROXIMITY_THRESHOLD_METRES`.
 
-**Hot-spot mitigation.** High-traffic airspaces (dense corridors, major airports) naturally span multiple H3 cells at resolution 5. Write load is distributed across cells proportionally to actual entity density  - no single cell dominates unless the entity distribution is genuinely point-concentrated (unlikely at resolution 5).
+**Sorted sets age stale members logically.** `last_seen_ms` as the score lets the Correlation Worker exclude stale entities with a lower-bound score filter even if an entity disappears without a final cleanup event.
 
-**Query efficiency.** A bounding-box region query is translated into a set of H3 cell IDs that overlap the bounding box. The TimescaleDB query filters on `geo_cell IN (...)` and `observed_at BETWEEN T1 AND T2`. TimescaleDB chunk exclusion reduces the time dimension; the `(geo_cell, observed_at)` index reduces the spatial scan within each chunk.
+**Time partitioning remains simple.** Keeping TimescaleDB partitioned only by `observed_at` preserves straightforward hypertable behavior and chunk exclusion while the composite `(geo_cell, observed_at DESC)` index handles the regional query pattern.
 
 ---
 
 ## Alternatives Considered
 
+### H3 as a TimescaleDB partition dimension (rejected)
+- Would complicate hypertable partitioning and operational reasoning.
+- Sentinel does not need spatially separate chunks for its expected v1 scale.
+- The desired historical access pattern is adequately served by time chunk exclusion plus a composite index.
+
 ### Geohash (rejected)
-- Rectangular cells  - area varies significantly at different latitudes (cells near poles are much smaller in real area than cells at the equator)
-- Neighbour lookup is less uniform than H3 (geohash neighbours are not always adjacent in the index)
-- H3 is the more modern and better-supported choice for geospatial indexing
+- Neighbor handling is less uniform for the live candidate-search use case.
+- H3 provides convenient neighborhood expansion and a consistent cell model for both historical indexing and live candidate reduction.
 
-### Partition by entity_id only (rejected)
-- Makes "all entities in region R" queries require a full scan across all entity partitions
-- Does not co-locate spatially nearby entities in the same chunk
-- Efficient only for single-entity time-range queries, not for regional queries
-
-### No spatial partitioning (time-only hypertable) (rejected)
-- Simple, but regional queries scan all entities in the time window
-- Acceptable at small entity counts; does not scale
+### Global live-entity scan (rejected)
+- Makes each proximity check O(total live entities).
+- Redis H3 sorted sets reduce comparisons to entities in the relevant nearby cells.
 
 ---
 
 ## Consequences
 
-- The H3 library must be available in the Position Consumer to compute `geo_cell` at ingest time, and in the Correlation Worker for live proximity scoping.
-- `HISTORY_H3_RESOLUTION` (used for the TimescaleDB `geo_cell` column) and `LIVE_H3_RESOLUTION` (used for the Redis `geo-cell:*` sorted set) are separate configuration values. They need not be identical — historical queries and live proximity scoping have different access patterns and density requirements. Tune during implementation based on observed entity density and `PROXIMITY_THRESHOLD_METRES`.
-- `HISTORY_H3_RESOLUTION` defaults to 5 for v1. Changing it requires rewriting the `geo_cell` column (expensive migration).
-- `LIVE_H3_RESOLUTION` may be tuned independently based on entity density, `PROXIMITY_THRESHOLD_METRES`, and the number of cells scanned per event. The Correlation Worker computes the k-ring radius from `PROXIMITY_THRESHOLD_METRES` and the cell edge length at `LIVE_H3_RESOLUTION` — not hardcoded to k-ring(1).
-- Queries must translate a bounding box to H3 cell IDs before hitting the database — done in the API or consumer, not in SQL.
-- `geo_cell` is not a TimescaleDB partition dimension — it is an index column. TimescaleDB partitions by time (`observed_at`) only. The `(geo_cell, observed_at DESC)` index provides geo-scoped efficiency within time chunks.
-- If `LIVE_H3_RESOLUTION != HISTORY_H3_RESOLUTION`, the Position Consumer computes two separate cell IDs per ping: one for the `geo_cell` column (history) and one for the Redis sorted set key (live).
+- The Position Consumer computes both `history_geo_cell` and `live_geo_cell` when the configured resolutions differ.
+- `position_history.geo_cell` is indexed but does not affect TimescaleDB chunk placement.
+- Redis `geo-cell:*` membership must move correctly when an entity crosses an H3 boundary (`ZREM` old, `ZADD` new).
+- Stale/out-of-order events must not regress either `entity:live:*` or `geo-cell:*` membership.
+- The API translates historical geographic query regions into `HISTORY_H3_RESOLUTION` cells before querying TimescaleDB.
+- The Correlation Worker uses `LIVE_H3_RESOLUTION` and a computed k-ring for live candidate lookup, then performs exact distance checks.
+- Both resolutions are tuning parameters that must be validated with realistic entity density and query/load tests before being treated as fixed operational values.
