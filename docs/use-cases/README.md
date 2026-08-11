@@ -1,78 +1,75 @@
 # Use Cases
 
-This folder defines what Sentinel does from the perspective of its users and the system itself. Each use case is written at the level needed to justify the architectural decisions in the ADRs - not to specify UI behavior or product polish.
+This folder defines Sentinel behavior from the perspective of operators and the system. Use cases describe the **final v1 behavior** unless a document explicitly says otherwise. Implementation phase boundaries are authoritative in `docs/implementation/`; do not implement later-phase behavior early just because a final-state use-case diagram shows it.
 
 ---
 
 ## Actors
 
 | Actor | Description |
-|---|---|
-| Operator | A person monitoring the live dashboard. Wants to be alerted to meaningful anomalies without being flooded with noise. |
-| Ingestion client | The ADS-B/AIS poller. Produces a continuous stream of positional telemetry from external feeds. |
-| System | Sentinel itself - the pipeline, consumers, correlation engine, and alert evaluator acting autonomously. |
+| --- | --- |
+| Operator | Uses the dashboard to monitor entities, alerts, and investigation evidence. |
+| Ingestion client | Polls ADS-B/AIS sources and publishes raw telemetry. |
+| System | Sentinel's consumers, detectors, evaluator, API, and persistence components. |
 
 ---
 
 ## Use Case Index
 
-### Operator - Live Tracking
+### Live Tracking
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-01](US-01-live-entity-tracking/live-entity-tracking.md) | Live entity tracking on map | ADR-004, ADR-012 | write path, read path, entity expiry |
-| [US-02](US-02-live-map-updates/live-map-updates.md) | Continuous map updates via WebSocket | ADR-008, ADR-012 | connection setup, update push |
+| ID | Title | Main ADRs |
+| --- | --- | --- |
+| [US-01](US-01-live-entity-tracking/live-entity-tracking.md) | Live entity tracking on map | ADR-004, ADR-012 |
+| [US-02](US-02-live-map-updates/live-map-updates.md) | Continuous map updates via WebSocket | ADR-008, ADR-012 |
 
-### Operator - Anomaly Alerts
+### Anomaly Alerts
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-03](US-03-signal-loss-alert/signal-loss-alert.md) | Signal loss alert | ADR-002 | detection, alert delivery, alert suppression |
-| [US-04](US-04-route-deviation-alert/route-deviation-alert.md) | Route deviation alert | ADR-002, ADR-014 | baseline computation, deviation detection, transient vs sustained |
-| [US-05](US-05-unscheduled-proximity/unscheduled-proximity.md) | Unscheduled proximity alert | ADR-003, ADR-014 | proximity detection, graph update |
-| [US-06](US-06-composite-alert/composite-alert.md) | Composite correlated alert | ADR-003, ADR-014 | signal correlation, composite emission, single signal path |
-| [US-07](US-07-duplicate-free-alerts/duplicate-free-alerts.md) | Duplicate-free alert emission | ADR-005 | leader election, failover, race condition without election |
-| [US-13](US-13-alert-lifecycle/alert-lifecycle.md) | Alert lifecycle management | ADR-010 | state transitions, acknowledge flow, resolve and reopen |
+| ID | Title | Main ADRs |
+| --- | --- | --- |
+| [US-03](US-03-signal-loss-alert/signal-loss-alert.md) | Signal loss alert | ADR-004, ADR-005, ADR-010, ADR-014 |
+| [US-04](US-04-route-deviation-alert/route-deviation-alert.md) | Route deviation alert | ADR-014, ADR-015 |
+| [US-05](US-05-unscheduled-proximity/unscheduled-proximity.md) | Unscheduled proximity | ADR-003, ADR-006, ADR-014 |
+| [US-06](US-06-composite-alert/composite-alert.md) | Composite correlated alert | ADR-010, ADR-014 |
+| [US-07](US-07-duplicate-free-alerts/duplicate-free-alerts.md) | Replay-safe alert emission and failover | ADR-005, ADR-007 |
+| [US-13](US-13-alert-lifecycle/alert-lifecycle.md) | Alert lifecycle management | ADR-010 |
 
-### Operator - Investigation
+### Investigation / Workspace
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-14](US-14-entity-investigation/entity-investigation.md) | Entity investigation timeline | ADR-002, ADR-003, ADR-004 | timeline query, evidence panel, graph pivot |
+| ID | Title | Main ADRs |
+| --- | --- | --- |
+| [US-14](US-14-entity-investigation/entity-investigation.md) | Entity investigation | ADR-002, ADR-003, ADR-004 |
+| [US-15](US-15-scoped-alert-subscription/scoped-alert-subscription.md) | Scoped alert subscription/workspace | ADR-011, ADR-012 |
 
-### Operator - Workspace and Authentication
+### Reliability / Correctness
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-15](US-15-scoped-alert-subscription/scoped-alert-subscription.md) | Scoped alert subscription and workspace | ADR-011, ADR-012 | scope setup, scoped alert delivery, workspace restore |
+| ID | Title | Main ADRs |
+| --- | --- | --- |
+| [US-08](US-08-ingestion-reliability/ingestion-reliability.md) | Burst-tolerant ingestion | ADR-001 |
+| [US-09](US-09-dead-letter-queue/dead-letter-queue.md) | Dead-letter routing | ADR-001 |
+| [US-10](US-10-event-replay/event-replay.md) | Event replay | ADR-001, ADR-007 |
+| [US-11](US-11-idempotent-writes/idempotent-writes.md) | Idempotent writes under replay | ADR-007 |
+| [US-12](US-12-geo-spatial-efficiency/geo-spatial-efficiency.md) | Historical geo filtering + live spatial scoping | ADR-006 |
 
-### System - Ingestion Reliability
+---
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-08](US-08-ingestion-reliability/ingestion-reliability.md) | Burst-tolerant ingestion | ADR-001 | normal ingestion, consumer outage recovery |
-| [US-09](US-09-dead-letter-queue/dead-letter-queue.md) | Dead-letter queue for malformed events | ADR-001 | malformed event routing, DLQ inspection and recovery |
-| [US-10](US-10-event-replay/event-replay.md) | Event replay from Kafka offset | ADR-001 | automatic restart replay, intentional backfill |
+## Final-State vs Phase Boundary
 
-### System - Write Correctness
+Examples:
 
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-11](US-11-idempotent-writes/idempotent-writes.md) | Idempotent writes under replay | ADR-007 | per-store idempotency, duplicate delivery |
+- US-03 final-state alert delivery may show Redis `alert-events` and scope-matched multi-instance WebSockets. Phase 03 only needs first-instance authenticated delivery; distributed fan-out arrives in Phase 08 and workspace scope in Phase 07.
+- US-13 describes final lifecycle behavior; Phase 03 only persists `NEW` alerts, while acknowledge/resolve/supersede fan-out is completed in Phase 08.
+- Investigation behavior belongs to Phase 09 even though Neo4j/TimescaleDB contracts are defined earlier.
 
-### System - Geo-spatial Efficiency
-
-| ID | Title | ADR | Diagrams |
-|---|---|---|---|
-| [US-12](US-12-geo-spatial-efficiency/geo-spatial-efficiency.md) | Efficient regional position queries | ADR-006 | geo-cell write, regional query, hot-spot distribution |
+Always read the current phase file before implementing a use-case path.
 
 ---
 
 ## Out of Scope for v1
 
-- Additional identity providers beyond Google OAuth (see ADR-011)
-- RBAC beyond a single operator role - multi-role access control is not justified until there is a real multi-role requirement
-- ML-based anomaly scoring - all detection is rule-based and correlation-based
-- Historical alert replay or audit log browsing in the dashboard
-- Multi-tenant operator isolation
-- Mobile or responsive dashboard layout
+- identity providers beyond Google OAuth;
+- elaborate RBAC/multi-role product behavior;
+- ML-based anomaly scoring;
+- multi-tenant organization isolation;
+- speculative mobile/responsive product polish;
+- infrastructure not justified by an accepted ADR.

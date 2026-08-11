@@ -1,5 +1,5 @@
 @startuml acknowledge-flow
-title US-13: Acknowledge Flow - Operator Takes Ownership of an Alert
+title US-13: Acknowledge Flow - Durable Transition + Distributed Lifecycle Fan-Out
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,47 +7,37 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-queue "Kafka\nalerts" as Kafka
-participant "Express API" as API
-database "TimescaleDB\nalerts table" as TSDB
-participant "Angular\nDashboard" as Dashboard
 actor Operator
+participant "Angular\nDashboard" as Dashboard
+participant "Express API" as API
+database "TimescaleDB\nalerts" as TSDB
+database "Redis\nalert-events" as AlertEvents
+participant "API\n(all instances)" as APIAll
 
-== Alert Created ==
+Operator -> Dashboard : click Acknowledge
+Dashboard -> API : PATCH /alerts/{alert_id}\n{ status: ACKNOWLEDGED }
 
-Kafka -> API : consume alert event\n{ alert_id, entity_id, alert_type, payload }
+API -> TSDB : UPDATE alerts\nSET status='ACKNOWLEDGED', acknowledged_at=..., acknowledged_by=...\nWHERE alert_id=$id AND status='NEW'
+TSDB --> API : transitioned row or no-op
 
-API -> TSDB : INSERT INTO alerts\n( alert_id, entity_id, alert_type,\n  status, detected_at, payload )\nON CONFLICT (alert_id) DO NOTHING
-
-note over TSDB
-  alert_id format varies by type:
-    SIGNAL_LOSS:           {entity_id}:SIGNAL_LOSS:{dark_since_ms}
-    ROUTE_DEVIATION:       {entity_id}:ROUTE_DEVIATION:{episode_start_ms}
-    UNSCHEDULED_PROXIMITY: {pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
-    COMPOSITE:             {pair_key}:COMPOSITE:{dark_since_ms}
-  Deterministic - safe to replay from Kafka.
-  ON CONFLICT DO NOTHING ensures idempotency.
-  Initial status = NEW.
-end note
-
-API --> Dashboard : push new alert over WebSocket\n{ alert_id, status: NEW, entity_id, ... }
-Dashboard --> Operator : alert appears in feed with status NEW
-
-== Operator Acknowledges ==
-
-Operator -> Dashboard : clicks Acknowledge on alert
-Dashboard -> API : PATCH /alerts/:alert_id\n{ status: ACKNOWLEDGED }
-
-API -> TSDB : UPDATE alerts\nSET status = 'ACKNOWLEDGED',\n    acknowledged_at = now()\nWHERE alert_id = $1
+alt row transitioned NEW -> ACKNOWLEDGED
+  API -> AlertEvents : PUBLISH ALERT_STATUS_CHANGED\n{ alert_id, status: ACKNOWLEDGED, ... }
+  AlertEvents --> APIAll : lifecycle event
+  APIAll --> Dashboard : WebSocket lifecycle update
+else already ACKNOWLEDGED / terminal / invalid transition
+  API --> Dashboard : return current durable state\n(no duplicate transition event required)
+end
 
 note over TSDB
-  Idempotent - acknowledging an
-  already-ACKNOWLEDGED alert is a no-op
-  (no state change, no error).
+  Durable DB state is authoritative.
+  ACKNOWLEDGED remains active and may later be
+  superseded by a COMPOSITE system transition.
+  RESOLVED and SUPERSEDED are terminal.
 end note
 
-TSDB --> API : updated
-API --> Dashboard : push status update over WebSocket\n{ alert_id, status: ACKNOWLEDGED }
-Dashboard --> Operator : alert marked ACKNOWLEDGED in feed
+note over AlertEvents, Dashboard
+  WebSocket lifecycle delivery is at-least-once.
+  Clients converge by alert_id + durable lifecycle state.
+end note
 
 @enduml

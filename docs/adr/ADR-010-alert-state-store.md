@@ -7,70 +7,113 @@
 
 ## Context
 
-The alert evaluator publishes alert events to the `alerts` Kafka topic. Currently, alerts are stateless from the system's perspective - an operator sees them on the dashboard but cannot acknowledge, resolve, or suppress them. To support alert lifecycle management (US-13), alert state must be persisted somewhere.
+Alert events are produced by the Alert Evaluator and consumed by the API. Operator workflow requires durable state beyond transient Kafka delivery or Redis detection-loop state.
 
-Requirements:
-- Store per-alert state: `NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`
-- State must survive restarts - losing alert history when Redis restarts is not acceptable
-- State must be queryable: filter by status, entity, time range, alert type
-- Writes are low-volume relative to position pings (thousands of alerts vs millions of pings)
-- The same alert must not create duplicate records under Kafka replay
+Required lifecycle states:
+
+- `NEW`
+- `ACKNOWLEDGED`
+- `RESOLVED`
+- `SUPERSEDED`
+
+The state must survive restarts, support indexed queries, remain replay-safe, and allow composite correlation to replace active individual alerts atomically.
 
 ---
 
 ## Decision
 
-Store alert lifecycle state in a regular PostgreSQL table on the existing TimescaleDB instance. Not a hypertable - alerts are not a high-volume time-series write and do not need chunk-based sharding.
+Store alert lifecycle state in a regular PostgreSQL table on the existing TimescaleDB instance.
 
-Alert records are written by the API layer when it consumes from the `alerts` Kafka topic. Alert state transitions (acknowledge, resolve) are applied via API endpoints (`PATCH /alerts/:alert_id`).
+The table is not a hypertable because alert volume is low relative to position telemetry and lifecycle access is relational rather than chunk-oriented.
 
-The `alert_id` is a deterministic key of the form `{entity_id}:{alert_type}:{window_start_ms}`, derived from the alert event. This makes the initial insert idempotent under Kafka replay (`INSERT ... ON CONFLICT DO NOTHING`).
+The API owns all durable alert writes:
 
----
-
-## Reasoning
-
-**Durability is required.** Redis holds alert state only until restart (without AOF/RDB persistence). Operators must be able to see and update alert state across restarts. A relational table survives restarts by definition.
-
-**Queryability matters.** An operator viewing an entity's alert history needs filtering by status, time range, and alert type. Redis has no native secondary index - filtering would require scanning all keys or maintaining separate index sets. SQL handles this natively.
-
-**No new infrastructure.** TimescaleDB is already running as a PostgreSQL-compatible instance. Adding an `alerts` table to the same instance reuses existing connections, backup procedures, and operational tooling. Adding a dedicated relational database (e.g. RDS PostgreSQL) for alert state alone is not justified at this scale.
-
-**Low write volume.** Alerts are rare relative to position pings. The case for a time-series store or write-optimised store does not apply here. A plain table with a primary key and a few indexes is sufficient.
-
-**Deterministic alert_id enables idempotent writes.** `{entity_id}:{alert_type}:{window_start_ms}` is derived from the source alert event, so replaying the `alerts` Kafka topic produces the same alert_id and the duplicate insert is a no-op.
+- initial insert when consuming `alerts` from Kafka;
+- operator acknowledgement/resolution;
+- atomic composite insertion + active individual-alert supersession.
 
 ---
 
-## Alternatives Considered
+## Deterministic Alert Identity
 
-### Redis (rejected)
-- Fast and already in the stack, but volatile without persistence configuration
-- Alert history would be lost on restart unless RDB or AOF is enabled - this adds operational complexity and still provides weaker durability guarantees than a proper database
-- No native secondary indexes - querying "all ACKNOWLEDGED alerts for entity X" requires application-level filtering or extra Redis data structures
-- Redis is the right store for live entity state (high frequency, acceptable to lose on restart); it is the wrong store for mutable, durable, queryable records
+Use type-specific deterministic IDs:
 
-### Dedicated PostgreSQL instance (rejected)
-- Correct choice if alert volume were high enough to justify isolation
-- Adds a new infrastructure component for a low-volume, low-complexity table
-- TimescaleDB is PostgreSQL - the existing instance handles this without any schema migration tooling changes
+```text
+SIGNAL_LOSS
+{entity_id}:SIGNAL_LOSS:{dark_since_ms}
 
-### Kafka as store - read alert state from topic (rejected)
-- Replaying the topic gives the sequence of events but not the current state without building a projection
-- State transitions (acknowledge, resolve) would require compacted topics or a CQRS projection layer
-- Adds significant complexity for a problem that a two-column SQL update solves cleanly
+ROUTE_DEVIATION
+{entity_id}:ROUTE_DEVIATION:{episode_start_ms}
 
-### Separate alert-state microservice (rejected)
-- Each service owns exactly one concern; alert state management is a natural API layer concern since the API is already the entry point for operator interactions
-- A dedicated service adds a deployment unit, a network hop, and a failure domain for no architectural gain at this scale
+UNSCHEDULED_PROXIMITY
+{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}
+
+COMPOSITE
+{pair_key}:COMPOSITE:{dark_since_ms}
+```
+
+`pair_key = min(a,b):max(a,b)`.
+
+This prevents pair-alert collisions and makes Kafka replay converge on one durable row via `INSERT ... ON CONFLICT DO NOTHING`.
+
+---
+
+## Lifecycle Rules
+
+Operator transitions:
+
+```text
+NEW → ACKNOWLEDGED → RESOLVED
+NEW → RESOLVED
+```
+
+System composite replacement:
+
+```text
+NEW → SUPERSEDED
+ACKNOWLEDGED → SUPERSEDED
+```
+
+`RESOLVED` and `SUPERSEDED` are terminal.
+
+A resolved alert is never reopened. A recurring anomaly creates a new episode/window identity and therefore a new alert row.
+
+When a COMPOSITE is consumed, the API performs one DB transaction:
+
+1. insert the COMPOSITE idempotently;
+2. update every referenced active individual alert (`NEW` or `ACKNOWLEDGED`) to `SUPERSEDED`;
+3. set `superseded_by = composite_alert_id`.
+
+A referenced alert that is already `RESOLVED` remains resolved.
+
+---
+
+## Delivery Semantics
+
+Kafka processing is at-least-once. The alerts table provides an idempotent exactly-once **durable effect**, not exactly-once transport.
+
+After the DB transaction, the API publishes lifecycle updates to Redis `alert-events` so every API instance can fan them out to local WebSocket clients.
+
+WebSocket lifecycle delivery is at-least-once. Duplicate lifecycle messages are allowed; clients converge by `alert_id` and current durable status/version semantics.
+
+---
+
+## Why TimescaleDB/PostgreSQL
+
+- durable across application/Redis restart;
+- indexed filtering by status/entity/type/time;
+- transactional composite supersession;
+- no additional infrastructure;
+- low alert write volume fits a plain PostgreSQL table.
+
+Redis remains appropriate for ephemeral in-loop state such as `alert-state`, `recent-loss`, and `deviation-state`, but not for durable operator lifecycle history.
 
 ---
 
 ## Consequences
 
-- The API layer consumes from the `alerts` Kafka topic and writes initial alert records with status `NEW` to the `alerts` table
-- Alert state transitions are applied via `PATCH /alerts/:alert_id` endpoints - the API updates the table directly
-- The `alert_id` format `{entity_id}:{alert_type}:{window_start_ms}` must be included in every alert event published by the alert evaluator
-- The `alerts` table includes a `SUPERSEDED` status and a nullable `superseded_by` column (FK → `alerts.alert_id`). When a COMPOSITE alert is created, the API atomically inserts the composite and marks the referenced SIGNAL_LOSS alert as SUPERSEDED in one DB transaction.
-- Alert status changes (acknowledge, resolve, supersede) are broadcast via the `alert-events` Redis pub/sub channel with a typed envelope (`ALERT_STATUS_CHANGED` or `ALERT_SUPERSEDED`) so all API instances can push the update to their WebSocket clients.
-- Alert history is queryable via the API without re-reading Kafka — the table is the source of truth for current alert state
+- API is the only writer of durable alert lifecycle state.
+- Alert Evaluator never reads lifecycle status to perform operator workflow.
+- Composite supersession is transactional.
+- Clients must tolerate duplicate lifecycle notifications.
+- Tests must cover replay after DB write/before Kafka offset commit and ACKNOWLEDGED → SUPERSEDED behavior.

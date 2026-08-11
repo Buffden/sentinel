@@ -7,19 +7,18 @@
 
 ## Story
 
-As an operator, I want the map to update continuously without requiring a page refresh, and only show entities and alerts within my configured scope, so that I see relevant position changes as they happen.
+As an operator, I want the map to update continuously without page refresh, and in final v1 only receive entities and alerts within my configured scope.
 
 ---
 
 ## Acceptance Criteria
 
-- The dashboard maintains a persistent WebSocket connection to the API
-- The WebSocket upgrade is authenticated - a valid JWT is required; unauthenticated requests are rejected with 401
-- The operator's saved scope (geo region, entity types) is loaded at connection time and applied to all pushed messages
-- Position updates are only pushed for entities whose current position falls within the scope's geographic bounds and whose type matches the scope's entity type filter
-- Alert events are pushed per the scope rules defined in ADR-012
-- Reconnection is handled automatically if the WebSocket connection drops; scope is reloaded on reconnect
-- The operator does not need to manually refresh to see new data
+- The dashboard maintains a persistent authenticated WebSocket connection to the API.
+- Position updates can be pushed without REST polling.
+- Reconnection is handled automatically.
+- After workspace scope is introduced, the API loads the saved scope and applies it server-side to pushed positions and alerts.
+- Scope filtering uses geographic bounds, entity-type filters, and alert-type rules defined by ADR-012.
+- Reconnection reloads current saved scope.
 
 ---
 
@@ -29,13 +28,23 @@ As an operator, I want the map to update continuously without requiring a page r
 
 ![Connection Setup](../../../diagrams/docs/use-cases/US-02-live-map-updates/connection-setup.svg)
 
-How the dashboard establishes an authenticated, scoped WebSocket connection with the API, including JWT validation and scope loading from TimescaleDB.
-
 ### Update Push
 
 ![Update Push](../../../diagrams/docs/use-cases/US-02-live-map-updates/update-push.svg)
 
-How a position update flows from the position consumer through the `position-updates` Redis pub/sub channel to the operator's map, with scope filtering applied per connection before any message is pushed.
+The Position Consumer publishes `position-updates` to Redis pub/sub; API instances forward relevant events to their local WebSocket connections.
+
+---
+
+## Phase Boundary Note
+
+This use case describes **final v1 behavior**. The roadmap intentionally introduces it incrementally:
+
+- Phase 03: authenticated API/WebSocket foundation and first alert delivery on the current API instance;
+- Phase 07: durable workspace configuration and server-side scope filtering;
+- Phase 08: multi-instance alert fan-out through Redis `alert-events`.
+
+Do not pull Phase 07/08 functionality into Phase 03 solely because the final-state use-case diagrams show it.
 
 ---
 
@@ -43,4 +52,4 @@ How a position update flows from the position consumer through the `position-upd
 
 Justifies: [ADR-008 - Express API Layer](../../adr/ADR-008-express-api-layer.md), [ADR-012 - Workspace Scope and Server-Side Alert Filtering](../../adr/ADR-012-workspace-scope-alert-filtering.md)
 
-REST polling at the required refresh rate would produce excessive request volume and add unnecessary latency. A persistent WebSocket connection, served via the `ws` library attached to the Express HTTP server, pushes updates as they arrive with minimal overhead. Node's event loop is a natural fit for holding many concurrent WebSocket connections open while fanning scoped updates to dashboard clients. Scope filtering on the server (rather than the client) ensures bandwidth cost is proportional to what the operator cares about, not the total system event rate.
+WebSockets provide low-latency push without frequent REST polling. Scope is enforced on the server once workspace functionality exists so irrelevant/out-of-scope events are not intentionally sent to the client.

@@ -5,61 +5,27 @@
 Implement Sentinel's key correlated anomaly:
 
 ```text
-SIGNAL_LOSS + PROXIMITY → COMPOSITE
+SIGNAL_LOSS + UNSCHEDULED PROXIMITY → COMPOSITE
 ```
 
-This is the most complex state machine in the system. Implement and test both paths completely before moving on.
+## Paths to Test
 
----
+### Active-dark
+A signal-loss episode is still active when proximity arrives. Emit one COMPOSITE and mark the episode so another candidate cannot emit a second composite.
 
-## Two Paths to Test
-
-### Active-dark path
-
-Entity A goes dark. While still dark, Entity A's last-known position comes close to Entity B.
-
-Expected outcome:
-
-- `alert-state:{entity_a_id}` exists with `composite_issued=0`
-- Alert Evaluator detects the proximity via `proximity.candidates`
-- emits `COMPOSITE` alert with `supersedes_alert_ids` referencing the `SIGNAL_LOSS` alert
-- sets `composite_issued=1` on `alert-state:{entity_a_id}`
-- a second proximity event for the same episode does not emit a second `COMPOSITE`
-
-### Recent-loss path
-
-Entity A goes dark, a `SIGNAL_LOSS` is emitted. Entity A resumes broadcasting. Position Consumer writes `recent-loss:{entity_a_id}` and deletes `alert-state:{entity_a_id}`. Entity A then comes close to Entity B within `COMPOSITE_CORRELATION_WINDOW_MS`.
-
-Expected outcome:
-
-- `recent-loss:{entity_a_id}` exists
-- Alert Evaluator emits `COMPOSITE` and DELs `recent-loss:{entity_a_id}`
-- subsequent proximity events for Entity A find no `recent-loss` key and produce `UNSCHEDULED_PROXIMITY`
+### Recent-loss
+The entity resumes before proximity. Position Consumer writes `recent-loss:{entity_id}` before removing active dark state. If proximity arrives within the TTL window, emit COMPOSITE and consume the recent-loss key.
 
 ### Window expiry
+If the recent-loss TTL expires before proximity, the later encounter remains `UNSCHEDULED_PROXIMITY` only.
 
-Entity A goes dark, resumes, but no proximity occurs within `COMPOSITE_CORRELATION_WINDOW_MS`.
+## Required Failure Experiments
 
-Expected outcome:
-
-- `recent-loss:{entity_a_id}` TTL expires
-- subsequent proximity produces `UNSCHEDULED_PROXIMITY` only
-
----
-
-## Learning Goals
-
-- stateful event correlation across time
-- temporal correlation windows using Redis TTLs as enforcement
-- consumed keys as "single-use correlation opportunities"
-- event time (why `dark_since_ms` uses source telemetry timestamp)
-- incident supersession and what it means for the operator
-
----
+- repeated candidate for one signal-loss episode produces one COMPOSITE
+- replay after COMPOSITE emission creates no duplicate durable composite
+- test events immediately before and after correlation-window expiry
+- verify deterministic `supersedes_alert_ids`
 
 ## Exit Criteria
 
-- all three paths above pass deterministic tests using the synthetic generator
-- a `COMPOSITE` alert is emitted exactly once per signal-loss episode regardless of how many proximity events arrive
-- the `SIGNAL_LOSS` alert referenced in `supersedes_alert_ids` is correctly identified
-- the correlation window enforces the boundary: proximity after expiry produces `UNSCHEDULED_PROXIMITY`
+Active-dark, recent-loss, and expiry paths pass deterministic tests; one COMPOSITE is produced per qualifying signal-loss episode; and the existing alert delivery path persists/exposes it.

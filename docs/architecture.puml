@@ -34,144 +34,118 @@ skinparam queue {
     FontColor #e9d5ff
 }
 
-' --- Row 1: External Feeds ---
-together {
-    node "External Feeds" #1e3a2a {
-        component [OpenSky Network\n(ADS-B · OAuth2)] as ADSB #2d5a3d
-        component [AISHub\n(AIS)] as AIS #2d5a3d
-    }
-
-    node "Dev Tooling" #3a3a1a {
-        component [Load Generator\n(synthetic anomaly injection)] as LOADGEN #5a5a1a
-    }
-
-    node "Identity Provider" #1a1a3a {
-        component [Google OAuth 2.0\n(ID token verification)] as GOOGLE #2d2d5a
-    }
+node "External Feeds" #1e3a2a {
+    component [OpenSky Network\n(ADS-B)] as ADSB #2d5a3d
+    component [AISHub\n(AIS)] as AIS #2d5a3d
 }
 
-' --- Row 2: Ingestion ---
+node "Dev Tooling" #3a3a1a {
+    component [Load Generator\n(synthetic anomaly injection)] as LOADGEN #5a5a1a
+}
+
+node "Identity Provider" #1a1a3a {
+    component [Google OAuth 2.0\n(ID token verification)] as GOOGLE #2d2d5a
+}
+
 node "Ingestion Layer" #1a2a3a {
-    component [Ingestion Poller\n(per region)] as POLLER #1e3a5a
+    component [Ingestion Poller] as POLLER #1e3a5a
 }
 
-' --- Row 3: Message Broker ---
 node "Message Broker" #2a1a3a {
-    queue [adsb.raw  |  ais.raw] as KAFKA_RAW
+    queue [adsb.raw | ais.raw] as KAFKA_RAW
     queue [position.normalized] as KAFKA_NORM
-    queue [adsb.dlq  |  ais.dlq\n(dead-letter)] as KAFKA_DLQ #5a1a1a
-    queue [deviation.candidates] as KAFKA_DEV_CAND
-    queue [proximity.candidates] as KAFKA_PROX_CAND
+    queue [adsb.dlq | ais.dlq] as KAFKA_DLQ #5a1a1a
+    queue [deviation.candidates] as KAFKA_DEV
+    queue [proximity.candidates] as KAFKA_PROX
     queue [alerts] as KAFKA_ALERTS
 }
 
-' --- Row 4: Processing ---
 together {
     node "Position Consumer" #1a2a3a {
-        component [normalise + write\nto TimescaleDB + Redis] as POS_CONSUMER #1e3a5a
-    }
-
-    node "Correlation Worker" #1a2a3a {
-        component [proximity detection\nentity graph + proximity.candidates] as CORR_WORKER #1e3a5a
+        component [normalise + history + live state\nH3 history/live cells] as POS #1e3a5a
     }
 
     node "Deviation Detector" #1a2a3a {
-        component [reference route comparison\nstateless · deviation.candidates publisher] as DEV_DETECTOR #1e3a5a
+        component [stateless reference-route\nclassification] as DEV #1e3a5a
+    }
+
+    node "Correlation Worker" #1a2a3a {
+        component [H3 candidate lookup + exact distance\nKNOWN_ASSOCIATE filter + graph evidence] as CORR #1e3a5a
     }
 }
 
-' --- Row 5: Persistence ---
 together {
     node "TimescaleDB" #0c2a3a {
-        database [position history · alerts\nroute_references · users · workspaces\ntime-partitioned by observed_at\ngeo_cell: index column (not partition)] as TSDB #0c4a6e
-    }
-
-    node "Neo4j" #0a2a1a {
-        database [entity graph\nproximity episodes (PROXIMITY_EVENT edges)\nknown associates (KNOWN_ASSOCIATE edges)] as NEO4J #14532d
+        database [position_history · alerts\nroute_references · route_reference_points\nusers · user_workspaces\ntime partition: observed_at\ngeo_cell: indexed column] as TSDB #0c4a6e
     }
 
     node "Redis" #3a0a0a {
-        database [live entity state · leader election\nentity:live:{id} · alert-state:{id} (hash)\nrecent-loss:{id} · proximity-episode:{pair}\ndeviation-state:{id}\npub/sub: position-updates · alert-events] as REDIS #7f1d1d
+        database [entity:live:{id}\ngeo-cell:{h3} sorted sets\nalert-state / recent-loss\ndeviation-state / proximity-episode\nleader lease\nposition-updates / alert-events] as REDIS #7f1d1d
+    }
+
+    node "Neo4j" #0a2a1a {
+        database [Entity\nPROXIMITY_EVENT\nKNOWN_ASSOCIATE] as NEO4J #14532d
     }
 }
 
-' --- Row 6: Alert ---
 node "Alert Layer" #2a1a3a {
-    component [Alert Evaluator\n(leader-elected · hybrid inputs)\nsignal-loss via Redis scan\ndeviation + proximity via Kafka\ncomposite via supersession] as ALERT #4c1d95
+    component [Alert Evaluator\nleader-elected · hybrid inputs\nsignal loss via Redis scan\nroute deviation via Kafka\nproximity/composite via Kafka + Redis] as ALERT #4c1d95
 }
 
-' --- Row 7: API ---
 node "API Layer" #1a2a3a {
-    component [Dashboard API\nREST  +  WebSocket] as API #1e3a5a
+    component [Dashboard API\nREST + WebSocket] as API #1e3a5a
 }
 
-' --- Row 8: Dashboard ---
 node "Dashboard" #1e3a2a {
-    component [Angular + Leaflet\nLive Map  +  Alert Feed] as DASH #2d5a3d
+    component [Angular + Leaflet\nLive Map + Alert Feed + Investigation] as DASH #2d5a3d
 }
 
-' --- Connections ---
+ADSB -[#4ade80]down-> POLLER
+AIS -[#4ade80]down-> POLLER
+LOADGEN -[#facc15]down-> KAFKA_RAW
+POLLER -[#facc15]down-> KAFKA_RAW
 
-' feeds -> poller (green)
-ADSB        -[#4ade80]down->  POLLER
-AIS         -[#4ade80]down->  POLLER
+KAFKA_RAW -[#a78bfa]down-> POS
+POS -[#f87171]right-> KAFKA_DLQ
+POS -[#38bdf8]down-> TSDB
+POS -[#f87171]down-> REDIS
+POS -[#a78bfa]right-> KAFKA_NORM
 
-' load generator -> raw topics directly (yellow)
-LOADGEN     -[#facc15]down->  KAFKA_RAW
+KAFKA_NORM -[#a78bfa]down-> DEV
+KAFKA_NORM -[#a78bfa]down-> CORR
 
-' poller -> raw topics (yellow)
-POLLER      -[#facc15]down->  KAFKA_RAW
+DEV -[#38bdf8]down-> TSDB : "reference routes"
+DEV -[#a78bfa]down-> KAFKA_DEV
 
-' broker: raw -> position consumer (purple)
-KAFKA_RAW   -[#a78bfa]down->  POS_CONSUMER
+CORR -[#f87171]down-> REDIS : "live/H3 state"
+CORR <-[#4ade80]-> NEO4J : "KNOWN_ASSOCIATE read\nPROXIMITY_EVENT write"
+CORR -[#a78bfa]down-> KAFKA_PROX
 
-' consumers -> DLQ on malformed event (red)
-POS_CONSUMER -[#f87171]right-> KAFKA_DLQ
+KAFKA_DEV -[#a78bfa]down-> ALERT
+KAFKA_PROX -[#a78bfa]down-> ALERT
+REDIS <-[#fb923c]-> ALERT : "signal-loss +\nepisode state"
+TSDB -[#fb923c]-> ALERT : "last-known position\n(signal loss payload only)"
 
-' position consumer -> persistence
-POS_CONSUMER -[#38bdf8]down-> TSDB
-POS_CONSUMER -[#f87171]down-> REDIS
+note right of ALERT
+  No direct Neo4j dependency.
+  KNOWN_ASSOCIATE filtering is owned
+  by the Correlation Worker before
+  proximity.candidates is published.
+end note
 
-' position consumer -> normalized topic (for correlation worker + deviation detector)
-POS_CONSUMER -[#a78bfa]right-> KAFKA_NORM
-
-' normalized -> correlation worker + deviation detector
-KAFKA_NORM  -[#a78bfa]down->  CORR_WORKER
-KAFKA_NORM  -[#a78bfa]down->  DEV_DETECTOR
-
-' correlation worker reads live positions from Redis
-CORR_WORKER  -[#f87171]down-> REDIS
-
-' correlation worker -> Neo4j (write proximity edges) + proximity.candidates
-CORR_WORKER  -[#4ade80]down-> NEO4J
-CORR_WORKER  -[#a78bfa]down-> KAFKA_PROX_CAND
-
-' deviation detector reads route_reference_points from TimescaleDB
-DEV_DETECTOR -[#38bdf8]down-> TSDB
-
-' deviation detector -> deviation.candidates
-DEV_DETECTOR -[#a78bfa]down-> KAFKA_DEV_CAND
-
-' deviation.candidates + proximity.candidates -> alert evaluator (purple, Kafka-sourced inputs)
-KAFKA_DEV_CAND  -[#a78bfa]down-> ALERT
-KAFKA_PROX_CAND -[#a78bfa]down-> ALERT
-
-' alert evaluator: reads + writes Redis; reads TimescaleDB (last known position) and Neo4j (composite context)
-REDIS       <-[#fb923c]->     ALERT : "reads / writes"
-TSDB        -[#fb923c]->      ALERT : "reads\n(last known position)"
-NEO4J       -[#fb923c]down->  ALERT : "reads\n(composite context)"
-
-' alert evaluator -> alerts topic -> API (slate)
-ALERT       -[#94a3b8]down->  KAFKA_ALERTS
+ALERT -[#94a3b8]down-> KAFKA_ALERTS
 KAFKA_ALERTS -[#94a3b8]down-> API
 
-' API reads from stores and verifies identity with Google
-API         -[#38bdf8]left->  TSDB
-API         <-[#f87171]->     REDIS : "entity state /\nposition-updates /\nalert-events"
-API         -[#4ade80]left->  NEO4J
-API         -[#a78bfa]up->    GOOGLE
+API -[#38bdf8]left-> TSDB
+API <-[#f87171]-> REDIS : "live state + pub/sub"
+API -[#4ade80]left-> NEO4J : "investigation evidence"
+API -[#a78bfa]up-> GOOGLE
+API -[#94a3b8]down-> DASH
 
-' API -> dashboard
-API         -[#94a3b8]down->  DASH
+note bottom of KAFKA_ALERTS
+  Kafka processing: at-least-once.
+  Durable alert rows: idempotent / exactly-once effect.
+  WebSocket delivery: at-least-once; client dedupe required.
+end note
 
 @enduml

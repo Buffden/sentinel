@@ -1,5 +1,5 @@
 @startuml leader-election
-title US-07: Leader Election - One Instance Wins the Lease
+title US-07: Leader Election - One Active Evaluator Owns Rule State
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,46 +7,39 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-participant "Evaluator\nInstance A" as A
-participant "Evaluator\nInstance B" as B
+participant "Evaluator A" as A
+participant "Evaluator B" as B
 database "Redis\nalert-evaluator:leader" as Redis
-queue "Kafka\nalerts" as Kafka
+queue "Kafka\ndeviation.candidates +\nproximity.candidates" as Candidates
 
-note over A, B
-  Both instances start simultaneously.
-  Both attempt to acquire the leader lease.
+A -> Redis : SET leader instance_A NX PX TTL
+B -> Redis : SET leader instance_B NX PX TTL
+Redis --> A : OK
+Redis --> B : nil
+
+note over A
+  Lease holder becomes active evaluator.
+  It creates/joins the alert-evaluator Kafka consumer group
+  and also runs the scheduled signal-loss scan.
 end note
 
-A -> Redis : SET alert-evaluator:leader $instance_a NX PX $TTL_MS
-B -> Redis : SET alert-evaluator:leader $instance_b NX PX $TTL_MS
-
-note over Redis
-  NX = only set if key does not exist.
-  PX = expire after TTL_MS milliseconds.
-  Atomic. Exactly one instance wins.
-end note
-
-Redis --> A : OK (lease acquired - Instance A is leader)
-Redis --> B : nil (lease already held - Instance B is follower)
+A -> Candidates : join + poll evaluator consumer group
 
 note over B
-  Follower polls the lease key.
-  Runs no evaluation.
-  Emits no alerts.
-  Waits for the key to expire.
+  Follower does not join/poll the evaluator consumer group
+  and does not run rule evaluation.
+  It only polls/attempts lease acquisition.
 end note
 
-loop every heartbeat interval (< TTL_MS)
-  A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen PEXPIRE('alert-evaluator:leader', $TTL_MS)
-  note over Redis
-    GET-then-PEXPIRE via Lua (atomic).
-    SET XX PX is NOT safe for renewal —
-    it overwrites the key value without checking
-    who holds it; a slow old leader could
-    accidentally steal a lease held by a new leader.
-    Lua compare-and-expire prevents this.
-  end note
-  A -> Kafka : emit alerts (leader only)
+loop heartbeat while owner
+  A -> Redis : atomic compare-and-PEXPIRE\nonly if value == instance_A
+  Redis --> A : renewed or lease lost
 end
+
+note over Redis
+  Exactly one lease value can exist at a time,
+  but lease coordination is not exactly-once transport.
+  Deterministic alert identity remains required for replay safety.
+end note
 
 @enduml

@@ -7,56 +7,64 @@
 
 ## Context
 
-The ingestion layer must receive positional telemetry from ADS-B and AIS feeds and deliver it to the position consumer via Kafka. The feeds are polled on a fixed interval and produce bursty, variable-volume data  - coverage gaps, transponder dropouts, and polling-interval jitter mean the arrival rate is unpredictable.
-
-Two approaches were considered:
-
-1. Poller → HTTP POST directly to downstream services
-2. Poller → Kafka topic → downstream consumers
+ADS-B/AIS polling produces bursty, variable-rate telemetry. Downstream services must be able to restart, lag temporarily, and consume independently without forcing the ingestion poller to coordinate their availability.
 
 ---
 
 ## Decision
 
-Use Kafka as the message broker between the ingestion poller and all downstream consumers.
+Use Kafka semantics as the event backbone:
 
-- **Local development (Docker Compose):** Redpanda - single binary, no ZooKeeper/KRaft setup, Kafka-compatible API
-- **Production (AWS):** Amazon MSK (managed Kafka) - operationally managed, integrates with IAM and VPC, same client code as local with no changes required
+- Redpanda locally in Docker Compose;
+- Amazon MSK as the intended AWS deployment target.
+
+The ingestion poller publishes raw source records to `adsb.raw` / `ais.raw`; downstream stages communicate through documented Kafka topics rather than private service-to-service HTTP calls.
 
 ---
 
 ## Reasoning
 
-**Decoupling producers from consumers.** With direct HTTP, the poller is coupled to the availability and throughput of every downstream service. If the position consumer is slow or restarting, the poller either blocks, drops data, or needs its own retry/buffer logic. Kafka eliminates this  - the poller publishes and moves on.
+### Decoupling and buffering
 
-**Absorbing bursts.** ADS-B/AIS feeds can spike when a poller catches up after a gap. Kafka acts as a temporal buffer, letting consumers process at their own pace without back-pressure propagating to the producer.
+The producer can publish through downstream slowdowns/restarts while consumers catch up independently from retained offsets.
 
-**Fan-out without coordination.** The position consumer reads `adsb.raw` and `ais.raw`; the normalised output (`position.normalized`) is independently consumed by the correlation worker and deviation detector. With direct HTTP, the poller would need to know about and call every downstream service. With Kafka, new consumers can be added at any stage of the pipeline without changing the upstream producer.
+### Fan-out
 
-**Replay.** Kafka's log retention means a consumer can replay events from a past offset  - useful for backfilling Neo4j after a correlation worker restart, or re-running a corrected anomaly rule.
+`position.normalized` can be consumed independently by Correlation Worker and Deviation Detector without the Position Consumer knowing their addresses or synchronizing their execution.
 
-**Dead-letter queue.** Malformed events are routed to a DLQ topic rather than dropped or crashing the consumer  - this is natural with Kafka's topic model.
+### Replay
+
+Kafka retention supports two explicit modes:
+
+- crash recovery: resume from committed offsets and process normally;
+- intentional backfill: use a separate consumer group/mode for an explicitly rebuildable target while suppressing live side effects.
+
+Replay is **not** a promise that every derived store can be reconstructed by rewinding its live service unchanged. For example, a total Neo4j graph-loss rebuild requires dedicated offline recomputation because historical proximity detection depends on pair/spatial state; see US-10.
+
+### DLQ
+
+Malformed raw records can be preserved on source-specific DLQ topics with rejection metadata instead of being silently dropped or crashing the consumer.
 
 ---
 
 ## Alternatives Considered
 
-### Direct HTTP POST (rejected)
-- Tight coupling between poller and consumers
-- Poller must implement retry, backoff, and circuit breaking itself
-- No replay capability
-- Fan-out requires the poller to know all downstream addresses
-- Simpler operationally (no broker to run), but the coupling cost is too high for a streaming system
+### Direct HTTP POST — rejected
 
-### RabbitMQ (rejected)
-- Message-queue model (point-to-point or pub/sub with exchanges) rather than a log
-- No native replay from offset  - once a message is consumed and acked, it's gone
-- Less natural fit for time-series event streams where replay and backfill are first-class concerns
+- couples producer throughput/availability to consumers;
+- requires producer-side retry/buffering;
+- poor fan-out model;
+- no retained offset replay.
+
+### RabbitMQ — rejected
+
+A queue/exchange model can provide messaging, but retained log replay and independent offset-based consumers are more natural for Sentinel's streaming/recovery learning goals.
 
 ---
 
 ## Consequences
 
-- Adds operational complexity: Redpanda (local) or MSK (AWS) must be running before any consumer can process data
-- Consumers must handle at-least-once delivery (Kafka does not guarantee exactly-once without additional configuration)
-- All writes downstream must be idempotent  - addressed by ADR-007
+- Broker availability becomes a core infrastructure dependency.
+- Consumers must assume at-least-once processing.
+- Durable side effects require deterministic idempotency identities (ADR-007).
+- Historical backfill behavior must be target-specific and isolated from the live path.

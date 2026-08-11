@@ -1,5 +1,5 @@
 @startuml detection
-title US-03: Detection - Signal Loss Identified
+title US-03: Detection - Signal Loss via Scheduled Redis Scan
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,46 +8,42 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nentity:live:{id}" as Redis
-database "Redis\nalert-state:{id}" as AlertState
+database "Redis\nentity:live:{id}" as LiveState
+database "Redis\nalert-state:{id}\n(hash)" as AlertState
 database "TimescaleDB\nposition_history" as TSDB
 queue "Kafka\nalerts" as Kafka
 
-note over Evaluator
-  Only the elected leader instance
-  runs evaluation. Followers are
-  on standby. (ADR-005)
-end note
+loop scheduled scan
+  Evaluator -> LiveState : SCAN entity:live:*\nread last_seen_ms
+  LiveState --> Evaluator : current live-state records
 
-loop every 10s (scheduled scan)
-  Evaluator -> Redis : SCAN entity:live:* + HGETALL each key
-  Redis --> Evaluator : { entity_id, last_seen_ms, lat, lon } for all live entities
+  alt now() - last_seen_ms > threshold for entity type
+    Evaluator -> AlertState : HGETALL alert-state:{entity_id}
+    AlertState --> Evaluator : active loss state or nil
 
-  note over Redis
-    Detection is driven by last_seen_ms in the hash,
-    not by TTL expiry. Key TTL = 24h (safety-net) —
-    deliberately longer than SIGNAL_LOSS_THRESHOLD_MS
-    so the key cannot expire between scan cycles.
-    Dashboard ghost cleanup is client-side (see US-01).
-  end note
+    alt no active signal-loss episode
+      Evaluator -> TSDB : SELECT last known position\nfor entity_id ORDER BY observed_at DESC LIMIT 1
+      TSDB --> Evaluator : last known position
 
-  alt now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS
-    Evaluator -> AlertState : GET alert-state:{entity_id}
+      Evaluator -> Evaluator : dark_since_ms = live.last_seen_ms\nalert_id = entity_id + ':SIGNAL_LOSS:' + dark_since_ms
+      Evaluator -> Kafka : publish deterministic SIGNAL_LOSS
+      Evaluator -> AlertState : HSET alert-state:{entity_id}\ndark_since_ms\nsignal_loss_alert_id\ncomposite_issued=0
 
-    alt no active alert
-      Evaluator -> TSDB : SELECT last known position\nWHERE entity_id = ? ORDER BY timestamp_ms DESC LIMIT 1
-      TSDB --> Evaluator : { lat, lon, timestamp_ms }
-
-      Evaluator -> Kafka : publish to alerts\n{ alert_id, alert_type: SIGNAL_LOSS, entity_id,\n  last_known_position, duration_ms }
-      Evaluator -> AlertState : SET alert-state:{entity_id} $last_seen_ms\n(value = dark_since_ms; no TTL - cleared by position consumer on entity resume)
-
-    else alert already active
-      Evaluator -> Evaluator : skip - suppressed by alert-state key\nsee alert-suppression diagram
+      note over Evaluator
+        Kafka publication can be replayed around failures.
+        Durable API persistence deduplicates by deterministic alert_id.
+        alert-state prevents normal repeated scan emission.
+      end note
+    else active loss already recorded
+      Evaluator -> Evaluator : no new logical signal-loss episode
     end
-
-  else entity seen within threshold
-    Evaluator -> Evaluator : no action
   end
 end
+
+note over LiveState
+  Redis TTL = 24h safety net.
+  Signal-loss detection uses last_seen_ms;
+  TTL expiry is not the detector.
+end note
 
 @enduml

@@ -1,5 +1,5 @@
 @startuml failover
-title US-07: Failover - Leader crash, clean shutdown (compare-before-DEL), and follower takeover
+title US-07: Failover - Ownership-Safe Lease + Replay-Safe Durable Effect
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -7,71 +7,46 @@ skinparam participantBackgroundColor #F8F8F8
 skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
-participant "Evaluator\nInstance A\n(leader)" as A
-participant "Evaluator\nInstance B\n(follower)" as B
+participant "Evaluator A\n(current leader)" as A
+participant "Evaluator B\n(follower)" as B
 database "Redis\nalert-evaluator:leader" as Redis
-queue "Kafka\nalerts" as Kafka
+queue "Kafka\ncandidate topics" as Candidates
+queue "Kafka\nalerts" as Alerts
+participant "API" as API
+database "TimescaleDB\nalerts" as TSDB
 
-== Normal operation - compare-and-renew ==
+A -> Redis : compare-and-PEXPIRE if value == instance_A
+Redis --> A : renewed or ownership lost
 
-A -> Kafka : emitting alerts normally
-A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen PEXPIRE('alert-evaluator:leader', $TTL_MS) end
-Redis --> A : 1 (TTL extended) or 0 (key changed — lease lost)
+== Leader crash ==
+A ->x A : crash; renewal stops
+Redis -> Redis : lease expires
+B -> Redis : SET key instance_B NX PX TTL
+Redis --> B : OK
+B -> Candidates : join/poll alert-evaluator consumer group
 
-note over A
-  Ownership-safe renewal via Lua compare-and-expire.
-  SET XX PX is NOT safe: it overwrites the value
-  without checking who currently holds the key.
-  A slow old leader could steal a lease already
-  acquired by a new leader using SET XX PX.
-  The Lua GET+PEXPIRE pattern prevents this.
+note over A, B
+  Only the lease holder is an active evaluator.
+  Failover may still occur near a Kafka replay boundary;
+  leadership is not exactly-once transport.
 end note
 
-== Scenario 1: Leader crash (ungraceful) ==
+B -> Alerts : publish deterministic logical alert
+Alerts -> API : consume at-least-once
+API -> TSDB : INSERT ... ON CONFLICT(alert_id) DO NOTHING
 
-A ->x A : crash — lease renewal stops — TTL counts down
+note over TSDB
+  If A had already published the same logical alert
+  before crashing, replay produces the same alert_id.
+  Durable state converges on one row.
+end note
 
-loop follower polling
-  B -> Redis : GET alert-evaluator:leader
-  Redis --> B : $instance_a (lease still held)
-end
+== Clean shutdown ==
+B -> Redis : compare-and-DEL only if value == instance_B
 
 note over Redis
-  TTL expires.
-  Key is automatically deleted by Redis.
-end note
-
-Redis -> Redis : key expired and deleted
-
-B -> Redis : SET alert-evaluator:leader $instance_b NX PX $TTL_MS
-Redis --> B : OK (lease acquired — Instance B is now leader)
-
-note over B
-  Failover complete within one TTL window.
-  No manual intervention required.
-  No duplicate alerts: B was not evaluating while A held the lease.
-  Deterministic alert_id + ON CONFLICT DO NOTHING handles
-  the case where A published to Kafka before crashing
-  but did not commit the Kafka offset — B re-processes safely.
-end note
-
-B -> Kafka : emit alerts (new leader)
-
-== Scenario 2: Clean shutdown (compare-before-DEL) ==
-
-note over A
-  Instance A is shutting down gracefully.
-  Must NOT delete the lease if a new leader
-  has already acquired it (race window).
-end note
-
-A -> Redis : Lua: if GET('alert-evaluator:leader') == $instance_a\nthen DEL('alert-evaluator:leader') end
-Redis --> A : 1 (deleted own lease) or 0 (new leader holds it — skip DEL)
-
-note over A
-  Atomic compare-before-DEL via Lua script.
-  If B already acquired the lease, DEL is skipped.
-  B continues uninterrupted.
+  A stale former owner can neither extend nor delete
+  another instance's lease.
 end note
 
 @enduml

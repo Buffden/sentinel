@@ -1,5 +1,5 @@
 @startuml geo-cell-write
-title US-12: Geo-Cell Write - Two H3 Resolutions: HISTORY for TimescaleDB, LIVE for Redis sorted sets
+title US-12: Geo-Cell Write - Historical Index + Live Redis Spatial Membership
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,43 +9,44 @@ skinparam noteBackgroundColor #FFFDE7
 
 queue "Kafka\nadsb.raw / ais.raw" as Kafka
 participant "Position\nConsumer" as Consumer
+database "Redis\nentity:live:{id}" as LiveState
+database "Redis\ngeo-cell:{cell}\n(sorted set)" as GeoCell
 database "TimescaleDB\nposition_history" as TSDB
-database "Redis\ngeo-cell:{cell_id}\n(sorted set)" as GeoCell
+queue "Kafka\nposition.normalized" as Normalized
 
-Kafka -> Consumer : consume event\n{ entity_id, lat, lon, timestamp_ms }
+Kafka -> Consumer : consume raw event\n{ entity_id, lat, lon, timestamp_ms, ... }
+Consumer -> Consumer : normalize + compute\nhistory_geo_cell = H3(..., HISTORY_H3_RESOLUTION)\nlive_geo_cell = H3(..., LIVE_H3_RESOLUTION)
 
-Consumer -> Consumer : compute H3 cell IDs:\nhistory_cell = h3.latLngToCell(lat, lon, HISTORY_H3_RESOLUTION)\nlive_cell    = h3.latLngToCell(lat, lon, LIVE_H3_RESOLUTION)
+Consumer -> LiveState : read stored last_seen_ms + live_geo_cell
+LiveState --> Consumer : previous state or nil
 
-note over Consumer
-  HISTORY_H3_RESOLUTION — configurable:
-    used for TimescaleDB geo_cell index column.
-    Larger cells = fewer distinct values = better index selectivity
-    for bounding-box queries over historical windows.
-  LIVE_H3_RESOLUTION — configurable, tuned independently:
-    used for Redis sorted sets (geo-cell proximity index).
-    Smaller cells = tighter spatial locality
-    for proximity k-ring expansion.
-  If both resolutions are equal, only one cell ID is computed.
-  Tune both during implementation based on entity density
-  and PROXIMITY_THRESHOLD_METRES.
-end note
+alt incoming.timestamp_ms < stored.last_seen_ms
+  Consumer -> Consumer : stale/out-of-order event\ndo not regress Redis live state or geo-cell membership
+else event accepted for live state
+  alt previous live_geo_cell exists AND changed
+    Consumer -> GeoCell : ZREM geo-cell:{old_live_geo_cell} entity_id
+  end
 
-Consumer -> TSDB : INSERT INTO position_history\n(\n  entity_id,\n  geo_cell,        -- history_geo_cell (HISTORY_H3_RESOLUTION)\n  observed_at,     -- to_timestamp(timestamp_ms/1000.0)\n  timestamp_ms,    -- source fidelity + logical idempotency key\n  lat, lon, altitude\n)\nON CONFLICT (entity_id, observed_at) DO NOTHING
+  Consumer -> GeoCell : ZADD geo-cell:{new_live_geo_cell}\nscore=timestamp_ms member=entity_id
+  Consumer -> LiveState : HSET latest position + last_seen_ms + live_geo_cell\nrefresh 24h safety TTL
+end
+
+Consumer -> TSDB : INSERT position_history\n(entity_id, observed_at, timestamp_ms, geo_cell=history_geo_cell, ...)\nON CONFLICT (entity_id, observed_at) DO NOTHING
 
 note over TSDB
-  Hypertable partitioned by observed_at (TIMESTAMPTZ).
-  geo_cell is an ordinary indexed column, not a partition dimension.
-  Queries filter on geo_cell IN ($cells) AND observed_at BETWEEN $t1 AND $t2.
-  TimescaleDB chunk exclusion applies to the time dimension only.
+  Hypertable partitions by observed_at only.
+  geo_cell is an indexed column used to narrow rows
+  inside selected time chunks.
+  There is no TimescaleDB chunk per H3 cell.
 end note
 
-Consumer -> GeoCell : ZADD geo-cell:{live_cell} $timestamp_ms $entity_id
+Consumer -> Normalized : publish accepted canonical event\n{ entity_id, timestamp_ms, history_geo_cell, live_geo_cell, ... }
+
 note over GeoCell
-  Score = last_seen_ms.
-  Correlation Worker queries with ZRANGEBYSCORE
-  to filter out stale members before proximity check.
-  LIVE_H3_RESOLUTION cells are smaller, giving
-  tighter k-ring expansion at proximity detection time.
+  Sorted-set score is last_seen_ms.
+  Correlation Worker uses ZRANGEBYSCORE
+  across the current cell + computed k-ring.
+  Stale members age out logically by score.
 end note
 
 @enduml

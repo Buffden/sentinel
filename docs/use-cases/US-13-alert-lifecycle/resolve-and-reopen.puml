@@ -1,5 +1,5 @@
 @startuml resolve-and-reopen
-title US-13: Resolve and Reopen - Resolved Alert Does Not Block New Detection
+title US-13: Resolve and Recurrence - Terminal Resolution Creates New Incident on Recurrence
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,51 +8,36 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 actor Operator
+participant "Angular\nDashboard" as Dashboard
 participant "Express API" as API
-database "TimescaleDB\nalerts table" as TSDB
-participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "TimescaleDB\nalerts" as TSDB
+participant "Alert\nEvaluator" as Evaluator
 queue "Kafka\nalerts" as Kafka
 
-== Operator Resolves Alert ==
-
-Operator -> API : PATCH /alerts/VesselB:SIGNAL_LOSS:1700000000000\n{ status: RESOLVED }
-
-API -> TSDB : UPDATE alerts SET status = 'RESOLVED',\nresolved_at = now()\nWHERE alert_id = 'VesselB:SIGNAL_LOSS:1700000000000'
-
-note over TSDB
-  Record stays in the table permanently.
-  This is the audit trail - never deleted.
-  Resolved alerts are queryable for history.
-end note
-
-TSDB --> API : updated
-API --> Operator : 200 OK
-
-== Anomaly Recurs Later ==
-
-note over Evaluator
-  VesselB goes dark again in a new time window.
-  Alert Evaluator does not read the alerts table.
-  It evaluates based on last_seen_ms in the Redis hash
-  and the alert-state:{entity_id} suppression key.
-end note
-
-Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  dark_since_ms: 1700005000000 }
-
-note over Kafka
-  New dark_since_ms = new alert_id.
-  Completely independent of the resolved alert.
-  No reopen logic — just a fresh record.
-end note
-
-Kafka -> API : consume new alert event
-API -> TSDB : INSERT INTO alerts ( alert_id: VesselB:SIGNAL_LOSS:1700005000000, status: NEW, ... )\nON CONFLICT DO NOTHING
+Operator -> Dashboard : Resolve active alert
+Dashboard -> API : PATCH /alerts/{alert_id}\n{ status: RESOLVED }
+API -> TSDB : UPDATE alert\nSET status=RESOLVED, resolved_at=..., resolved_by=...
+TSDB --> API : durable terminal state
+API --> Dashboard : lifecycle update
+Dashboard --> Operator : alert shown as RESOLVED
 
 note over TSDB
-  Two separate rows now exist:
-  VesselB:SIGNAL_LOSS:1700000000000 -> RESOLVED
-  VesselB:SIGNAL_LOSS:1700005000000 -> NEW
-  Full history preserved.
+  RESOLVED is terminal.
+  The row is never reopened or overwritten.
+end note
+
+== Later, a new anomaly episode occurs ==
+
+Evaluator -> Kafka : publish alert with new deterministic\nepisode/window identity
+Kafka -> API : consume new logical alert
+API -> TSDB : INSERT new alert row\nON CONFLICT (alert_id) DO NOTHING
+TSDB --> API : new NEW incident
+API --> Dashboard : push new alert lifecycle event
+Dashboard --> Operator : new incident displayed separately
+
+note over Operator, TSDB
+  Historical filename retained for link stability.
+  Behavior is recurrence, not reopen.
 end note
 
 @enduml

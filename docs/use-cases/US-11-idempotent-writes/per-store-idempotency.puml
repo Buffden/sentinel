@@ -1,5 +1,5 @@
 @startuml per-store-idempotency
-title US-11: Per-Store Idempotency - Same Key, Different Mechanism
+title US-11: Idempotency by Logical Fact - Store-Specific Mechanisms
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -9,64 +9,40 @@ skinparam noteBackgroundColor #FFFDE7
 
 participant "Position\nConsumer" as PosConsumer
 participant "Correlation\nWorker" as CorrWorker
-database "TimescaleDB\nposition_history" as TSDB
+participant "Alert\nEvaluator" as Evaluator
+participant "API" as API
+database "TimescaleDB\nposition_history" as PositionDB
 database "Redis\nentity:live:{id}" as Redis
 database "Neo4j\nentity graph" as Neo4j
+database "TimescaleDB\nalerts" as AlertsDB
 
-note over PosConsumer
-  Reads from adsb.raw / ais.raw.
-  Writes to TimescaleDB and Redis.
+PosConsumer -> PositionDB : INSERT position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
+
+note over PositionDB
+  Position logical identity is entity + source event time.
+  observed_at is deterministically derived from timestamp_ms.
 end note
 
-PosConsumer -> PosConsumer : derive idempotency key\n{entity_id}:{timestamp_ms}
-
-PosConsumer -> TSDB : INSERT INTO position_history\n(entity_id, observed_at, timestamp_ms, lat, lon, geo_cell)\nON CONFLICT (entity_id, observed_at) DO NOTHING
-
-note right of TSDB
-  Duplicate row silently ignored.
-  Conflict target is (entity_id, observed_at) —
-  TimescaleDB requires the partition column in
-  any unique constraint on a hypertable.
-  observed_at = to_timestamp(timestamp_ms / 1000.0)
-  is deterministically derived, so equivalent in practice.
-end note
-
-note over PosConsumer
-  Redis HSET is NOT unconditionally idempotent.
-  An older replayed event would overwrite a newer value.
-  Timestamp guard required before every HSET.
-end note
-
-PosConsumer -> Redis : HGET entity:live:{entity_id} last_seen_ms
-Redis --> PosConsumer : $stored_ms (or nil)
-
-alt event.timestamp_ms > stored_ms (or nil)
-  PosConsumer -> Redis : HSET entity:live:{entity_id}\nlat $lat lon $lon last_seen_ms $ts
-  note right of Redis
-    Write proceeds: event is newer than stored state.
-    Conditional update prevents out-of-order replay
-    from overwriting a more recent position.
-  end note
-else event.timestamp_ms <= stored_ms
-  PosConsumer -> PosConsumer : skip Redis write\n(out-of-order or exact duplicate)
+PosConsumer -> Redis : read stored last_seen_ms
+Redis --> PosConsumer : stored timestamp or nil
+alt incoming timestamp newer than stored
+  PosConsumer -> Redis : write latest live state
+else duplicate/stale event
+  PosConsumer -> PosConsumer : skip live-state regression/redundant update
 end
 
-note over CorrWorker
-  Reads from position.normalized.
-  Writes PROXIMITY_EVENT edges to Neo4j.
-  Idempotency key = {pair_key}:{episode_start_ms}
-  (one edge per proximity episode, not per ping).
-end note
+CorrWorker -> CorrWorker : pair_key = min(a,b):max(a,b)\nepisode_id = pair_key:episode_start_ms
+CorrWorker -> Neo4j : MERGE PROXIMITY_EVENT\nON deterministic episode identity
 
-CorrWorker -> CorrWorker : pair_key = min(a,b) + ':' + max(a,b)\nidempotency_key = pair_key + ':' + episode_start_ms
+Evaluator -> Evaluator : derive type-specific deterministic alert_id
+Evaluator -> API : via Kafka alerts\n(same logical alert may be replayed)
+API -> AlertsDB : INSERT alert\nON CONFLICT (alert_id) DO NOTHING
 
-CorrWorker -> Neo4j : MERGE (a)-[e:PROXIMITY_EVENT {\n  idempotency_key: $key\n}]->(b)\nON CREATE SET e.episode_start_ms = $episode_start_ms,\n  e.distance_at_detection = $dist, e.lat = $lat, e.lon = $lon\nON MATCH SET e.last_seen_ms = $event_timestamp_ms
-
-note right of Neo4j
-  MERGE matches on idempotency_key.
-  If edge exists — update last_seen_ms only.
-  If edge absent — create it.
-  Never produces duplicate edges per episode.
+note over Evaluator, AlertsDB
+  Alert identity is type-specific.
+  Pair-based alerts include pair_key.
+  Durable DB effect is idempotent;
+  Kafka transport remains at-least-once.
 end note
 
 @enduml

@@ -1,119 +1,62 @@
-# IMPLEMENTATION_WORKFLOW.md
+# Implementation Workflow
 
-# Purpose
+This document defines how Sentinel implementation work is executed. The permanent phase roadmap lives in `docs/implementation/`; those files are intentional, versioned planning artifacts and must be kept aligned with the architecture.
 
-Sentinel intentionally does not maintain a permanent `docs/implementation/` directory.
-
-Detailed implementation plans are created **just in time**, based on the current architecture and the code that already exists.
-
-The goal is to:
-
-* avoid speculative implementation planning;
-* keep architectural documentation stable;
-* implement Sentinel in small, observable increments;
-* make implementation a hands-on system-design learning process;
-* ensure the developer understands and can defend what is being built.
-
-Claude should behave as a senior engineer pairing with the developer, not as an autonomous code generator.
+The companion `docs/IMPLEMENTATION_PLAYBOOK.md` defines the overall implementation philosophy. This file focuses on the per-phase working loop.
 
 ---
 
-# Sources of Truth
+## Sources of Truth
 
-Before implementing anything significant, use this order:
+Before implementing a checkpoint, use this order:
 
-1. `README.md`
+1. `README.md` — project scope and high-level architecture.
+2. `docs/adr/` — accepted architectural decisions and rejected alternatives.
+3. `docs/ARCHITECTURE.md` — service boundaries, ownership, data flow, and delivery semantics.
+4. `docs/DATA_MODEL.md` — canonical database, Redis, and Kafka contracts.
+5. `docs/use-cases/` — expected behavior and scenario-level flows.
+6. `docs/implementation/phase-XX-*.md` — implementation order and phase boundaries.
+7. Existing code, migrations, configuration, and tests — executable reality.
 
-   * project scope;
-   * current build phase;
-   * high-level build order.
-
-2. `docs/adr/`
-
-   * architectural decisions;
-   * rationale;
-   * rejected alternatives.
-
-3. `docs/ARCHITECTURE.md`
-
-   * service boundaries;
-   * ownership;
-   * data flow;
-   * system behavior.
-
-4. `docs/DATA_MODEL.md`
-
-   * canonical schemas;
-   * Redis keys;
-   * Kafka contracts;
-   * database contracts;
-   * event fields.
-
-5. `docs/use-cases/`
-
-   * expected behavior and scenarios.
-
-6. Existing code, migrations, configuration, and tests
-
-   * current executable reality.
+If implementation evidence contradicts an architectural document, stop before silently redesigning the system. Explain the evidence, update the relevant ADR/contract, then change code and documentation together.
 
 ---
 
-# Starting a Phase
+## Permanent Phase Roadmap
+
+Sentinel intentionally maintains the following implementation plans:
+
+1. Phase 01 — Infrastructure + Canonical Schemas + Observability Skeleton
+2. Phase 02 — Live Position Pipeline
+3. Phase 03 — Signal Loss + Alert Delivery Foundation
+4. Phase 04 — Route Deviation
+5. Phase 05 — Correlation Worker + Unscheduled Proximity
+6. Phase 06 — Composite Correlation
+7. Phase 07 — Workspace + Operator Scope
+8. Phase 08 — Alert Lifecycle + Distributed Fan-Out
+9. Phase 09 — Entity Investigation
+10. Phase 10 — Production Hardening + Failure Lab
+
+Do not delete or recreate this directory as an ad-hoc planning mechanism. Update the relevant phase file when an accepted architectural change alters implementation order or phase scope.
+
+---
+
+## Starting a Phase
 
 When beginning a phase:
 
-1. Read the relevant architecture and design documents.
-2. Inspect everything already implemented that the new work depends on.
-3. Identify what is already decided.
-4. Identify real implementation choices that remain open.
-5. Identify the system-design concepts involved.
-6. Produce a concise implementation plan for the current phase.
-7. Recommend the smallest useful first checkpoint.
+1. Read the relevant ADRs, architecture contracts, data model, use cases, and phase plan.
+2. Inspect the code already implemented by earlier phases.
+3. Separate what is already decided from implementation choices that remain open.
+4. Identify the system-design concepts and failure boundaries involved.
+5. Produce the smallest useful first checkpoint.
+6. Do not implement future-phase behavior unless it is a genuine prerequisite.
 
-Do not write code until the developer understands the first checkpoint.
-
-The plan should separate:
-
-## Already Decided
-
-Architecture that should be followed rather than debated again.
-
-## Implementation Choices
-
-Decisions that can reasonably be made during implementation.
-
-Examples:
-
-* Kafka partition count;
-* batching;
-* retry strategy;
-* library usage;
-* module structure;
-* connection-pool configuration;
-* timeout defaults.
-
-Explain meaningful trade-offs and recommend a starting choice.
-
-Values that depend on runtime behavior should be validated experimentally rather than treated as permanent truths.
-
-## Learning Goals
-
-Concepts the developer should understand while implementing the phase.
-
-## Checkpoints
-
-Small pieces of implementation that can be built and verified independently.
-
-## Failure Cases
-
-Important failures that should be understood or tested.
+Implementation choices such as Kafka partition count, batch size, pool sizing, timeout defaults, and library configuration should be treated as tunable unless an ADR makes them architectural guarantees.
 
 ---
 
-# Work in Small Checkpoints
-
-Do not implement an entire phase in one large code-generation pass.
+## Work in Small Observable Checkpoints
 
 Prefer:
 
@@ -121,321 +64,95 @@ concept
 → small experiment
 → minimal implementation
 → run it
-→ inspect it
-→ test failure behavior
-→ understand it
+→ inspect state
+→ inject the important failure
+→ fix/verify
+→ test the invariant
 → next checkpoint
 
-A checkpoint should produce a useful observable result.
-
-For example, a Kafka checkpoint might be:
-
-1. start Redpanda;
-2. create one topic;
-3. publish one event manually;
-4. consume it manually;
-5. inspect the partition and offset;
-6. then implement the same flow in application code.
-
-Do not hide unfamiliar infrastructure behind application abstractions before the developer has interacted with it directly.
+A checkpoint is not complete merely because code compiles. Infrastructure-heavy work should normally include implementation, a test, observable evidence, and an understood failure mode.
 
 ---
 
-# Prefer Vertical Slices
+## Vertical-Slice Rule
 
-Prefer proving one small end-to-end path over generating every layer in advance.
+Prefer proving one end-to-end path over generating every layer in advance.
 
-Good:
+For example, Phase 03 establishes the first alert serving slice:
 
-OpenSky sample event
-→ Kafka
-→ Position Consumer
-→ TimescaleDB
+```text
+Redis live state
+→ Alert Evaluator
+→ Kafka alerts
+→ API consumer
+→ TimescaleDB alerts
+→ authenticated WebSocket
+→ operator-visible alert
+```
 
-Then extend it.
+Later alert types reuse this serving path rather than redesigning it.
 
-Avoid starting with:
-
-* generic repository abstractions;
-* large utility layers;
-* speculative factories;
-* wrappers around every infrastructure dependency;
-* future-phase abstractions.
-
-Build enough structure for the current requirement.
-
-Refactor when repeated patterns actually appear.
+Phase boundaries matter: final-state use-case diagrams may show features delivered in later phases. The current phase file determines what must be implemented now.
 
 ---
 
-# Teach Before Automating
+## Delivery and Idempotency Mental Model
 
-When introducing an unfamiliar technology or distributed-systems concept, first establish the mental model.
+Sentinel uses at-least-once Kafka processing. Do not describe the whole pipeline as exactly-once.
 
-Examples include:
+The target guarantees are:
 
-* Kafka topics;
-* partitions;
-* consumer groups;
-* offsets;
-* replay;
-* at-least-once delivery;
-* idempotency;
-* event ordering;
-* TimescaleDB hypertables;
-* indexing;
-* Redis live state;
-* TTLs;
-* leader election;
-* leases;
-* Neo4j relationships;
-* H3;
-* WebSockets;
-* event time vs processing time.
-
-Use Sentinel-specific examples.
-
-Do not explain only library syntax.
-
-For example, before teaching `consumer.run()`, explain:
-
-* what Kafka is assigning to the consumer;
-* what an offset represents;
-* when an offset is committed;
-* what happens if the process crashes;
-* why the same event may be processed again.
+- Kafka processing: at-least-once.
+- Durable database side effects: idempotent / exactly-once effect through deterministic identity and database constraints.
+- Redis live state: monotonic by source event time; stale events cannot regress newer state.
+- WebSocket delivery: at-least-once; clients deduplicate by alert identity plus lifecycle version/status semantics.
+- Leader election: prevents concurrent active Alert Evaluators; it is not a substitute for durable idempotency.
 
 ---
 
-# Hands-On First
+## Failure-First Questions
 
-For unfamiliar infrastructure, prefer small manual experiments.
+For important distributed flows, explicitly ask:
 
-## Kafka / Redpanda
+- What if the event is delivered twice?
+- What if an older event arrives after a newer one?
+- What if persistence succeeds but the Kafka offset is not committed?
+- What if Redis restarts?
+- What if Neo4j succeeds but Kafka publication fails?
+- What if the Alert Evaluator loses its lease mid-evaluation?
+- What happens on service restart?
+- What happens during intentional historical backfill?
 
-The developer should eventually be able to:
-
-* create a topic;
-* inspect partitions;
-* produce a message;
-* consume a message;
-* inspect offsets;
-* restart a consumer;
-* observe replay;
-* understand consumer groups.
-
-## TimescaleDB
-
-The developer should:
-
-* inspect the schema;
-* insert data manually;
-* query it;
-* inspect indexes;
-* use `EXPLAIN ANALYZE`;
-* test duplicate insertion;
-* inspect hypertable/chunk behavior.
-
-## Redis
-
-The developer should:
-
-* inspect hashes;
-* inspect TTLs;
-* inspect sorted sets;
-* observe lease state;
-* watch keys expire;
-* manually inspect live entity state.
-
-## Neo4j
-
-The developer should:
-
-* create nodes;
-* create relationships;
-* query them;
-* inspect the graph;
-* understand `MERGE`;
-* see how duplicate evidence is prevented.
-
-## H3
-
-The developer should:
-
-* convert coordinates to H3 cells;
-* inspect neighboring cells;
-* move entities across cell boundaries;
-* understand how resolution changes candidate density.
-
-Claude should provide the commands needed for these experiments.
+Classify each failure as handled now, protected by an invariant, deliberately deferred, or out of scope.
 
 ---
 
-# Failure-First Thinking
+## Hands-On Infrastructure Expectations
 
-For important distributed flows, identify the relevant failure boundaries.
+The developer should be able to inspect the system directly:
 
-Ask questions such as:
+- Kafka/Redpanda: topics, partitions, consumer groups, offsets, lag, replay.
+- TimescaleDB: schema, rows, indexes, hypertable chunks, `EXPLAIN ANALYZE`, duplicate writes.
+- Redis: hashes, sorted sets, TTLs, lease ownership, pub/sub behavior.
+- Neo4j: nodes, relationships, `MERGE`, known-associate filtering, proximity evidence.
+- H3: cell conversion, neighbors/k-rings, boundary movement, resolution trade-offs.
+- WebSockets: connection authentication, event delivery, reconnection, duplicate tolerance.
 
-* What if the process crashes here?
-* What if this event is delivered twice?
-* What if an older event arrives after a newer one?
-* What if persistence succeeds but Kafka offset commit fails?
-* What if Redis disappears?
-* What if Neo4j succeeds but downstream publication fails?
-* What if two instances run at the same time?
-* What happens on restart?
-* What happens during replay?
-
-Not every failure must be solved immediately.
-
-Clearly distinguish:
-
-* handled now;
-* protected by another invariant;
-* deliberately deferred;
-* out of scope.
+Do not hide unfamiliar infrastructure behind abstractions before the underlying behavior is understood.
 
 ---
 
-# Tests Should Demonstrate Guarantees
+## After Each Meaningful Checkpoint
 
-Important tests should encode system invariants.
+Provide a short engineering debrief covering:
 
-Prefer tests such as:
+- what was built;
+- the data flow;
+- the main system-design concept;
+- the accepted trade-off;
+- the relevant failure behavior;
+- commands or queries the developer can run independently;
+- 2–4 knowledge-check questions;
+- the smallest logical next checkpoint.
 
-* replaying a position event does not create duplicate history;
-* older telemetry cannot replace newer Redis live state;
-* one proximity encounter produces one candidate episode;
-* a failed Kafka publish can be retried safely;
-* an expired alert evaluator cannot renew another instance's lease;
-* deterministic alert identity prevents duplicate durable alerts.
-
-Tests should explain why the distributed-system behavior is correct, not merely verify function syntax.
-
----
-
-# Observability Is Part of Implementation
-
-For every important component, the developer should know how to answer:
-
-> How do I know this is working?
-
-Show how to inspect:
-
-* application logs;
-* Kafka topics;
-* Kafka offsets;
-* consumer lag;
-* TimescaleDB rows;
-* query plans;
-* Redis keys;
-* TTLs;
-* Neo4j relationships;
-* Docker container health;
-* WebSocket events.
-
-Prefer observable evidence over assumptions.
-
----
-
-# Architectural Changes During Implementation
-
-Implementation may reveal that a planning assumption was wrong.
-
-If that happens:
-
-1. stop before silently changing architecture;
-2. explain the evidence;
-3. identify the affected ADR, architecture section, or data contract;
-4. present realistic alternatives;
-5. explain trade-offs;
-6. recommend an option;
-7. let the developer make the architectural decision;
-8. update documentation and code together.
-
-Do not preserve a clearly incorrect architectural assumption merely because it was previously documented.
-
-Do not silently redesign Sentinel inside implementation code.
-
----
-
-# Scope Control
-
-Work only on the current checkpoint and genuine prerequisites.
-
-Do not:
-
-* implement later phases opportunistically;
-* introduce infrastructure not in the architecture;
-* add speculative abstractions;
-* add ML functionality;
-* redesign services without discussion;
-* recreate the deleted implementation-plan directory;
-* turn tuning values into architectural guarantees without evidence.
-
-If useful future work is discovered, mention it briefly and continue the current task.
-
----
-
-# After Each Meaningful Checkpoint
-
-Give the developer a short debrief.
-
-## What We Built
-
-What now works?
-
-## Data Flow
-
-Where does data enter, move, and leave?
-
-## System-Design Concept
-
-What important concept did this checkpoint demonstrate?
-
-## Trade-Off
-
-What meaningful trade-off did we accept?
-
-## Failure Behavior
-
-What happens during the most relevant failure?
-
-## Verify It Yourself
-
-Give commands, queries, API calls, or experiments the developer can run independently.
-
-## Knowledge Check
-
-Ask 2–4 questions about the implementation.
-
-Examples:
-
-* Why can Kafka deliver this event more than once?
-* Why does this database write remain safe during replay?
-* Why is this state stored in Redis instead of TimescaleDB?
-* What happens if this service crashes immediately after this line?
-
-## Next Checkpoint
-
-Recommend the smallest logical next step.
-
----
-
-# Definition of Done
-
-A checkpoint is not complete merely because code was generated or compiled.
-
-For infrastructure-heavy work, completion should normally include:
-
-* implementation;
-* test;
-* running behavior;
-* observable verification;
-* relevant failure behavior;
-* developer understanding.
-
-The final success criterion is:
-
-> The developer can explain what was built, why it works, what can fail, how to inspect it, and what trade-offs were made.
+The success criterion is that the developer can explain what was built, why it works, what can fail, how to inspect it, and which trade-offs were accepted.

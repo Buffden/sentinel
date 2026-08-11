@@ -1,5 +1,5 @@
 @startuml signal-correlation
-title US-06: Signal Correlation - Proximity candidate triggers composite if signal loss found; one composite per episode
+title US-06: Signal Correlation - Kafka Proximity Fact + Redis Loss State
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,76 +11,45 @@ queue "Kafka\nproximity.candidates" as ProxKafka
 participant "Alert\nEvaluator\n(leader)" as Evaluator
 database "Redis\nalert-state:{id}" as AlertState
 database "Redis\nrecent-loss:{id}" as RecentLoss
-database "Neo4j\nentity graph" as Neo4j
+queue "Kafka\nalerts" as Alerts
 
-note over Evaluator
-  Runs on Kafka consume from proximity.candidates.
-  Only the elected leader evaluates.
-  SIGNAL_LOSS was already emitted when entity went dark.
-  If proximity arrives within the correlation window,
-  the SIGNAL_LOSS is superseded — not suppressed.
-  Each signal-loss episode can produce at most one COMPOSITE.
+note over ProxKafka
+  Candidate already means:
+  - exact proximity confirmed
+  - new proximity episode
+  - KNOWN_ASSOCIATE filtered upstream
 end note
 
-ProxKafka -> Evaluator : consume proximity.candidates event\n{ pair_key, entity_a_id, entity_b_id,\n  episode_start_ms, lat, lon, distance_at_detection }
-
-note over Evaluator
-  Check each entity for an active or recent signal loss.
-  Known associates already filtered upstream.
-end note
+ProxKafka -> Evaluator : consume { pair_key, entity_a_id, entity_b_id,\n episode_start_ms, lat, lon, distance_at_detection }
 
 Evaluator -> AlertState : HGETALL alert-state:{entity_a_id}
-AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id, composite_issued } or nil
-
+AlertState --> Evaluator : active loss state or nil
 Evaluator -> AlertState : HGETALL alert-state:{entity_b_id}
-AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id, composite_issued } or nil
+AlertState --> Evaluator : active loss state or nil
 
-alt active signal loss found AND composite_issued == 0
-  note over Evaluator
-    Entity is currently dark and no composite issued yet.
-    alert-state provides dark_since_ms and signal_loss_alert_id.
-    Check that proximity episode_start_ms falls
-    within COMPOSITE_CORRELATION_WINDOW_MS of dark_since_ms.
-  end note
-
-  Evaluator -> Neo4j : targeted lookup for proximity episode context
-  Neo4j --> Evaluator : episode context confirmed
-
-  Evaluator -> AlertState : set composite_issued = 1
-  Evaluator -> Evaluator : -> composite emission\n(see composite-emission diagram)
-
-else no active signal loss — check recent-loss window
+alt qualifying active signal loss AND composite_issued == 0
+  Evaluator -> Evaluator : verify episode_start_ms within\nCOMPOSITE_CORRELATION_WINDOW_MS
+  Evaluator -> Alerts : publish deterministic COMPOSITE\nwith supersedes_alert_ids
+  Evaluator -> AlertState : HSET qualifying entity\ncomposite_issued = 1
+else no qualifying active loss
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_a_id}
-  RecentLoss --> Evaluator : { dark_since_ms, resumed_at_ms, signal_loss_alert_id }\nor nil (expires after COMPOSITE_CORRELATION_WINDOW_MS)
-
+  RecentLoss --> Evaluator : recent loss state or nil
   Evaluator -> RecentLoss : HGETALL recent-loss:{entity_b_id}
-  RecentLoss --> Evaluator : { dark_since_ms, resumed_at_ms, signal_loss_alert_id } or nil
+  RecentLoss --> Evaluator : recent loss state or nil
 
-  note over RecentLoss
-    Entity resumed broadcasting but was dark recently.
-    Position Consumer wrote recent-loss before deleting alert-state.
-    Key expires after COMPOSITE_CORRELATION_WINDOW_MS.
-    Its presence means the correlation opportunity is still open.
-  end note
-
-  alt recent-loss found AND episode_start_ms within window of resumed_at_ms
-    Evaluator -> Neo4j : targeted lookup for proximity episode context
-    Neo4j --> Evaluator : episode context confirmed
-
-    Evaluator -> RecentLoss : DEL recent-loss:{entity_id}
-
-    note over RecentLoss
-      DEL consumes the correlation opportunity.
-      Subsequent proximity events for this entity
-      find no recent-loss and produce UNSCHEDULED_PROXIMITY
-      as independent incidents — not further composites.
-    end note
-
-    Evaluator -> Evaluator : -> composite emission\n(see composite-emission diagram)
-
-  else no qualifying signal loss for either entity
-    Evaluator -> Evaluator : emit UNSCHEDULED_PROXIMITY alert
+  alt qualifying recent loss within bounded window
+    Evaluator -> Alerts : publish deterministic COMPOSITE\nwith supersedes_alert_ids
+    Evaluator -> RecentLoss : DEL consumed recent-loss:{entity_id}
+  else no qualifying signal loss
+    Evaluator -> Alerts : publish deterministic\nUNSCHEDULED_PROXIMITY
   end
 end
+
+note over Evaluator
+  No Neo4j lookup here.
+  Relationship filtering is owned by Correlation Worker.
+  The candidate carries proximity timing/location evidence;
+  Redis carries active/recent signal-loss episode state.
+end note
 
 @enduml

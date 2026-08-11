@@ -1,15 +1,8 @@
 # Sentinel
 
+A real-time geospatial entity-tracking and rule-based anomaly-correlation platform. Sentinel ingests ADS-B/AIS positional telemetry, maintains current and historical entity state, detects rule-based anomalies, correlates weak signals, and surfaces operator-visible alerts on an Angular + Leaflet dashboard.
 
-A real-time geospatial entity-tracking and anomaly-detection platform. Sentinel ingests live positional telemetry from aircraft (ADS-B) and vessels (AIS), correlates entities across time and space, and surfaces meaningful anomalies  - signal loss, route deviation, unexpected proximity between previously unrelated entities  - on a live map dashboard.
-
-Built to exercise the full surface area of distributed systems design: high-throughput streaming ingestion, polyglot persistence chosen per access pattern, graph-based correlation, and symptom-driven alerting. Ingests real public telemetry (ADS-B, AIS); synthetic data drives controllable anomaly injection for demos.
-
----
-
-## Problem Statement
-
-Given a continuous, high-volume stream of positional pings from moving entities, detect and surface meaningful anomalies with low latency, without flooding operators with false positives, and without losing data during ingestion bursts or partial component failure.
+Sentinel is a portfolio/learning project designed to demonstrate distributed-systems reasoning: streaming ingestion, replay/idempotency, polyglot persistence, leader election, geospatial indexing, stateful correlation, and observable failure behavior.
 
 ---
 
@@ -17,111 +10,157 @@ Given a continuous, high-volume stream of positional pings from moving entities,
 
 ![Architecture](diagrams/docs/architecture.svg)
 
+Canonical flow:
+
+```text
+OpenSky / AISHub / synthetic generator
+  → Ingestion Poller
+  → Kafka raw topics
+  → Position Consumer
+      → TimescaleDB position history
+      → Redis live state + H3 sorted-set index
+      → position.normalized
+          ├→ Deviation Detector → deviation.candidates
+          └→ Correlation Worker → Neo4j evidence + KNOWN_ASSOCIATE filter
+                                  → proximity.candidates
+
+Redis signal-loss scan ─────────────────────────┐
+deviation.candidates ───────────────────────────┤
+proximity.candidates ───────────────────────────┤
+Redis anomaly episode state ────────────────────→ Alert Evaluator
+                                                   → alerts Kafka
+                                                   → API
+                                                     → TimescaleDB alerts
+                                                     → Redis alert-events
+                                                     → REST/WebSocket
+                                                     → Angular + Leaflet
+
+API → Neo4j for operator investigation/evidence reads.
+```
+
+The Alert Evaluator remains the complete Alert Layer. Neo4j relationship filtering is performed upstream by the Correlation Worker before `proximity.candidates` is emitted.
+
 ---
 
 ## Core Technical Decisions
 
 | Decision | Choice | Why |
 | --- | --- | --- |
-| Ingestion buffer | Kafka (MSK on AWS, Redpanda locally) | absorbs bursty feeds; decouples producers from consumers |
-| Position history | TimescaleDB | time-based partitioning on `observed_at`; `geo_cell` is a spatial index column, not a partition dimension |
-| Entity graph | Neo4j | proximity queries are traversals, not table scans |
-| Live state | Redis | highest-frequency read; cache, not source of truth |
-| Alert coordination | Leader election | prevents duplicate emission under horizontal scale |
-| Anomaly model | Composite correlation | single weak signal is not actionable; correlate across graph + time |
-
-Full reasoning and rejected alternatives in each ADR → [`docs/adr/`](docs/adr/)
+| Streaming buffer | Kafka semantics; Redpanda local / MSK AWS | decoupling, buffering, replay |
+| Position history | TimescaleDB | time-partitioned telemetry with indexed geo filtering |
+| Entity graph | Neo4j | relationship/proximity evidence and graph investigation |
+| Live state | Redis | current entity state, H3 live candidate index, leases, pub/sub |
+| Alert coordination | Redis leader lease | one active Alert Evaluator under normal operation |
+| Alert durability | Plain PostgreSQL table on TimescaleDB | transactional lifecycle and replay-safe dedup |
+| API | Express + WebSocket | async event serving with lightweight REST/WS layer |
+| Dashboard | Angular + Leaflet | functional operator interface |
 
 ---
 
-## Tech Stack
+## Anomaly Types
 
-| Layer | Technology |
+| Alert | Detection |
 | --- | --- |
-| Data ingestion | Node.js poller → Kafka (Redpanda locally, MSK on AWS) |
-| Stream processing | Position Consumer (normalise + persist), Correlation Worker (proximity graph), Deviation Detector (reference route comparison) |
-| Position store | TimescaleDB |
-| Correlation graph | Neo4j |
-| Live state cache | Redis |
-| Alert evaluation | Leader-elected Alert Evaluator — hybrid inputs: scheduled Redis scan (signal loss) + `deviation.candidates` + `proximity.candidates` |
-| API | Express (Node.js) - REST + WebSocket |
-| Operator auth | Google OAuth 2.0 + JWT (identity required for per-user workspace) |
-| Dashboard | Angular + Leaflet |
-| Deployment | Docker Compose → AWS |
-| CI/CD | GitHub Actions |
+| `SIGNAL_LOSS` | entity remains unseen beyond configurable threshold |
+| `ROUTE_DEVIATION` | synthetic entity remains outside assigned route corridor for sustained pings |
+| `UNSCHEDULED_PROXIMITY` | exact proximity episode between a pair with no `KNOWN_ASSOCIATE` relationship |
+| `COMPOSITE` | qualifying signal-loss episode correlated with unscheduled proximity |
+
+---
+
+## Delivery Semantics
+
+Sentinel does not claim exactly-once transport.
+
+- Kafka processing is at-least-once.
+- Durable TimescaleDB and Neo4j side effects are idempotent by deterministic logical identity.
+- Redis live state is protected against source-time regression.
+- Alert rows have type-specific deterministic IDs.
+- WebSocket lifecycle delivery is at-least-once; clients tolerate duplicates.
+- Leader election prevents concurrent active Alert Evaluators but is not a replacement for durable idempotency.
+
+---
+
+## H3 Usage
+
+Sentinel uses two configurable H3 access patterns:
+
+- `HISTORY_H3_RESOLUTION`: `position_history.geo_cell`, an indexed query column inside TimescaleDB time chunks;
+- `LIVE_H3_RESOLUTION`: Redis `geo-cell:*` sorted sets used to reduce live proximity candidates.
+
+TimescaleDB partitions `position_history` by `observed_at` only. H3 cells are not TimescaleDB chunks/shards in this design.
 
 ---
 
 ## Data Sources
 
-- **Aircraft:** [OpenSky Network](https://opensky-network.org/) - free, public ADS-B feed, restricted to non-commercial and research use. See [OpenSky Terms of Use](https://opensky-network.org/about/terms-of-use).
-- **Vessels:** [AISHub](https://www.aishub.net/) - AIS data aggregator. Access requires contributing AIS data or explicit approval. Verify eligibility before use.
-- **Synthetic generator:** controllable anomaly injection for demos (real feeds do not reliably produce interesting events on demand)
+- OpenSky Network — public ADS-B source subject to its terms/rate limits.
+- AISHub — AIS aggregator; eligibility/access must be verified.
+- Synthetic load generator — deterministic anomaly injection for demos and tests.
 
-This project is a non-commercial portfolio and learning exercise. All data source terms of service are respected - rate limits are honoured and attribution is included where required. See `NOTICE` for third-party attributions.
+This is a non-commercial portfolio/learning project. Third-party source terms and attribution requirements must be respected; see `NOTICE`.
 
 ---
 
-## Anomaly Types Detected
+## Implementation Roadmap
 
-| Anomaly | Description |
-| --- | --- |
-| **Signal loss** | Entity goes dark beyond configurable threshold (AIS/ADS-B transponder off) |
-| **Route deviation** | Current track diverges from the entity's assigned reference route by more than the corridor threshold (synthetic entities only in v1) |
-| **Unscheduled proximity** | Two entities with no prior relationship converge at an unexpected location |
-| **Composite** | Signal loss followed by proximity to a previously unrelated entity  - elevated to a single correlated alert |
+1. Infrastructure + Canonical Schemas + Observability Skeleton
+2. Live Position Pipeline
+3. Signal Loss + Alert Delivery Foundation
+4. Route Deviation
+5. Correlation Worker + Unscheduled Proximity
+6. Composite Correlation
+7. Workspace + Operator Scope
+8. Alert Lifecycle + Distributed Fan-Out
+9. Entity Investigation
+10. Production Hardening + Failure Lab
+
+Permanent phase plans live in `docs/implementation/`. Implementation process is defined by `docs/IMPLEMENTATION_PLAYBOOK.md` and `docs/IMPLEMENTATION_WORKFLOW.md`.
 
 ---
 
 ## Architecture Decision Records
 
-Significant design choices are documented in `/docs/adr/` with alternatives considered and explicitly rejected.
+Accepted ADRs live in `docs/adr/`:
 
-| ADR | Decision |
-| --- | --- |
-| ADR-001 | Kafka (MSK on AWS, Redpanda locally) over direct HTTP ingestion |
-| ADR-002 | TimescaleDB over Cassandra for position history |
-| ADR-003 | Neo4j for entity relationship graph |
-| ADR-004 | Redis for live entity state |
-| ADR-005 | Leader election strategy for alert evaluator |
-| ADR-006 | Geo-cell sharding key design and hot-spot mitigation |
-| ADR-007 | Idempotency key schema |
-| ADR-008 | Express (Node.js) for the API layer |
-| ADR-009 | Angular + Leaflet for the dashboard |
-| ADR-010 | Alert lifecycle state in PostgreSQL table on TimescaleDB |
-| ADR-011 | Google OAuth 2.0 for operator authentication |
-| ADR-012 | Workspace scope and server-side alert filtering |
-| ADR-013 | Node.js for the ingestion poller |
-| ADR-014 | Hybrid input model for the Alert Evaluator (Deviation Detector + stream-based inputs) |
-| ADR-015 | v1 reference route model for deviation detection |
+- ADR-001 Kafka over direct HTTP ingestion
+- ADR-002 TimescaleDB for position history
+- ADR-003 Neo4j entity graph
+- ADR-004 Redis live state
+- ADR-005 Alert Evaluator leader election
+- ADR-006 H3 geo-cell indexing strategy
+- ADR-007 deterministic idempotency identity
+- ADR-008 Express API layer
+- ADR-009 Angular dashboard
+- ADR-010 durable alert lifecycle store
+- ADR-011 Google OAuth operator auth
+- ADR-012 workspace scope / server-side filtering
+- ADR-013 Node.js ingestion poller
+- ADR-014 hybrid Alert Evaluator input model
+- ADR-015 v1 deterministic reference-route model
 
 ---
 
 ## Getting Started
 
-> Implementation has not started yet. These instructions will work once Phase 01 and Phase 02 are complete.
+Implementation begins with Phase 01. Once the infrastructure scaffold exists:
 
 ```bash
-# Clone the repo
-git clone https://github.com/<your-username>/sentinel.git
-cd sentinel
-
-# Start all services (requires Phase 01 complete)
 docker compose up -d
 ```
 
-> Service-specific startup instructions will be added to each service's README as phases are completed.
+Service-specific commands and verification steps are added as each phase becomes executable.
 
 ---
 
 ## Future Work
 
-These are intentionally out of scope for v1 but are the natural next steps:
+Out of v1 scope:
 
-- **Multi-region ingestion** — regional collectors buffering and forwarding to a central store, with explicit consistency tiers (strongly consistent: entity identity and alert state; eventually consistent: historical position backfill)
-- **ML-based anomaly scoring** — layering a scoring model on top of the rule-based detection to rank alert severity
-- **Multi-tenant operator isolation** — scoped data access per organisation, not just per operator workspace
-- **Historical alert replay and audit log** — browsing past anomalies in the dashboard
+- multi-region ingestion;
+- ML-based ranking/scoring;
+- multi-tenant organizational isolation;
+- richer historical audit/replay UX.
 
 ---
 
@@ -129,6 +168,4 @@ These are intentionally out of scope for v1 but are the natural next steps:
 
 Copyright (c) 2026 Harshwardhan Patil. All rights reserved.
 
-This project is available for personal, educational, and portfolio review only.
-Commercial use, redistribution, and use as a basis for competing products are prohibited.
-See [LICENSE](LICENSE) for full terms.
+Available for personal, educational, and portfolio review only. See `LICENSE`.
