@@ -117,13 +117,11 @@ If a `LEARNING_MODE.md` file exists at the repo root, read it before starting an
 
 ---
 
-## Implementation planning
+## Implementation
 
-There is intentionally no permanent `docs/implementation/` plan.
+Before starting any implementation work, read `docs/IMPLEMENTATION_PLAYBOOK.md`. It defines working style, phase order, learning goals, and how to run each phase with Claude.
 
-Before starting implementation work, read `IMPLEMENTATION_WORKFLOW.md` and follow its just-in-time planning, checkpoint, hands-on learning, failure-testing, and verification workflow.
-
-Do not recreate the deleted implementation-plan directory.
+Phase-specific plans live in `docs/implementation/` — one file per phase. Read the relevant phase file when beginning that phase.
 
 ---
 
@@ -137,3 +135,5 @@ Do not recreate the deleted implementation-plan directory.
 | `docs/ARCHITECTURE.md` | Component contracts, service boundaries, Kafka topics, consumer groups, and persistence ownership |
 | `docs/DATA_MODEL.md` | Schemas for all stores — TimescaleDB tables, Neo4j nodes/edges, Redis keys, Kafka event schemas |
 | `docs/DEVELOPMENT.md` | Local setup, seed data, load generator usage (to be written as services are built) |
+| `docs/IMPLEMENTATION_PLAYBOOK.md` | How to implement Sentinel with Claude — working style, phase order, learning goals, checkpoint format |
+| `docs/implementation/` | Phase-specific plans — one file per phase; read before starting that phase |
