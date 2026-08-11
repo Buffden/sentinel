@@ -1403,8 +1403,8 @@
         "type": 3
       },
       "seed": 26,
-      "version": 956,
-      "versionNonce": 1556806028,
+      "version": 957,
+      "versionNonce": 818217935,
       "isDeleted": false,
       "boundElements": [
         {
@@ -1418,13 +1418,9 @@
         {
           "id": "arr-api-neo4j",
           "type": "arrow"
-        },
-        {
-          "id": "arr-neo4j-alert",
-          "type": "arrow"
         }
       ],
-      "updated": 1786338410259,
+      "updated": 1786427300685,
       "link": null,
       "locked": false,
       "index": "aP"
@@ -1583,8 +1579,8 @@
         "type": 3
       },
       "seed": 28,
-      "version": 773,
-      "versionNonce": 1335669388,
+      "version": 774,
+      "versionNonce": 1144107503,
       "isDeleted": false,
       "boundElements": [
         {
@@ -1593,10 +1589,6 @@
         },
         {
           "id": "arr-redis-alert",
-          "type": "arrow"
-        },
-        {
-          "id": "arr-neo4j-alert",
           "type": "arrow"
         },
         {
@@ -1620,7 +1612,7 @@
           "type": "arrow"
         }
       ],
-      "updated": 1786338811364,
+      "updated": 1786427300685,
       "link": null,
       "locked": false,
       "index": "aR"
@@ -3933,131 +3925,6 @@
       "verticalAlign": "middle",
       "containerId": "arr-corr-neo4j",
       "originalText": "writes proximity events edges",
-      "autoResize": true,
-      "lineHeight": 1.25
-    },
-    {
-      "id": "arr-neo4j-alert",
-      "type": "arrow",
-      "x": 740.4038339188621,
-      "y": 970.1317211182366,
-      "width": 476.63366196243976,
-      "height": 87.95854438790991,
-      "angle": 0,
-      "strokeColor": "#6741d9",
-      "backgroundColor": "transparent",
-      "fillStyle": "solid",
-      "strokeWidth": 2,
-      "strokeStyle": "solid",
-      "roughness": 0,
-      "opacity": 100,
-      "groupIds": [],
-      "frameId": null,
-      "roundness": null,
-      "seed": 74,
-      "version": 2467,
-      "versionNonce": 245623436,
-      "isDeleted": false,
-      "boundElements": [
-        {
-          "type": "text",
-          "id": "3pmdpddXZaWzXzgaXnD44"
-        }
-      ],
-      "updated": 1786338937505,
-      "link": null,
-      "locked": false,
-      "points": [
-        [
-          0,
-          0
-        ],
-        [
-          -125.39812106542058,
-          0
-        ],
-        [
-          -125.39812106542058,
-          -87.95854438790991
-        ],
-        [
-          -476.63366196243976,
-          -87.95854438790991
-        ]
-      ],
-      "lastCommittedPoint": null,
-      "startBinding": {
-        "elementId": "b-neo4j",
-        "fixedPoint": [
-          -0.020433637490825874,
-          0.27431414414521976
-        ],
-        "focus": 0,
-        "gap": 0
-      },
-      "endBinding": {
-        "elementId": "b-alert",
-        "fixedPoint": [
-          1.0218584565153284,
-          0.7660696192646388
-        ],
-        "focus": 0,
-        "gap": 0
-      },
-      "startArrowhead": null,
-      "endArrowhead": "arrow",
-      "index": "b0B",
-      "elbowed": true,
-      "fixedSegments": [
-        {
-          "index": 2,
-          "start": [
-            -125.39812106542058,
-            0
-          ],
-          "end": [
-            -125.39812106542058,
-            -87.95854438790991
-          ]
-        }
-      ],
-      "startIsSpecial": false,
-      "endIsSpecial": false
-    },
-    {
-      "id": "3pmdpddXZaWzXzgaXnD44",
-      "type": "text",
-      "x": 533.861776696215,
-      "y": 896.1524489242815,
-      "width": 162.28787231445312,
-      "height": 60,
-      "angle": 0,
-      "strokeColor": "#6741d9",
-      "backgroundColor": "transparent",
-      "fillStyle": "solid",
-      "strokeWidth": 2,
-      "strokeStyle": "solid",
-      "roughness": 1,
-      "opacity": 100,
-      "groupIds": [],
-      "frameId": null,
-      "index": "b0BV",
-      "roundness": null,
-      "seed": 1777041118,
-      "version": 28,
-      "versionNonce": 1610780980,
-      "isDeleted": false,
-      "boundElements": [],
-      "updated": 1786338935935,
-      "link": null,
-      "locked": false,
-      "text": "reads\n(composite context, \ntargeted lookup)",
-      "fontSize": 16,
-      "fontFamily": 5,
-      "textAlign": "center",
-      "verticalAlign": "middle",
-      "containerId": "arr-neo4j-alert",
-      "originalText": "reads\n(composite context, \ntargeted lookup)",
       "autoResize": true,
       "lineHeight": 1.25
     },
