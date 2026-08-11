@@ -1,5 +1,5 @@
 @startuml intentional-backfill
-title US-10: Intentional Backfill - Consumer Rewound to Rebuild State
+title US-10: Intentional Backfill - Isolated Position-History Rebuild
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,42 +8,40 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 actor Developer
-participant "Correlation\nWorker" as Worker
-queue "Kafka\nposition.normalized" as Kafka
-database "Neo4j\nentity graph" as Neo4j
-database "Kafka\noffset store\n(__consumer_offsets)" as Offsets
+queue "Kafka\nadsb.raw / ais.raw" as Kafka
+participant "Position Consumer\n(backfill mode / separate group)" as Backfill
+database "TimescaleDB\nposition_history" as TSDB
 
-note over Neo4j
-  Neo4j restarted.
-  Entity relationship graph lost.
-  Must be rebuilt from event history.
-end note
+Developer -> Backfill : start with target=position_history\nand explicit historical offset/time range
+Backfill -> Kafka : consume retained raw records\nusing separate backfill consumer group
+Kafka --> Backfill : historical records
 
-Developer -> Worker : stop correlation worker
-Developer -> Offsets : reset consumer group offset\nto timestamp T (start of retention window)
-
-note over Offsets
-  Offset reset is explicit and intentional.
-  Kafka retains all events within
-  the configured retention window.
-end note
-
-Developer -> Worker : restart correlation worker
-
-Worker -> Kafka : consume from reset offset T
-Kafka --> Worker : all position events from T onwards
-
-loop for each replayed event
-  Worker -> Neo4j : MERGE proximity edges\n(idempotent - no duplicates created)
+loop each retained record
+  Backfill -> Backfill : parse + normalize\ncompute observed_at + history_geo_cell
+  Backfill -> TSDB : INSERT position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
 end
 
-note over Worker
-  Graph rebuilt from event history
-  without re-querying OpenSky or AIS.
-  Same mechanism works for corrected
-  anomaly rules - rewind and re-evaluate.
+note over Backfill
+  Backfill mode suppresses live side effects:
+  - no entity:live writes
+  - no geo-cell live membership
+  - no position-updates pub/sub
+  - no position.normalized into live downstream path
+  - no deviation/proximity candidates
+  - no alerts
 end note
 
-Worker -> Worker : offset caught up\nprocessing live events
+note over TSDB
+  Historical rebuild is safe because position_history
+  is derived directly from the retained source records
+  and has a deterministic unique identity.
+end note
+
+note over Developer, TSDB
+  A total Neo4j data-loss rebuild is a separate offline
+  recomputation problem because historical proximity
+  detection requires pair/spatial state that the normal
+  Correlation Worker reads from the live Redis index.
+end note
 
 @enduml
