@@ -1,5 +1,5 @@
 @startuml alert-suppression
-title US-03: Alert Suppression - No Re-Emit While Entity Stays Dark
+title US-03: Alert Suppression and Resume Handoff
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -8,64 +8,38 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
-database "Redis\nalert-state:{id}\n(hash)" as AlertState
+database "Redis\nalert-state:{id}" as AlertState
 participant "Position\nConsumer" as Consumer
 database "Redis\nentity:live:{id}" as LiveState
-database "Redis\nrecent-loss:{id}\n(hash)" as RecentLoss
-queue "Kafka\nalerts" as Kafka
+database "Redis\nrecent-loss:{id}" as RecentLoss
 
-note over Evaluator
-  Entity ABC is dark.
-  Alert has already been emitted
-  on a previous evaluation cycle.
-end note
-
-loop evaluation cycle N (entity still dark)
-  Evaluator -> AlertState : HGET alert-state:ABC signal_loss_alert_id
-  AlertState --> Evaluator : $alert_id (SIGNAL_LOSS alert already active)
-
-  Evaluator -> Evaluator : skip - alert already raised\ndo not re-emit
-
-  note over Evaluator
-    Operator does not receive
-    a duplicate alert on every cycle.
-    One alert per loss event.
-    alert-state is a hash:
-      dark_since_ms: epoch ms when entity went dark
-      signal_loss_alert_id: alert_id of emitted SIGNAL_LOSS
-  end note
+== Entity remains dark ==
+loop scheduled scan
+  Evaluator -> AlertState : HGETALL alert-state:ABC
+  AlertState --> Evaluator : { dark_since_ms, signal_loss_alert_id, composite_issued }
+  Evaluator -> Evaluator : active episode exists\ndo not create another SIGNAL_LOSS logical alert
 end
 
-note over Consumer, LiveState
-  Entity ABC starts broadcasting again.
-  Position consumer receives a new ping
-  and writes it to Redis.
-end note
+== Entity resumes ==
+Consumer -> LiveState : accept newer position for ABC
+Consumer -> AlertState : HGETALL alert-state:ABC
+AlertState --> Consumer : { dark_since_ms, signal_loss_alert_id, composite_issued }
 
-Consumer -> LiveState : HSET entity:live:ABC\n{ lat, lon, last_seen_ms }\n(timestamp guard: skip if last_seen_ms <= stored)
-Consumer -> RecentLoss : HSET recent-loss:ABC\n{ dark_since_ms, signal_loss_alert_id }\nEXPIRE COMPOSITE_CORRELATION_WINDOW_MS
+alt prior signal-loss state exists
+  Consumer -> RecentLoss : HSET recent-loss:ABC\ndark_since_ms\nresumed_at_ms = incoming.timestamp_ms\nsignal_loss_alert_id\nEXPIRE COMPOSITE_CORRELATION_WINDOW_MS
+  Consumer -> AlertState : DEL alert-state:ABC
+end
+
 note over Consumer, RecentLoss
-  Write recent-loss BEFORE deleting alert-state.
-  Enables composite supersession even after
-  entity has resumed — within the correlation window.
-end note
-Consumer -> AlertState : DEL alert-state:ABC
-note over Consumer, AlertState
-  The position consumer clears alert-state,
-  not the evaluator. This ensures the key is only
-  removed when a real ping is received — not on
-  a timer or assumption.
+  recent-loss is written before alert-state deletion.
+  This preserves a bounded post-resume correlation opportunity.
+  The Alert Evaluator consumes/deletes it if a qualifying
+  proximity candidate produces a COMPOSITE.
 end note
 
-loop next evaluation cycle (entity live again)
-  Evaluator -> AlertState : HGET alert-state:ABC signal_loss_alert_id
-  AlertState --> Evaluator : nil (no active alert)
-
-  note over Evaluator
-    Entity is back. Alert state cleared.
-    If entity goes dark again in future,
-    a new alert will be emitted.
-  end note
-end
+note over AlertState
+  alert-state is detection-loop/composite state only.
+  Durable operator lifecycle state lives in TimescaleDB alerts.
+end note
 
 @enduml

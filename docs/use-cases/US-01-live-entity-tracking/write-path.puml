@@ -1,5 +1,5 @@
 @startuml write-path
-title US-01: Write Path - Position Ping Ingested
+title US-01: Write Path - Accepted Position Updates History + Monotonic Live State
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -11,51 +11,45 @@ collections "OpenSky / AIS\nFeed" as Feed
 participant "Ingestion\nPoller" as Poller
 queue "Kafka\nadsb.raw / ais.raw" as KafkaRaw
 participant "Position\nConsumer" as Consumer
-queue "Kafka\nposition.normalized" as KafkaNorm
-database "Redis\nentity:live:{id}" as Redis
+database "Redis\nentity:live:{id}" as LiveState
+database "Redis\ngeo-cell:{cell}\n(sorted set)" as GeoCell
 database "TimescaleDB\nposition_history" as TSDB
+database "Redis\nposition-updates\n(pub/sub)" as PositionUpdates
+queue "Kafka\nposition.normalized" as KafkaNorm
 
-Feed -> Poller : position ping\n(entity_id, lat, lon, timestamp_ms)
-Poller -> KafkaRaw : publish to adsb.raw / ais.raw
+Feed -> Poller : source position record
+Poller -> KafkaRaw : publish raw record
+KafkaRaw -> Consumer : consume at-least-once
 
-note over KafkaRaw
-  Decouples poller from consumers.
-  Absorbs feed bursts without back-pressure.
-  Malformed events are routed to DLQ - not shown here (see US-09).
+Consumer -> Consumer : normalize + validate\ncompute history_geo_cell + live_geo_cell
+Consumer -> LiveState : HGET last_seen_ms, live_geo_cell
+LiveState --> Consumer : stored state or nil
+
+alt incoming timestamp older than stored last_seen_ms
+  Consumer -> Consumer : skip live-state/geo-cell regression
+else accepted current event
+  alt previous live_geo_cell exists AND changed
+    Consumer -> GeoCell : ZREM geo-cell:{old_cell} entity_id
+  end
+  Consumer -> GeoCell : ZADD geo-cell:{live_geo_cell}\nscore=timestamp_ms member=entity_id
+  Consumer -> LiveState : HSET latest fields + last_seen_ms + live_geo_cell\nrefresh 24h safety TTL
+  Consumer -> PositionUpdates : PUBLISH accepted live position update
+end
+
+Consumer -> TSDB : INSERT position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
+
+note over TSDB
+  observed_at is the time partition column.
+  history geo_cell is an indexed column,
+  not a TimescaleDB partition dimension.
 end note
 
-KafkaRaw -> Consumer : consume raw event (at-least-once)
-Consumer -> Consumer : parse and normalise\n(validate fields, convert units)
-Consumer -> KafkaNorm : publish to position.normalized
+Consumer -> KafkaNorm : publish canonical position.normalized\n{ history_geo_cell, live_geo_cell, ... }
 
-Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, last_seen_ms }
-
-note right of Redis
-  TTL = 24h (safety-net only).
-  Must be longer than SIGNAL_LOSS_THRESHOLD_MS
-  so the alert evaluator can always find the key
-  on its scan cycle. Dashboard ghost cleanup is
-  client-side: Angular removes the marker when
-  now() - last_seen_ms > SIGNAL_LOSS_THRESHOLD_MS.
-end note
-
-Consumer -> Redis : PUBLISH position-updates\n{ entity_id, lat, lon, altitude, last_seen_ms }
-
-note right of Redis
-  All API instances subscribe to position-updates.
-  Each fans out to scoped WebSocket connections.
-  Enables horizontal API scaling without
-  additional pub/sub infrastructure.
-end note
-
-Consumer -> TSDB : INSERT INTO position_history\nON CONFLICT (entity_id, observed_at) DO NOTHING
-
-note right of TSDB
-  Conflict target: (entity_id, observed_at).
-  TimescaleDB requires the partition column in
-  any unique constraint on a hypertable.
-  observed_at = to_timestamp(timestamp_ms / 1000.0).
-  Safe to replay from Kafka offset.
+note over LiveState
+  24h TTL is a safety net only.
+  Signal-loss detection and dashboard staleness
+  use last_seen_ms, not TTL expiry.
 end note
 
 @enduml
