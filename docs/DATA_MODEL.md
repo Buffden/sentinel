@@ -189,7 +189,7 @@ Written by the correlation worker when a new proximity episode begins between tw
 
 ### Edge: `KNOWN_ASSOCIATE`
 
-Marks a pre-existing, expected relationship between two entities (e.g. same fleet). The alert evaluator filters out `KNOWN_ASSOCIATE` pairs when evaluating composite alerts — proximity between known associates is not anomalous.
+Marks a pre-existing, expected relationship between two entities (e.g. same fleet). The Correlation Worker checks for a `KNOWN_ASSOCIATE` edge before publishing `proximity.candidates`; known-associate proximity is recorded as relationship evidence but is not forwarded as an unscheduled-proximity candidate.
 
 | Property | Type | Description |
 |---|---|---|
@@ -251,7 +251,7 @@ In-loop alert suppression flag. Prevents the alert evaluator from re-emitting a 
 | `composite_issued` | String (`0` or `1`) | Whether a COMPOSITE alert has been issued for this signal-loss episode — prevents issuing a second COMPOSITE if a subsequent proximity event arrives for the same episode |
 
 - **Writer:** Alert evaluator on first signal loss emission; sets `composite_issued=1` when a COMPOSITE is issued
-- **Reader:** Alert evaluator (suppression check, composite idempotency), Correlation Worker (composite supersession — checks for active dark entity when proximity arrives)
+- **Reader:** Alert evaluator only (signal-loss suppression plus active-dark composite correlation/idempotency when `proximity.candidates` arrives)
 - **TTL:** None — key lives indefinitely
 - **Deleted by:** Position consumer — before deleting, writes `recent-loss:{entity_id}` (see below) so the correlation window survives the entity coming back online; then DEL this key
 
