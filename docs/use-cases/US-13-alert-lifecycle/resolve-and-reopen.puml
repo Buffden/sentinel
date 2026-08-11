@@ -1,5 +1,5 @@
 @startuml resolve-and-reopen
-title US-13: Resolve and Reopen - Resolved Alert Does Not Block New Detection
+title US-13: Resolution and Later Recurrence - New Episode Creates New Alert
 
 skinparam sequenceArrowThickness 1.5
 skinparam participantBorderColor #555555
@@ -16,43 +16,33 @@ queue "Kafka\nalerts" as Kafka
 == Operator Resolves Alert ==
 
 Operator -> API : PATCH /alerts/VesselB:SIGNAL_LOSS:1700000000000\n{ status: RESOLVED }
-
-API -> TSDB : UPDATE alerts SET status = 'RESOLVED',\nresolved_at = now()\nWHERE alert_id = 'VesselB:SIGNAL_LOSS:1700000000000'
-
-note over TSDB
-  Record stays in the table permanently.
-  This is the audit trail - never deleted.
-  Resolved alerts are queryable for history.
-end note
-
+API -> TSDB : UPDATE alert to RESOLVED\nrecord resolved_at / resolved_by
 TSDB --> API : updated
 API --> Operator : 200 OK
 
-== Anomaly Recurs Later ==
+note over TSDB
+  Resolved record remains permanent history.
+  RESOLVED is terminal.
+end note
+
+== Same anomaly occurs in a later episode ==
 
 note over Evaluator
-  VesselB goes dark again in a new time window.
-  Alert Evaluator does not read the alerts table.
-  It evaluates based on last_seen_ms in the Redis hash
-  and the alert-state:{entity_id} suppression key.
+  VesselB later goes dark again.
+  New dark_since_ms means a different
+  deterministic signal-loss identity.
 end note
 
-Evaluator -> Kafka : publish new alert event\n{ alert_id: VesselB:SIGNAL_LOSS:1700005000000,\n  entity_id: VesselB,\n  alert_type: SIGNAL_LOSS,\n  dark_since_ms: 1700005000000 }
-
-note over Kafka
-  New dark_since_ms = new alert_id.
-  Completely independent of the resolved alert.
-  No reopen logic — just a fresh record.
-end note
-
-Kafka -> API : consume new alert event
-API -> TSDB : INSERT INTO alerts ( alert_id: VesselB:SIGNAL_LOSS:1700005000000, status: NEW, ... )\nON CONFLICT DO NOTHING
+Evaluator -> Kafka : publish SIGNAL_LOSS\nalert_id = VesselB:SIGNAL_LOSS:1700005000000
+Kafka -> API : consume new alert
+API -> TSDB : INSERT new alert row\nstatus = NEW\nON CONFLICT DO NOTHING
 
 note over TSDB
-  Two separate rows now exist:
-  VesselB:SIGNAL_LOSS:1700000000000 -> RESOLVED
-  VesselB:SIGNAL_LOSS:1700005000000 -> NEW
-  Full history preserved.
+  Two independent records exist:
+  old episode -> RESOLVED
+  new episode -> NEW
+
+  There is no reopen operation.
 end note
 
 @enduml
