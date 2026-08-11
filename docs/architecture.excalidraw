@@ -5128,7 +5128,7 @@
       "width": 604.897360783624,
       "height": 56.43962484172539,
       "angle": 0,
-      "strokeColor": "#2f9e44",
+      "strokeColor": "#1971c2",
       "backgroundColor": "transparent",
       "fillStyle": "solid",
       "strokeWidth": 2,
@@ -5139,8 +5139,8 @@
       "frameId": null,
       "roundness": null,
       "seed": 80,
-      "version": 2313,
-      "versionNonce": 1733055886,
+      "version": 2314,
+      "versionNonce": 1743101134,
       "isDeleted": false,
       "boundElements": [
         {
@@ -5148,7 +5148,7 @@
           "id": "r2qjr_t-4uthBJSS5gshX"
         }
       ],
-      "updated": 1786429844313,
+      "updated": 1786430392798,
       "link": null,
       "locked": false,
       "points": [
@@ -5231,7 +5231,7 @@
       "width": 148.46385192871094,
       "height": 40,
       "angle": 0,
-      "strokeColor": "#2f9e44",
+      "strokeColor": "#1971c2",
       "backgroundColor": "transparent",
       "fillStyle": "solid",
       "strokeWidth": 2,
@@ -5243,11 +5243,11 @@
       "index": "b0HV",
       "roundness": null,
       "seed": 1187352606,
-      "version": 34,
-      "versionNonce": 1369728402,
+      "version": 35,
+      "versionNonce": 678027026,
       "isDeleted": false,
       "boundElements": [],
-      "updated": 1786428240463,
+      "updated": 1786430392798,
       "link": null,
       "locked": false,
       "text": "reads investigation\nevidence",
