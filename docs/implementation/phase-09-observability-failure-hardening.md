@@ -1,4 +1,4 @@
-# Phase 09 — Production Hardening + Observability Completion
+# Phase 09 — Observability + Failure Hardening
 
 ## Goal
 
