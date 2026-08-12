@@ -21,9 +21,9 @@ TOPICS=(
 PARTITIONS=1
 REPLICATION_FACTOR=1
 
-echo "Broker      : $CONTAINER"
-echo "Partitions  : $PARTITIONS  (local dev -- not production sizing)"
-echo "Replication : $REPLICATION_FACTOR  (single broker -- not production)"
+echo "Broker: $CONTAINER"
+echo "Partitions: $PARTITIONS  (local dev -- not production sizing)"
+echo "Replication: $REPLICATION_FACTOR  (single broker -- not production)"
 echo ""
 
 # Bounded readiness check -- docker compose up returns before Redpanda is accepting connections
