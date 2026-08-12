@@ -22,6 +22,25 @@ echo "Database  : $POSTGRES_DB"
 echo "User      : $POSTGRES_USER"
 echo ""
 
+# Wait for PostgreSQL to be ready inside the container before running migrations.
+# docker compose up -d returns as soon as containers start, not when services are ready.
+MAX_RETRIES=20
+RETRY_INTERVAL=3
+echo "Waiting for PostgreSQL to be ready..."
+for i in $(seq 1 $MAX_RETRIES); do
+  if docker exec "$CONTAINER" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q; then
+    echo "PostgreSQL is ready."
+    echo ""
+    break
+  fi
+  if [ "$i" -eq "$MAX_RETRIES" ]; then
+    echo "PostgreSQL did not become ready after $((MAX_RETRIES * RETRY_INTERVAL))s. Aborting."
+    exit 1
+  fi
+  echo "  attempt $i/$MAX_RETRIES -- not ready yet, retrying in ${RETRY_INTERVAL}s..."
+  sleep $RETRY_INTERVAL
+done
+
 for migration in "$MIGRATIONS_DIR"/[0-9]*.sql; do
   [ -e "$migration" ] || { echo "No migration files found in $MIGRATIONS_DIR"; exit 1; }
   filename="$(basename "$migration")"
