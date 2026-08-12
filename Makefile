@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: up down reset ps logs migrate help
+.PHONY: up down reset ps logs migrate topics help
 
 up: ## Start all infrastructure services in detached mode
 	docker compose up -d
@@ -19,6 +19,9 @@ logs: ## Tail logs; filter by service with SERVICE=<name>  e.g. make logs SERVIC
 
 migrate: ## Apply database migrations in order (run after make up)
 	@bash infra/scripts/migrate.sh
+
+topics: ## Provision canonical Kafka topics (run after make up)
+	@bash infra/kafka/topics.sh
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
