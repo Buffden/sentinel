@@ -10,16 +10,16 @@ A named, ordered log of records. Producers write to it; consumers read from it. 
 
 Sentinel's 8 canonical topics map directly to data-flow boundaries:
 
-```
-adsb.raw             raw ADS-B telemetry (Ingestion Poller → Position Consumer)
-ais.raw              raw AIS telemetry   (Ingestion Poller → Position Consumer)
-position.normalized  canonical positions (Position Consumer → Correlation Worker, Deviation Detector)
-deviation.candidates per-ping classifications (Deviation Detector → Alert Evaluator)
-proximity.candidates new proximity episodes (Correlation Worker → Alert Evaluator)
-alerts               logical alert events  (Alert Evaluator → API)
-adsb.dlq             rejected ADS-B records
-ais.dlq              rejected AIS records
-```
+| Topic | Description |
+|---|---|
+| `adsb.raw` | Raw ADS-B telemetry (Ingestion Poller → Position Consumer) |
+| `ais.raw` | Raw AIS telemetry (Ingestion Poller → Position Consumer) |
+| `position.normalized` | Canonical positions (Position Consumer → Correlation Worker, Deviation Detector) |
+| `deviation.candidates` | Per-ping route classifications (Deviation Detector → Alert Evaluator) |
+| `proximity.candidates` | New proximity episodes (Correlation Worker → Alert Evaluator) |
+| `alerts` | Logical alert events (Alert Evaluator → API) |
+| `adsb.dlq` | Rejected ADS-B records |
+| `ais.dlq` | Rejected AIS records |
 
 ---
 
