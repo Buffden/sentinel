@@ -1,0 +1,88 @@
+# Checkpoint 2 Debrief -- TimescaleDB Schema and Migrations
+
+## Schema created
+
+```
+position_history        -- hypertable, partitioned by observed_at (1-day chunks)
+users
+user_workspaces         -- FK -> users
+route_references
+route_reference_points  -- FK -> route_references
+alerts                  -- self-referential FK (superseded_by), FK -> users
+```
+
+---
+
+## Migration flow
+
+`migrate.sh` globs `infra/migrations/[0-9]*.sql` in lexicographic order, which matches the numeric prefix dependency chain (006 depends on 003 which must already exist). Each file is piped via `docker exec -i` into psql inside the running container -- no local psql required.
+
+---
+
+## Transaction and failure guarantee
+
+Two-layer protection:
+
+**DB layer** -- each migration is wrapped in `BEGIN/COMMIT`. Any SQL error inside the transaction causes a full rollback of that file's DDL. No partial schema changes land.
+
+**Shell layer** -- psql receives `-v ON_ERROR_STOP=1`, which exits with a non-zero code on any SQL error. `migrate.sh` uses `set -euo pipefail`, so the script aborts immediately and remaining migrations do not run.
+
+Failure experiment confirmed both layers:
+- psql exited with code 3 (non-zero) on `SELECT 1/0`
+- `rollback_experiment` table was not present after the failed run
+
+---
+
+## TimescaleDB result
+
+`position_history` was converted to a hypertable partitioned by `observed_at` with 1-day chunk intervals. On a fresh database with no data, `num_chunks = 0` -- chunks are created on first write. The 30-day retention policy is registered.
+
+The unique index `(entity_id, observed_at)` includes the partitioning column, satisfying TimescaleDB's requirement that unique indexes on hypertables must cover the partition dimension. This index also enables `ON CONFLICT (entity_id, observed_at) DO NOTHING` for idempotent position writes.
+
+---
+
+## Idempotency result
+
+Double-insert experiment:
+- First insert: `INSERT 0 1`
+- Second insert (same `entity_id, observed_at`): `INSERT 0 0` -- silently discarded
+- Row count remained 1
+
+This is the at-least-once Kafka guarantee made safe: the Position Consumer can re-deliver a telemetry event and the idempotent write ensures no duplicate row lands.
+
+---
+
+## Clean rebuild result
+
+`make reset` -> `make up` -> `make migrate` on a completely blank database produced identical output. All 6 migrations applied in order, `IF NOT EXISTS` guards ensured no errors on re-run, and the schema matches the first run exactly. The pipeline is reproducible.
+
+---
+
+## Deferred
+
+- Kafka topic creation (Checkpoint 3)
+- Redis key-space design
+- Neo4j constraints (`MERGE` idempotency)
+- Application code -- nothing written yet
+- `position_history` chunk inspection requires at least one row; no data in DB yet
+
+---
+
+## Open architectural questions
+
+One existing constraint confirmed: Neo4j Community Edition does not support uniqueness constraints on relationship properties, which affects how `PROXIMITY` edge episode identity is enforced. The `MERGE` approach on node and relationship structure is the workaround; the Correlation Worker ADR already accounts for this.
+
+---
+
+## Knowledge check
+
+Before moving to Checkpoint 3, you should be able to answer these without looking:
+
+1. Why must the unique index on `position_history` include `observed_at`?
+2. What does `ON_ERROR_STOP=1` change about psql's default behavior?
+3. Why is `superseded_by` a plain FK and not `DEFERRABLE`?
+4. What happens to chunks when the 30-day retention policy fires?
+5. What does `num_chunks = 0` tell you about how TimescaleDB creates chunks?
+6. If you add a `007_foo.sql` migration and `make migrate` has already been run, what happens on re-run?
+
+The last question points at what a proper migration framework like Flyway or golang-migrate adds: a `schema_versions` table that tracks which migrations have already been applied. The simple ordered-glob approach used here relies on `IF NOT EXISTS` guards as the safety net instead.
