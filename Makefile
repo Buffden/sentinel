@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: up down reset ps logs help
+.PHONY: up down reset ps logs migrate help
 
 up: ## Start all infrastructure services in detached mode
 	docker compose up -d
@@ -16,6 +16,9 @@ ps: ## Show container status and health
 
 logs: ## Tail logs; filter by service with SERVICE=<name>  e.g. make logs SERVICE=timescaledb
 	docker compose logs -f $(SERVICE)
+
+migrate: ## Apply database migrations in order (run after make up)
+	@bash infra/scripts/migrate.sh
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
