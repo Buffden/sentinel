@@ -1,0 +1,9 @@
+BEGIN;
+CREATE TABLE IF NOT EXISTS users (
+    user_id UUID PRIMARY KEY,
+    google_sub TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL,
+    last_login_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+COMMIT;

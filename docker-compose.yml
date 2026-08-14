@@ -1,0 +1,125 @@
+name: sentinel
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.2
+    container_name: sentinel-redpanda
+
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      - --advertise-kafka-addr
+      - PLAINTEXT://localhost:${REDPANDA_KAFKA_PORT:-9092},PLAINTEXT_INTERNAL://redpanda:29092
+      - --rpc-addr
+      - 0.0.0.0:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+
+    ports:
+      - "${REDPANDA_KAFKA_PORT:-9092}:9092"
+      - "${REDPANDA_ADMIN_PORT:-9644}:9644"
+
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "rpk topic list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  timescaledb:
+    image: timescale/timescaledb:2.15.3-pg16
+    container_name: sentinel-timescaledb
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    ports:
+      - "${TIMESCALE_PORT:-5432}:5432"
+
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7.2.4-alpine
+    container_name: sentinel-redis
+
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+    volumes:
+      - redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  neo4j:
+    image: neo4j:5.19.0-community
+    container_name: sentinel-neo4j
+
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+
+    volumes:
+      - neo4j-data:/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://localhost:7474 || exit 1"
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  redpanda-data:
+    name: sentinel-redpanda-data
+
+  timescaledb-data:
+    name: sentinel-timescaledb-data
+
+  redis-data:
+    name: sentinel-redis-data
+
+  neo4j-data:
+    name: sentinel-neo4j-data
