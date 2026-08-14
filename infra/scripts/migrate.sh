@@ -17,9 +17,9 @@ POSTGRES_USER="${POSTGRES_USER:-sentinel}"
 POSTGRES_DB="${POSTGRES_DB:-sentinel}"
 CONTAINER="sentinel-timescaledb"
 
-echo "Container : $CONTAINER"
-echo "Database  : $POSTGRES_DB"
-echo "User      : $POSTGRES_USER"
+echo "Container: $CONTAINER"
+echo "Database: $POSTGRES_DB"
+echo "User: $POSTGRES_USER"
 echo ""
 
 # Wait for PostgreSQL to be ready inside the container before running migrations.
