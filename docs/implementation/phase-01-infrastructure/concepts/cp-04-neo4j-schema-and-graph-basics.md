@@ -33,19 +33,25 @@ Without the uniqueness constraint, concurrent workers could create duplicate nod
 
 **Index** -- a data structure that speeds up lookup by a property. It does not prevent duplicates.
 
-**Uniqueness constraint** -- enforces that no two nodes with the same label can share the same property value. Neo4j automatically creates a backing index for every uniqueness constraint. Adding a separate index on the same property would be redundant.
+**Uniqueness constraint** -- enforces that no two nodes of the same label (or relationships of the same type) can share the same property value. Neo4j automatically creates a backing index for every uniqueness constraint. Adding a separate index on the same property would be redundant.
+
+`IF NOT EXISTS` makes each statement idempotent: re-running the schema file succeeds without duplicating the constraint.
+
+---
+
+## Checkpoint 4 schema
 
 ```cypher
--- What Checkpoint 4 creates:
 CREATE CONSTRAINT entity_id_unique IF NOT EXISTS
   FOR (e:Entity)
   REQUIRE e.id IS UNIQUE;
 
--- What Neo4j creates automatically as a side effect:
--- RANGE index on Entity.id named entity_id_unique
+CREATE CONSTRAINT proximity_event_idempotency_key_unique IF NOT EXISTS
+  FOR ()-[r:PROXIMITY_EVENT]-()
+  REQUIRE r.idempotency_key IS UNIQUE;
 ```
 
-`IF NOT EXISTS` makes the statement idempotent: re-running the schema file succeeds without duplicating the constraint.
+Neo4j 5.7+ Community Edition supports uniqueness constraints on both node and relationship properties. Both constraints above are database-enforced.
 
 ---
 
@@ -53,14 +59,16 @@ CREATE CONSTRAINT entity_id_unique IF NOT EXISTS
 
 After `make neo4j-schema`:
 
-```
+```text
 SHOW CONSTRAINTS;
--- entity_id_unique  UNIQUENESS  NODE  Entity  [id]
+  entity_id_unique                        UNIQUENESS              NODE         Entity          [id]
+  proximity_event_idempotency_key_unique  RELATIONSHIP_UNIQUENESS RELATIONSHIP PROXIMITY_EVENT [idempotency_key]
 
 SHOW INDEXES;
--- entity_id_unique  RANGE   NODE  Entity  [id]  <-- backing index from constraint
--- index_343aff4e    LOOKUP  NODE  ...           <-- built-in token index
--- index_f7700477    LOOKUP  RELATIONSHIP  ...   <-- built-in token index
+  entity_id_unique                        RANGE  NODE         Entity          [id]              (backing index from node constraint)
+  proximity_event_idempotency_key_unique  RANGE  RELATIONSHIP PROXIMITY_EVENT [idempotency_key] (backing index from relationship constraint)
+  index_343aff4e                          LOOKUP NODE         ...                               (system-managed token index)
+  index_f7700477                          LOOKUP RELATIONSHIP ...                               (system-managed token index)
 ```
 
 The two LOOKUP indexes are system-managed and always present. They are not created by the schema file.
@@ -71,30 +79,28 @@ The two LOOKUP indexes are system-managed and always present. They are not creat
 
 **MATCH** -- find existing nodes or relationships that satisfy a pattern. Returns nothing if no match.
 
-**CREATE** -- unconditionally write a new node or relationship. Does not check for existing data (except uniqueness constraints, which will reject a duplicate).
+**CREATE** -- unconditionally write a new node or relationship. Uniqueness constraints will reject a duplicate property value; without a constraint, CREATE produces a duplicate.
 
 **MERGE** -- find the pattern if it exists; create it if it does not. This is the idempotent write primitive. The Correlation Worker uses `MERGE` to write `Entity` nodes and `PROXIMITY_EVENT` edges safely under at-least-once Kafka delivery.
 
 ---
 
-## Community Edition limit: relationship property uniqueness
+## Database constraint vs application MERGE: related but different
 
-Neo4j Community Edition supports uniqueness constraints on node properties only. It does NOT support uniqueness constraints on relationship properties.
+Both the uniqueness constraint on `PROXIMITY_EVENT.idempotency_key` and the Correlation Worker's use of `MERGE` are necessary. They solve different problems:
 
-This means:
+**The uniqueness constraint** prevents two concurrent writers from inserting duplicate edges at the storage level. Even if two Correlation Worker instances raced, the second write would fail with a constraint violation rather than silently creating a duplicate.
 
-**Entity identity:**
-```
-enforced by Neo4j uniqueness constraint
-```
+**MERGE** is the application's replay-safe find-or-create operation. When the Kafka offset is not committed and the same `position.normalized` event is redelivered, `MERGE` finds the already-created edge and updates its properties rather than attempting to create a new one. `CREATE` would hit the constraint and fail; `MERGE` succeeds.
 
-**PROXIMITY_EVENT episode identity (`{pair_key}:{episode_start_ms}`):**
-```
-enforced by deterministic application MERGE in the Correlation Worker (Phase 05)
--- not by a database schema constraint
+Summary:
+
+```text
+Uniqueness constraint  ->  prevents duplicates at storage level, catches concurrent race conditions
+MERGE                  ->  replay-safe find-or-create, correct under at-least-once redelivery
 ```
 
-The Correlation Worker writes PROXIMITY_EVENT edges with `MERGE` on the node pattern and relies on the deterministic `idempotency_key` value to avoid creating duplicate edges for the same episode. This is an application-level guarantee, not a database-level constraint. At-least-once Kafka redelivery is safe because the same `MERGE` on the same pattern produces the same result.
+Both are required for correct behavior.
 
 ---
 
