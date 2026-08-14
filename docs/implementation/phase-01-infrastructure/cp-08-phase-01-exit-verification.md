@@ -77,7 +77,7 @@ public schema:
   alerts
 ```
 
-All 6 tables created by migrations 001-006 are present.
+The migration set 001-006 installs the TimescaleDB extension and creates the six expected application tables.
 
 ### Hypertable and chunks
 
@@ -107,10 +107,10 @@ position_history_entity_observed_uidx   UNIQUE   (entity_id, observed_at)
 position_history_entity_time_idx        btree    (entity_id, observed_at DESC)
 position_history_geocell_time_idx       btree    (geo_cell, observed_at DESC)
 position_history_observed_at_idx        btree    (observed_at DESC)
-alerts_entity_time_idx                  btree    (entity_id, observed_at DESC)
-alerts_counterparty_time_idx            btree    (counterparty_id, observed_at DESC)
-alerts_status_time_idx                  btree    (status, observed_at DESC)
-alerts_type_time_idx                    btree    (alert_type, observed_at DESC)
+alerts_entity_time_idx                  btree    (entity_id, detected_at DESC)
+alerts_counterparty_time_idx            btree    (counterparty_entity_id, detected_at DESC)
+alerts_status_time_idx                  btree    (status, detected_at DESC)
+alerts_type_time_idx                    btree    (alert_type, detected_at DESC)
 route_references_entity_idx             btree    (entity_id)
 users_google_sub_key                    UNIQUE   (google_sub)
 ... plus PKs on all tables
@@ -240,6 +240,8 @@ No inconsistencies found between infrastructure state and documented artifacts.
 | Structured logging convention documented | PASS: cp-06 |
 | Health/readiness convention documented | PASS: cp-07 |
 | Makefile covers all provisioning operations | PASS: up, migrate, topics, neo4j-schema, help (bug fixed this checkpoint) |
+| Manual datastore hands-on requirement complete | PASS: cp-05 |
+| No substantial application code prematurely introduced | PASS: Phase 01 contains only infrastructure, schemas, and convention documents |
 
 **Phase 01 exit: PASS.**
 
