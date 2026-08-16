@@ -82,10 +82,10 @@ A hypertable is a normal PostgreSQL table that TimescaleDB partitions internally
 
 A unique index on a hypertable must include the partitioning column. Since Sentinel partitions by `observed_at`:
 
-```
-UNIQUE (entity_id, observed_at)   -- valid: observed_at is included
-UNIQUE (entity_id)                -- invalid: TimescaleDB rejects this
-```
+| Constraint | Valid? | Reason |
+| --- | --- | --- |
+| `UNIQUE (entity_id, observed_at)` | Yes | Partition column `observed_at` is included |
+| `UNIQUE (entity_id)` | No | TimescaleDB rejects: partition column missing |
 
 TimescaleDB cannot enforce global uniqueness across independent time chunks unless the partition column participates in the constraint.
 
@@ -111,14 +111,14 @@ Checkpoint 2 only needs to create the constraint. The transaction ordering is a 
 
 Referenced objects must exist before dependent ones:
 
-```
-001 extensions
-002 position_history   (needs extension)
-003 users
-004 user_workspaces    (FK to users)
-005 route_references   (+ route_reference_points in same file)
-006 alerts             (FK to users)
-```
+| Migration | Tables | Dependency |
+| --- | --- | --- |
+| `001` | extensions | none |
+| `002` | `position_history` | needs TimescaleDB extension from 001 |
+| `003` | `users` | none |
+| `004` | `user_workspaces` | FK to `users` (003) |
+| `005` | `route_references`, `route_reference_points` | none |
+| `006` | `alerts` | FK to `users` (003) |
 
 ---
 
@@ -140,7 +140,20 @@ If this always produces an identical schema, Checkpoint 2 is complete.
 
 ## 14. What to Inspect After Migrations
 
-Do not trust only "script exited 0." Connect and verify:
+Do not trust only "script exited 0." First bring up the stack and run migrations:
+
+```bash
+make up        # start all containers, wait for healthy
+make migrate   # apply migrations 001-006 in order
+```
+
+Then connect to TimescaleDB and verify:
+
+```bash
+docker exec -it sentinel-timescaledb psql -U sentinel -d sentinel
+```
+
+Inside psql:
 
 ```sql
 \dx                         -- TimescaleDB extension active
