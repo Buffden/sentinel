@@ -1,0 +1,63 @@
+@startuml kafka-basics
+title Kafka Basics: Broker, Topic, Producer, Consumer
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam componentStyle rectangle
+skinparam component {
+  BackgroundColor #F5F5F5
+  BorderColor #888888
+}
+skinparam rectangle {
+  BackgroundColor #FFFDE7
+  BorderColor #AAAAAA
+}
+skinparam note {
+  BackgroundColor #FAFAFA
+  BorderColor #AAAAAA
+}
+
+' ── Producer ───────────────────────────────────────────────
+rectangle "Producer\n(writes events)" as producer
+
+' ── Broker ─────────────────────────────────────────────────
+package "Broker" as broker {
+
+  package "Topic A" as topicA {
+    rectangle "Partition 0\n[0][1][2][3]..." as p0
+    rectangle "Partition 1\n[0][1][2][3]..." as p1
+  }
+
+  package "Topic B" as topicB {
+    rectangle "Partition 0\n[0][1][2]..."   as p2
+  }
+
+}
+
+' ── Consumer Groups ────────────────────────────────────────
+rectangle "Consumer Group X\nInstance 1\n(reads Partition 0)" as cg_x1
+rectangle "Consumer Group X\nInstance 2\n(reads Partition 1)" as cg_x2
+
+rectangle "Consumer Group Y\nInstance 1\n(reads Topic A independently)" as cg_y
+
+' ── Producer → partitions ──────────────────────────────────
+producer --> p0 : append by key hash
+producer --> p1 : append by key hash
+producer --> p2 : append
+
+' ── Consumers ← partitions ─────────────────────────────────
+p0 --> cg_x1 : read from committed offset
+p1 --> cg_x2 : read from committed offset
+p0 --> cg_y  : independent offset
+p1 --> cg_y
+
+note bottom of broker
+  Events are immutable and ordered within a partition.
+  Each consumer group tracks its own committed offset per partition.
+  Multiple groups can read the same topic without affecting each other.
+  A crashed consumer resumes from its last committed offset.
+end note
+
+@enduml
