@@ -67,10 +67,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # GITHUB_TOKEN with contents: write is sufficient when the main branch is unprotected.
-          # If your branch is protected and you need to bypass protection rules, replace with a PAT:
-          #   token: ${{ secrets.PAT_TOKEN }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # GH_PAT is a fine-grained PAT with Contents: read+write, required to bypass
+          # the main branch ruleset that blocks direct pushes from GITHUB_TOKEN.
+          token: ${{ secrets.GH_PAT }}
           # Full history required so git diff can resolve base refs for --files filtering.
           fetch-depth: 0
 
