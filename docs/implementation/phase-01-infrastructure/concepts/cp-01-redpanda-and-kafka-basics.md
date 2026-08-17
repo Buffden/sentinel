@@ -24,15 +24,15 @@ A **topic** is a named stream of events. Producers write to a topic by name; con
 
 Sentinel's topics map directly to data flow boundaries:
 
-```
-adsb.raw            :raw ADS-B telemetry from the Ingestion Poller
-ais.raw             :raw AIS telemetry from the Ingestion Poller
-position.normalized :cleaned positions from the Position Consumer
-deviation.candidates:per-ping route classifications from the Deviation Detector
-proximity.candidates:new proximity episodes from the Correlation Worker
-alerts              :alert events from the Alert Evaluator
-adsb.dlq / ais.dlq  :rejected records that could not be parsed
-```
+| Topic | Description |
+| --- | --- |
+| `adsb.raw` | Raw ADS-B telemetry from the Ingestion Poller |
+| `ais.raw` | Raw AIS telemetry from the Ingestion Poller |
+| `position.normalized` | Cleaned positions from the Position Consumer |
+| `deviation.candidates` | Per-ping route classifications from the Deviation Detector |
+| `proximity.candidates` | New proximity episodes from the Correlation Worker |
+| `alerts` | Alert events from the Alert Evaluator |
+| `adsb.dlq` / `ais.dlq` | Rejected records that could not be parsed |
 
 Each topic is an independent stream. A consumer reading `position.normalized` has no effect on a consumer reading `alerts`.
 

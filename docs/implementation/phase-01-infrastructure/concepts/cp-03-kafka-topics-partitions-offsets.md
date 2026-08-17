@@ -48,11 +48,10 @@ The key is used for partition assignment when there are multiple partitions (rec
 
 An offset is the position of a record within one partition. It is a sequential integer starting at 0.
 
-```
-partition 0:
-  offset 0  -> {"checkpoint":3,"source":"manual-test","topic":"adsb.raw"}
-  offset 1  -> (next record will land here)
-```
+| Partition | Offset | Value |
+|---|---|---|
+| 0 | 0 | `{"checkpoint":3,"source":"manual-test","topic":"adsb.raw"}` |
+| 0 | 1 | *(next record will land here)* |
 
 What an offset is NOT:
 - not a globally unique Kafka event ID
@@ -70,10 +69,9 @@ The offset of the next record to be written. Before any produces: `HIGH-WATERMAR
 
 This is what `rpk topic describe -p` shows as the log end:
 
-```
-PARTITION  LEADER  EPOCH  REPLICAS  LOG-START-OFFSET  HIGH-WATERMARK
-0          0       1      [0]       0                 1
-```
+| PARTITION | LEADER | EPOCH | REPLICAS | LOG-START-OFFSET | HIGH-WATERMARK |
+|---|---|---|---|---|---|
+| 0 | 0 | 1 | [0] | 0 | 1 |
 
 ---
 
@@ -130,10 +128,9 @@ These are distinct and should not be conflated:
 **Committed consumer-group offset** -- the position stored on the broker for a named group. The broker records this so the group can resume from the right place after a restart. What `rpk group describe` shows as `CURRENT-OFFSET`.
 
 After consuming offset 0 with group `cp3-manual-test`:
-```
-TOPIC     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-adsb.raw  0          1               1               0
-```
+| TOPIC | PARTITION | CURRENT-OFFSET | LOG-END-OFFSET | LAG |
+|---|---|---|---|---|
+| `adsb.raw` | 0 | 1 | 1 | 0 |
 
 `CURRENT-OFFSET: 1` means the group has committed through offset 0 and will next read from offset 1. LAG 0 means no records remain unconsumed.
 
@@ -151,10 +148,26 @@ Replication factor 1 means only one broker holds the partition. In a multi-broke
 
 ## Topic creation idempotency
 
-`rpk topic create` in Redpanda v24.1.2 does not have a `--if-not-exists` flag. `topics.sh` achieves idempotency explicitly: it lists existing topics first, then only creates those that are missing. This correctly distinguishes:
-- topic already exists -- silently skipped
-- broker unreachable -- `rpk topic list` fails; `set -euo pipefail` aborts
-- provisioning failure -- `rpk topic create` fails; `set -euo pipefail` aborts
+Idempotency means: running the same operation multiple times has the same result as running it once. The `topics.sh` script should be safe to re-run without erroring if topics already exist.
+
+The problem is that `rpk topic create` in Redpanda v24.1.2 has no `--if-not-exists` flag. Calling it on an existing topic errors out.
+
+`topics.sh` works around this in two steps:
+
+1. List all existing topics with `rpk topic list`
+2. Only call `rpk topic create` for topics that are missing
+
+Re-running the script is safe: existing topics are silently skipped, missing ones are created.
+
+`set -euo pipefail` at the top of the script means any failed command stops the script immediately. This lets the script correctly distinguish three outcomes:
+
+| Outcome | What happens |
+|---|---|
+| Topic already exists | Silently skipped, no error |
+| Broker is unreachable | `rpk topic list` fails, script stops |
+| Topic creation fails | `rpk topic create` fails, script stops |
+
+Without `set -euo pipefail`, a failure could pass silently and you would think topics were created when they were not.
 
 ---
 

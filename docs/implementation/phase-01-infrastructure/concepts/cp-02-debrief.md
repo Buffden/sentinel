@@ -2,14 +2,14 @@
 
 ## Schema created
 
-```
-position_history        -- hypertable, partitioned by observed_at (1-day chunks)
-users
-user_workspaces         -- FK -> users
-route_references
-route_reference_points  -- FK -> route_references
-alerts                  -- self-referential FK (superseded_by), FK -> users
-```
+| Table | Notes |
+| --- | --- |
+| `position_history` | Hypertable, partitioned by `observed_at` (1-day chunks) |
+| `users` | |
+| `user_workspaces` | FK to `users` |
+| `route_references` | |
+| `route_reference_points` | FK to `route_references` |
+| `alerts` | Self-referential FK (`superseded_by`), FK to `users` |
 
 ---
 
@@ -23,13 +23,17 @@ alerts                  -- self-referential FK (superseded_by), FK -> users
 
 Two-layer protection:
 
-**DB layer** -- each migration is wrapped in `BEGIN/COMMIT`. Any SQL error inside the transaction causes a full rollback of that file's DDL. No partial schema changes land.
-
-**Shell layer** -- psql receives `-v ON_ERROR_STOP=1`, which exits with a non-zero code on any SQL error. `migrate.sh` uses `set -euo pipefail`, so the script aborts immediately and remaining migrations do not run.
+| Layer | Mechanism | Effect |
+| --- | --- | --- |
+| DB | Each migration wrapped in `BEGIN/COMMIT` | SQL error causes full rollback of that file's DDL; no partial schema changes land |
+| Shell | psql receives `-v ON_ERROR_STOP=1`; `migrate.sh` uses `set -euo pipefail` | psql exits non-zero on any SQL error; script aborts immediately and remaining migrations do not run |
 
 Failure experiment confirmed both layers:
-- psql exited with code 3 (non-zero) on `SELECT 1/0`
-- `rollback_experiment` table was not present after the failed run
+
+| Observation | Result |
+| --- | --- |
+| psql exit code on `SELECT 1/0` | Code 3 (non-zero) |
+| `rollback_experiment` table after failed run | Not present |
 
 ---
 

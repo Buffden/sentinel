@@ -1,0 +1,63 @@
+@startuml cp-02-migration-flow
+title Checkpoint 2: TimescaleDB Migration Flow
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:make up;
+note right: starts all 4 containers\nwaits for healthy
+
+:make migrate;
+note right: runs infra/scripts/migrate.sh
+
+:wait for PostgreSQL ready\n(pg_isready loop);
+
+partition "migrations applied in order" {
+  :001_extensions.sql\nCREATE EXTENSION timescaledb;
+  note right: installs timescaledb_information\nand all TimescaleDB functions
+
+  :002_position_history.sql\nCREATE TABLE, create_hypertable\nretention policy, indexes;
+  note right: partition column: observed_at\nchunk interval: 1 day\nretention: 30 days
+
+  :003_users.sql\nCREATE TABLE users;
+
+  :004_user_workspaces.sql\nCREATE TABLE user_workspaces\n(FK -> users);
+
+  :005_route_references.sql\nCREATE TABLE route_references\nCREATE TABLE route_reference_points\n(FK -> route_references);
+
+  :006_alerts.sql\nCREATE TABLE alerts\n(FK -> users, self-ref FK);
+}
+
+:connect to psql\ndocker exec -it sentinel-timescaledb\npsql -U sentinel -d sentinel;
+
+partition "verify inside psql" {
+  :\\dx — extension active;
+  :\\dt — all 6 tables present;
+  :\\d position_history — columns and indexes;
+  :SELECT * FROM timescaledb_information.hypertables;
+  :SELECT * FROM timescaledb_information.jobs\nWHERE proc_name = 'policy_retention';
+}
+
+if (schema matches expected?) then (yes)
+  :Checkpoint 2 complete;
+  stop
+else (no)
+  :make reset;
+  note right: destroys containers\nand named volumes
+  :make up;
+  :make migrate;
+  note right: start over from scratch
+  stop
+endif
+
+@enduml
