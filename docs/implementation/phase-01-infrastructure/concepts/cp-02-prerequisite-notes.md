@@ -6,7 +6,7 @@ Checkpoint 2 applies Sentinel's canonical PostgreSQL/TimescaleDB schema through 
 
 ## 1. What Checkpoint 2 Does
 
-```
+```text
 TimescaleDB running
   → apply SQL migrations
   → tables / indexes / constraints created
@@ -40,7 +40,7 @@ By default `psql` continues executing after a failed statement. `ON_ERROR_STOP=1
 
 A versioned SQL file applied in numeric order:
 
-```
+```text
 001_extensions.sql
 002_position_history.sql
 003_users.sql
@@ -130,7 +130,7 @@ Migrations run via `make migrate`, not automatically on `docker compose up`. Kee
 
 ## 13. Clean Reset Workflow
 
-```
+```text
 make reset → make up → make migrate
 ```
 
@@ -147,38 +147,13 @@ make up        # start all containers, wait for healthy
 make migrate   # apply migrations 001-006 in order
 ```
 
-Then connect to TimescaleDB and verify:
-
-```bash
-docker exec -it sentinel-timescaledb psql -U sentinel -d sentinel
-```
-
-Inside psql:
-
-```sql
-\dx                         -- TimescaleDB extension active
-\dt                         -- all expected tables present
-\d position_history         -- columns, indexes, constraints
-SELECT * FROM timescaledb_information.hypertables;
-SELECT * FROM timescaledb_information.dimensions;
-SELECT * FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention';
-\di+ position_history*      -- indexes
-```
+Then run the verification queries in `scripts/cp-02/verify-schema.sql`.
 
 ---
 
 ## 15. Failure Experiment
 
-Run this directly in psql to observe transaction rollback:
-
-```sql
-BEGIN;
-CREATE TABLE rollback_test (id INTEGER);
-SELECT 1/0;  -- deliberate failure
-COMMIT;
-```
-
-Then confirm `rollback_test` does not exist. This proves the transaction aborted cleanly rather than leaving a half-applied schema.
+Run `scripts/cp-02/failure-experiment.sql` directly in psql to observe transaction rollback. Then confirm `rollback_experiment` does not exist. This proves the transaction aborted cleanly rather than leaving a half-applied schema.
 
 ---
 

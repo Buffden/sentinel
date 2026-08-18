@@ -41,17 +41,9 @@ Without the uniqueness constraint, concurrent workers could create duplicate nod
 
 ## Checkpoint 4 schema
 
-```cypher
-CREATE CONSTRAINT entity_id_unique IF NOT EXISTS
-  FOR (e:Entity)
-  REQUIRE e.id IS UNIQUE;
+See `infra/neo4j/schema.cypher`. Applied by `make neo4j-schema`.
 
-CREATE CONSTRAINT proximity_event_idempotency_key_unique IF NOT EXISTS
-  FOR ()-[r:PROXIMITY_EVENT]-()
-  REQUIRE r.idempotency_key IS UNIQUE;
-```
-
-Neo4j 5.7+ Community Edition supports uniqueness constraints on both node and relationship properties. Both constraints above are database-enforced.
+Neo4j 5.7+ Community Edition supports uniqueness constraints on both node and relationship properties. Both constraints are database-enforced.
 
 ---
 
@@ -59,17 +51,21 @@ Neo4j 5.7+ Community Edition supports uniqueness constraints on both node and re
 
 After `make neo4j-schema`:
 
-```text
-SHOW CONSTRAINTS;
-  entity_id_unique                        UNIQUENESS              NODE         Entity          [id]
-  proximity_event_idempotency_key_unique  RELATIONSHIP_UNIQUENESS RELATIONSHIP PROXIMITY_EVENT [idempotency_key]
+### Constraints
 
-SHOW INDEXES;
-  entity_id_unique                        RANGE  NODE         Entity          [id]              (backing index from node constraint)
-  proximity_event_idempotency_key_unique  RANGE  RELATIONSHIP PROXIMITY_EVENT [idempotency_key] (backing index from relationship constraint)
-  index_343aff4e                          LOOKUP NODE         ...                               (system-managed token index)
-  index_f7700477                          LOOKUP RELATIONSHIP ...                               (system-managed token index)
-```
+| Name | Type | Target | Label | Properties |
+| --- | --- | --- | --- | --- |
+| entity_id_unique | UNIQUENESS | NODE | Entity | [id] |
+| proximity_event_idempotency_key_unique | RELATIONSHIP_UNIQUENESS | RELATIONSHIP | PROXIMITY_EVENT | [idempotency_key] |
+
+### Indexes
+
+| Name | Type | Target | Label | Properties | Notes |
+| --- | --- | --- | --- | --- | --- |
+| entity_id_unique | RANGE | NODE | Entity | [id] | backing index from constraint |
+| proximity_event_idempotency_key_unique | RANGE | RELATIONSHIP | PROXIMITY_EVENT | [idempotency_key] | backing index from constraint |
+| index_343aff4e | LOOKUP | NODE | — | — | system-managed token index |
+| index_f7700477 | LOOKUP | RELATIONSHIP | — | — | system-managed token index |
 
 The two LOOKUP indexes are system-managed and always present. They are not created by the schema file.
 
