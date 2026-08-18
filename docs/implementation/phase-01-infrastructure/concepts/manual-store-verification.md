@@ -23,7 +23,7 @@ Listed all 8 canonical topics; inspected `adsb.raw` partition metadata; produced
 
 ### Commands
 
-`scripts/cp-05/kafka.sh`
+[`scripts/manual-store-verification/kafka.sh`](../../../../scripts/manual-store-verification/kafka.sh)
 
 ### What I observed
 
@@ -82,7 +82,7 @@ Verified all 6 expected tables exist; inspected hypertable metadata, chunk inter
 
 ### Commands
 
-`scripts/cp-05/timescaledb.sql`
+[`scripts/manual-store-verification/timescaledb.sql`](../../../../scripts/manual-store-verification/timescaledb.sql)
 
 ### What I observed
 
@@ -139,7 +139,7 @@ Created a canonical-shape `entity:live:*` hash; inspected TTL behavior; created 
 
 ### Commands
 
-`scripts/cp-05/redis.sh`
+[`scripts/manual-store-verification/redis.sh`](../../../../scripts/manual-store-verification/redis.sh)
 
 ### What I observed
 
@@ -199,7 +199,7 @@ Verified CP4 constraints; created two Entity nodes with a KNOWN_ASSOCIATE relati
 
 ### Commands
 
-`scripts/cp-05/neo4j.cypher`
+[`scripts/manual-store-verification/neo4j.cypher`](../../../../scripts/manual-store-verification/neo4j.cypher)
 
 ### What I observed
 

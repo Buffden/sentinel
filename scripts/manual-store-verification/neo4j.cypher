@@ -1,6 +1,6 @@
 // CP-05 Neo4j manual verification
 // Password comes from NEO4J_AUTH in .env (format: neo4j/<password>)
-// Run: docker exec -i sentinel-neo4j cypher-shell -u neo4j -p <password> < scripts/cp-05/neo4j.cypher
+// Run: docker exec -i sentinel-neo4j cypher-shell -u neo4j -p <password> < scripts/manual-store-verification/neo4j.cypher
 
 // Verify CP4 constraints are in place
 SHOW CONSTRAINTS;

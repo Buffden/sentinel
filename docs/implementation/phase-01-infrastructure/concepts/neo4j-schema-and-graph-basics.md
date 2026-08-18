@@ -41,7 +41,7 @@ Without the uniqueness constraint, concurrent workers could create duplicate nod
 
 ## Checkpoint 4 schema
 
-See `infra/neo4j/schema.cypher`. Applied by `make neo4j-schema`.
+See [`infra/neo4j/schema.cypher`](../../../../infra/neo4j/schema.cypher). Applied by `make neo4j-schema`.
 
 Neo4j 5.7+ Community Edition supports uniqueness constraints on both node and relationship properties. Both constraints are database-enforced.
 

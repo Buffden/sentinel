@@ -147,13 +147,13 @@ make up        # start all containers, wait for healthy
 make migrate   # apply migrations 001-006 in order
 ```
 
-Then run the verification queries in `scripts/cp-02/verify-schema.sql`.
+Then run the verification queries in [`scripts/timescaledb-schema/verify-schema.sql`](../../../../scripts/timescaledb-schema/verify-schema.sql).
 
 ---
 
 ## 15. Failure Experiment
 
-Run `scripts/cp-02/failure-experiment.sql` directly in psql to observe transaction rollback. Then confirm `rollback_experiment` does not exist. This proves the transaction aborted cleanly rather than leaving a half-applied schema.
+Run [`scripts/timescaledb-schema/failure-experiment.sql`](../../../../scripts/timescaledb-schema/failure-experiment.sql) directly in psql to observe transaction rollback. Then confirm `rollback_experiment` does not exist. This proves the transaction aborted cleanly rather than leaving a half-applied schema.
 
 ---
 

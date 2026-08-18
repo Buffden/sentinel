@@ -1,5 +1,5 @@
 -- CP-02 schema verification
--- Run: docker exec -it sentinel-timescaledb psql -U sentinel -d sentinel -f /dev/stdin < scripts/cp-02/verify-schema.sql
+-- Run: docker exec -it sentinel-timescaledb psql -U sentinel -d sentinel -f /dev/stdin < scripts/timescaledb-schema/verify-schema.sql
 -- Or open psql and paste directly.
 
 -- Confirm TimescaleDB extension is active
