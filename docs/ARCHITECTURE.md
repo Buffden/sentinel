@@ -239,6 +239,17 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 
 ---
 
+## H3 Usage
+
+Sentinel uses two configurable H3 access patterns:
+
+- `HISTORY_H3_RESOLUTION`: `position_history.geo_cell`, an indexed query column inside TimescaleDB time chunks.
+- `LIVE_H3_RESOLUTION`: Redis `geo-cell:*` sorted sets used to reduce live proximity candidates.
+
+TimescaleDB partitions `position_history` by `observed_at` only. H3 cells are not TimescaleDB chunks or shards in this design.
+
+---
+
 ## Canonical Data Flow
 
 ```text

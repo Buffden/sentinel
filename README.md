@@ -10,36 +10,6 @@ Sentinel is a portfolio/learning project designed to demonstrate distributed-sys
 
 ![Architecture](diagrams/docs/architecture.svg)
 
-Canonical flow:
-
-```text
-OpenSky / AISHub / synthetic generator
-  → Ingestion Poller
-  → Kafka raw topics
-  → Position Consumer
-      → TimescaleDB position history
-      → Redis live state + H3 sorted-set index
-      → position.normalized
-          ├→ Deviation Detector → deviation.candidates
-          └→ Correlation Worker → Neo4j evidence + KNOWN_ASSOCIATE filter
-                                  → proximity.candidates
-
-Redis signal-loss scan ─────────────────────────┐
-deviation.candidates ───────────────────────────┤
-proximity.candidates ───────────────────────────┤
-Redis anomaly episode state ────────────────────→ Alert Evaluator
-                                                   → alerts Kafka
-                                                   → API
-                                                     → TimescaleDB alerts
-                                                     → Redis alert-events
-                                                     → REST/WebSocket
-                                                     → Angular + Leaflet
-
-API → Neo4j for operator investigation/evidence reads.
-```
-
-The Alert Evaluator remains the complete Alert Layer. Neo4j relationship filtering is performed upstream by the Correlation Worker before `proximity.candidates` is emitted.
-
 ---
 
 ## Core Technical Decisions
@@ -57,38 +27,14 @@ The Alert Evaluator remains the complete Alert Layer. Neo4j relationship filteri
 
 ---
 
-## Anomaly Types
+## Anomaly Detection
 
-| Alert | Detection |
-| --- | --- |
-| `SIGNAL_LOSS` | entity remains unseen beyond configurable threshold |
-| `ROUTE_DEVIATION` | synthetic entity remains outside assigned route corridor for sustained pings |
-| `UNSCHEDULED_PROXIMITY` | exact proximity episode between a pair with no `KNOWN_ASSOCIATE` relationship |
-| `COMPOSITE` | qualifying signal-loss episode correlated with unscheduled proximity |
-
----
-
-## Delivery Semantics
-
-Sentinel does not claim exactly-once transport.
-
-- Kafka processing is at-least-once.
-- Durable TimescaleDB and Neo4j side effects are idempotent by deterministic logical identity.
-- Redis live state is protected against source-time regression.
-- Alert rows have type-specific deterministic IDs.
-- WebSocket lifecycle delivery is at-least-once; clients tolerate duplicates.
-- Leader election prevents concurrent active Alert Evaluators but is not a replacement for durable idempotency.
-
----
-
-## H3 Usage
-
-Sentinel uses two configurable H3 access patterns:
-
-- `HISTORY_H3_RESOLUTION`: `position_history.geo_cell`, an indexed query column inside TimescaleDB time chunks;
-- `LIVE_H3_RESOLUTION`: Redis `geo-cell:*` sorted sets used to reduce live proximity candidates.
-
-TimescaleDB partitions `position_history` by `observed_at` only. H3 cells are not TimescaleDB chunks/shards in this design.
+| Alert | Trigger | Notes |
+| --- | --- | --- |
+| `SIGNAL_LOSS` | Entity unseen beyond a configurable silence threshold | Detected by scheduled Redis scan, not a Kafka event |
+| `ROUTE_DEVIATION` | Entity remains outside its assigned route corridor for sustained pings | Stateless per-ping geometry; episode state owned by Alert Evaluator |
+| `UNSCHEDULED_PROXIMITY` | Exact proximity episode between a pair with no `KNOWN_ASSOCIATE` relationship | Known associates are filtered upstream in the Correlation Worker |
+| `COMPOSITE` | Active or recent signal-loss episode correlated with an unscheduled proximity | Supersedes the individual alerts it references |
 
 ---
 
@@ -102,42 +48,40 @@ This is a non-commercial portfolio/learning project. Third-party source terms an
 
 ---
 
-## Implementation Roadmap
+## Service Pipeline
 
-1. Infrastructure + Canonical Schemas + Observability Skeleton
-2. Live Position Pipeline
-3. Signal Loss + Alert Delivery Foundation
-4. Route Deviation
-5. Correlation Worker + Unscheduled Proximity
-6. Composite Correlation
-7. Workspace + Operator Scope
-8. Alert Lifecycle + Distributed Fan-Out
-9. Entity Investigation
-10. Production Hardening + Failure Lab
-
-Permanent phase plans live in `docs/implementation/`. Implementation process is defined by `docs/IMPLEMENTATION_PLAYBOOK.md` and `docs/IMPLEMENTATION_WORKFLOW.md`.
+| Service | Role | Consumes | Publishes |
+| --- | --- | --- | --- |
+| Ingestion Poller | Fetch raw ADS-B/AIS telemetry from external feeds | OpenSky / AISHub REST | `adsb.raw`, `ais.raw` |
+| Position Consumer | Normalize telemetry, persist history, maintain live Redis state and H3 spatial index | `adsb.raw`, `ais.raw` | `position.normalized` |
+| Deviation Detector | Stateless per-ping geometry check against reference route corridors | `position.normalized` | `deviation.candidates` |
+| Correlation Worker | Detect proximity episodes, write graph evidence, filter known associates | `position.normalized` | `proximity.candidates` |
+| Alert Evaluator | Apply anomaly rules and emit deterministic alerts; owns signal-loss via scheduled Redis scan | `deviation.candidates`, `proximity.candidates` | `alerts` |
+| API | Persist and lifecycle alerts, authenticate operators, serve REST and WebSocket | `alerts`, Redis pub/sub | REST + WebSocket |
 
 ---
 
 ## Architecture Decision Records
 
-Accepted ADRs live in `docs/adr/`:
+ADR-001 through ADR-015 live in `docs/adr/`.
 
-- ADR-001 Kafka over direct HTTP ingestion
-- ADR-002 TimescaleDB for position history
-- ADR-003 Neo4j entity graph
-- ADR-004 Redis live state
-- ADR-005 Alert Evaluator leader election
-- ADR-006 H3 geo-cell indexing strategy
-- ADR-007 deterministic idempotency identity
-- ADR-008 Express API layer
-- ADR-009 Angular dashboard
-- ADR-010 durable alert lifecycle store
-- ADR-011 Google OAuth operator auth
-- ADR-012 workspace scope / server-side filtering
-- ADR-013 Node.js ingestion poller
-- ADR-014 hybrid Alert Evaluator input model
-- ADR-015 v1 deterministic reference-route model
+| ADR | Decision | Choice | Key Reasoning |
+| --- | --- | --- | --- |
+| ADR-001 | Broker over direct HTTP ingestion | Redpanda (Kafka-compatible) | Decouples producers from consumers; enables replay, backpressure, and at-least-once delivery |
+| ADR-002 | Position history store | TimescaleDB | Time-partitioned hypertable with indexed geo-cell column; automatic chunk retention |
+| ADR-003 | Entity graph store | Neo4j | Native relationship traversal for proximity evidence and known-associate filtering |
+| ADR-004 | Live state store | Redis | Sub-millisecond current state, H3 sorted-set spatial index, pub/sub, and lease primitives in one store |
+| ADR-005 | Alert Evaluator coordination | Redis lease | Single active evaluator without distributed consensus overhead; durable idempotency remains the correctness backstop |
+| ADR-006 | Geospatial candidate indexing | Uber H3 hex cells | Two resolutions: history column in TimescaleDB, live sorted sets in Redis; reduces proximity candidates before exact distance |
+| ADR-007 | Idempotency strategy | Deterministic logical IDs | Replay safety without exactly-once transport; type-specific alert IDs and `(entity_id, observed_at)` position key |
+| ADR-008 | API layer | Express + WebSocket | Lightweight async runtime; REST for queries, WebSocket for live alert and position fan-out |
+| ADR-009 | Operator dashboard | Angular + Leaflet | Functional map interface; WebSocket client tolerates duplicate lifecycle events |
+| ADR-010 | Alert persistence | PostgreSQL table on TimescaleDB | Transactional lifecycle transitions; deterministic `alert_id` gives idempotent upsert on replay |
+| ADR-011 | Operator authentication | Google OAuth 2.0 + application JWT | No password management; trusted identity; short-lived JWT for API session |
+| ADR-012 | Multi-tenant data scoping | Server-side workspace filtering | Workspace membership enforced at API; no client-side trust |
+| ADR-013 | Ingestion poller runtime | Node.js | Unified runtime across all services; no polyglot operational overhead |
+| ADR-014 | Alert Evaluator input model | Hybrid: Kafka topics + scheduled Redis scan | Proximity and deviation arrive via Kafka; signal loss has no Kafka event so requires a periodic scan |
+| ADR-015 | Reference-route model | Deterministic static seed data | Synthetic entities with assigned corridors enable reproducible anomaly injection for demos and tests |
 
 ---
 
@@ -153,19 +97,11 @@ Service-specific commands and verification steps are added as each phase becomes
 
 ---
 
-## Future Work
-
-Out of v1 scope:
-
-- multi-region ingestion;
-- ML-based ranking/scoring;
-- multi-tenant organizational isolation;
-- richer historical audit/replay UX.
+<br>
 
 ---
 
-## License
-
-Copyright (c) 2026 Harshwardhan Patil. All rights reserved.
-
-Available for personal, educational, and portfolio review only. See `LICENSE`.
+<div align="center">
+  <sub>Copyright &copy; 2026 Harshwardhan Patil &nbsp;&middot;&nbsp; All rights reserved</sub><br>
+  <sub>Not licensed for reuse, redistribution, or commercial use &nbsp;&middot;&nbsp; Available for personal review and portfolio evaluation only</sub>
+</div>
