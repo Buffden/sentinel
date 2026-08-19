@@ -1,0 +1,60 @@
+@startuml offset-model
+title Three Offset Concepts: Partition Log and Consumer Groups
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam ArrowColor #555555
+skinparam componentStyle rectangle
+
+skinparam rectangle {
+  BackgroundColor #FFFDE7
+  BorderColor #AAAAAA
+}
+skinparam package {
+  BackgroundColor #EEF2FF
+  BorderColor #7986CB
+}
+skinparam note {
+  BackgroundColor #FAFAFA
+  BorderColor #AAAAAA
+}
+
+' ── Partition log ───────────────────────────────────────────
+package "adsb.raw — Partition 0\n(Broker log — immutable)" as log {
+  rectangle "[0] entity_id: test-aircraft-1\n    Record offset = 0\n    Never changes" as r0
+  rectangle "[1] entity_id: test-aircraft-2\n    Record offset = 1\n    Never changes" as r1
+  rectangle "[2] ...\n    Record offset = 2\n    HIGH-WATERMARK = 3" as r2
+}
+
+' ── Consumer group A ────────────────────────────────────────
+package "Consumer Group: cp1-experiment" as groupA {
+  rectangle "CURRENT-OFFSET = 2\n\nHas committed through offset 1.\nWill next fetch from offset 2.\nLAG = 1 (offset 2 not yet consumed)" as cA
+}
+
+' ── Consumer group B ────────────────────────────────────────
+package "Consumer Group: cp1-second-group" as groupB {
+  rectangle "CURRENT-OFFSET = 1\n\nHas committed through offset 0.\nWill next fetch from offset 1.\nLAG = 2 (offsets 1,2 not yet consumed)" as cB
+}
+
+' ── Links ───────────────────────────────────────────────────
+r0 -[hidden]-> r1
+r1 -[hidden]-> r2
+
+r1 --> cA : last consumed\nby this group
+r0 --> cB : last consumed\nby this group
+
+note bottom of log
+  Record offsets are assigned by the broker when records are written.
+  They are fixed, immutable, and independent of any consumer.
+  A record is not deleted when it is consumed.
+end note
+
+note right of groupA
+  CURRENT-OFFSET belongs to a named group.
+  It survives process restarts (stored in __consumer_offsets).
+  It is independent from every other group's offset.
+  Two groups reading the same partition do not interfere.
+end note
+
+@enduml
