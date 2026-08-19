@@ -1,0 +1,6 @@
+# pnpm v11: allow esbuild's post-install script to run.
+# esbuild uses a post-install step to verify its platform binary.
+# The actual binary is distributed via @esbuild/darwin-arm64 (optional dep),
+# so tsx works regardless, but allowing the script eliminates the install warning.
+allowBuilds:
+  esbuild: true
