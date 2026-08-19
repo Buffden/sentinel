@@ -1,0 +1,67 @@
+@startuml data-flow
+title Node.js Producer → adsb.raw → Node.js Consumer Group
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam componentStyle rectangle
+
+skinparam component {
+  BackgroundColor #F5F5F5
+  BorderColor #888888
+}
+skinparam rectangle {
+  BackgroundColor #FFFDE7
+  BorderColor #AAAAAA
+}
+skinparam package {
+  BackgroundColor #EEF2FF
+  BorderColor #7986CB
+}
+skinparam note {
+  BackgroundColor #FAFAFA
+  BorderColor #AAAAAA
+}
+
+' ── Producer ────────────────────────────────────────────────
+rectangle "ingestion-poller\n(Node.js process)\n\nkafka.producer()\nproducer.send()" as producer
+
+' ── Broker ──────────────────────────────────────────────────
+package "Redpanda broker\nlocalhost:9092" as broker {
+
+  package "adsb.raw" as topic {
+    rectangle "Partition 0\n[0] entity_id: test-aircraft-1\n    timestamp_ms: ...\n[1] ...\n[2] ..." as partition
+  }
+
+}
+
+' ── Consumer Group ──────────────────────────────────────────
+package "Consumer Group: cp1-experiment" as group {
+  rectangle "position-consumer\n(Node.js process)\n\nkafka.consumer({ groupId })\nconsumer.subscribe()\nconsumer.run()" as consumer
+}
+
+' ── Committed offset store ───────────────────────────────────
+rectangle "__consumer_offsets\n(Redpanda internal topic)\n\ncp1-experiment :: adsb.raw[0]\nCURRENT-OFFSET: 1" as offsets
+
+' ── Flow ────────────────────────────────────────────────────
+producer --> partition : produce\nkey=entity_id\nvalue=JSON
+
+partition --> consumer : fetch from\ncommitted offset
+
+consumer --> offsets : autoCommit\nevery ~5 s
+
+note bottom of partition
+  Records are immutable once written.
+  Offset 0 remains readable after consumption.
+  The record is not deleted when a consumer reads it.
+end note
+
+note right of offsets
+  CURRENT-OFFSET is the next offset to read.
+  Different consumer groups maintain
+  independent CURRENT-OFFSET values.
+  The broker stores this in __consumer_offsets.
+end note
+
+@enduml

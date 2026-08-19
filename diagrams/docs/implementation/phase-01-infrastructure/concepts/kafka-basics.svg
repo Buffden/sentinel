@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentScriptType="application/ecmascript" contentStyleType="text/css" height="479px" preserveAspectRatio="none" style="width:1431px;height:479px;" version="1.1" viewBox="0 0 1431 479" width="1431px" zoomAndPan="magnify"><defs><filter height="300%" id="f9ohdudy9rsz2" width="300%" x="-1" y="-1"><feGaussianBlur result="blurOut" stdDeviation="2.0"/><feColorMatrix in="blurOut" result="blurOut2" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .4 0"/><feOffset dx="4.0" dy="4.0" in="blurOut2" result="blurOut3"/><feBlend in="SourceGraphic" in2="blurOut3" mode="normal"/></filter></defs><g><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="376" x="538" y="12.0669">Kafka Basics: Broker, Topic, Producer, Consumer</text><!--MD5=[2d5b9017f7d39a785e71c52023a9ba35]
+cluster broker--><polygon fill="#FFFFFF" filter="url(#f9ohdudy9rsz2)" points="818.5,144.1328,872.5,144.1328,879.5,165.2656,1409.5,165.2656,1409.5,326.1328,818.5,326.1328,818.5,144.1328" style="stroke: #000000; stroke-width: 1.5;"/><line style="stroke: #000000; stroke-width: 1.5;" x1="818.5" x2="879.5" y1="165.2656" y2="165.2656"/><text fill="#000000" font-family="monospace" font-size="13" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="48" x="822.5" y="158.1997">Broker</text><!--MD5=[ab9b054611f85a0fa72f292e65e2e915]
+cluster topicA--><polygon fill="#FFFFFF" filter="url(#f9ohdudy9rsz2)" points="858.5,194.1328,920.5,194.1328,927.5,215.2656,1205.5,215.2656,1205.5,294.1328,858.5,294.1328,858.5,194.1328" style="stroke: #000000; stroke-width: 1.5;"/><line style="stroke: #000000; stroke-width: 1.5;" x1="858.5" x2="927.5" y1="215.2656" y2="215.2656"/><text fill="#000000" font-family="monospace" font-size="13" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="56" x="862.5" y="208.1997">Topic A</text><!--MD5=[864a41d7ef5c9c079d34d23445c1741f]
+cluster topicB--><polygon fill="#FFFFFF" filter="url(#f9ohdudy9rsz2)" points="1229.5,194.1328,1291.5,194.1328,1298.5,215.2656,1377.5,215.2656,1377.5,294.1328,1229.5,294.1328,1229.5,194.1328" style="stroke: #000000; stroke-width: 1.5;"/><line style="stroke: #000000; stroke-width: 1.5;" x1="1229.5" x2="1298.5" y1="215.2656" y2="215.2656"/><text fill="#000000" font-family="monospace" font-size="13" font-weight="bold" lengthAdjust="spacingAndGlyphs" textLength="56" x="1233.5" y="208.1997">Topic B</text><!--MD5=[9b17d4b64fe62cd42ba9b816c11a1a61]
+entity p0--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="50.2656" style="stroke: #AAAAAA; stroke-width: 1.5;" width="140" x="874.5" y="228.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="88" x="884.5" y="250.1997">Partition 0</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="120" x="884.5" y="265.3325">[0][1][2][3]...</text><!--MD5=[c3dd7293d4e74cc67bec6d68663a773e]
+entity p1--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="50.2656" style="stroke: #AAAAAA; stroke-width: 1.5;" width="140" x="1049.5" y="228.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="88" x="1059.5" y="250.1997">Partition 1</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="120" x="1059.5" y="265.3325">[0][1][2][3]...</text><!--MD5=[f3929e065b321440b4eee273bd9781ea]
+entity p2--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="50.2656" style="stroke: #AAAAAA; stroke-width: 1.5;" width="116" x="1245.5" y="228.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="88" x="1255.5" y="250.1997">Partition 0</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="96" x="1255.5" y="265.3325">[0][1][2]...</text><!--MD5=[165794d66c29ca850eb712b279abb0ce]
+entity producer--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="50.2656" style="stroke: #AAAAAA; stroke-width: 1.5;" width="140" x="1049.5" y="23.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="64" x="1059.5" y="45.1997">Producer</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="120" x="1059.5" y="60.3325">(writes events)</text><!--MD5=[38224df3de77621c3d893d86f4190fff]
+entity cg_x1--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="65.3984" style="stroke: #AAAAAA; stroke-width: 1.5;" width="172" x="614.5" y="400.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="128" x="624.5" y="422.1997">Consumer Group X</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="80" x="624.5" y="437.3325">Instance 1</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="152" x="624.5" y="452.4653">(reads Partition 0)</text><!--MD5=[221c7feca8022d7ddbdf822d339a475a]
+entity cg_x2--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="65.3984" style="stroke: #AAAAAA; stroke-width: 1.5;" width="172" x="1111.5" y="400.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="128" x="1121.5" y="422.1997">Consumer Group X</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="80" x="1121.5" y="437.3325">Instance 2</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="152" x="1121.5" y="452.4653">(reads Partition 1)</text><!--MD5=[bdecbf5e1958a42324c4846593fa653e]
+entity cg_y--><rect fill="#FFFDE7" filter="url(#f9ohdudy9rsz2)" height="65.3984" style="stroke: #AAAAAA; stroke-width: 1.5;" width="252" x="824.5" y="400.1328"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="128" x="834.5" y="422.1997">Consumer Group Y</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="80" x="834.5" y="437.3325">Instance 1</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="232" x="834.5" y="452.4653">(reads Topic A independently)</text><path d="M6,397.1328 L6,467.6641 L579,467.6641 L579,407.1328 L569,397.1328 L6,397.1328 " fill="#FAFAFA" filter="url(#f9ohdudy9rsz2)" style="stroke: #AAAAAA; stroke-width: 1.0;"/><path d="M569,397.1328 L569,407.1328 L579,407.1328 L569,397.1328 " fill="#FAFAFA" style="stroke: #AAAAAA; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="416" x="12" y="414.1997">Events are immutable and ordered within a partition.</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="528" x="12" y="429.3325">Each consumer group tracks its own committed offset per partition.</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="552" x="12" y="444.4653">Multiple groups can read the same topic without affecting each other.</text><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="464" x="12" y="459.5981">A crashed consumer resumes from its last committed offset.</text><!--MD5=[5b783d28c25fc733850612fe23fd9480]
+link producer to p0--><path d="M1049.33,48.1328 C1000.64,48.1328 944.5,48.1328 944.5,48.1328 C944.5,48.1328 944.5,222.9928 944.5,222.9928 " fill="none" id="producer-&gt;p0" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="944.5,227.9928,948.5,218.9928,944.5,222.9928,940.5,218.9928,944.5,227.9928" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="144" x="934.5" y="116.1997">append by key hash</text><!--MD5=[c0417db522d5057c0fdca62eaf03deb8]
+link producer to p1--><path d="M1119.5,73.2728 C1119.5,73.2728 1119.5,223.1128 1119.5,223.1128 " fill="none" id="producer-&gt;p1" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1119.5,228.1128,1123.5,219.1128,1119.5,223.1128,1115.5,219.1128,1119.5,228.1128" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="144" x="1120.5" y="116.1997">append by key hash</text><!--MD5=[ec9b5c9725cc9f8f806ddc051a8c93e3]
+link producer to p2--><path d="M1189.59,48.1328 C1241.59,48.1328 1303.5,48.1328 1303.5,48.1328 C1303.5,48.1328 1303.5,222.9928 1303.5,222.9928 " fill="none" id="producer-&gt;p2" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1303.5,227.9928,1307.5,218.9928,1303.5,222.9928,1299.5,218.9928,1303.5,227.9928" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="48" x="1306.5" y="116.1997">append</text><!--MD5=[71e4be3b08b8f3a3b1c99d05e6241c02]
+link p0 to cg_x1--><path d="M874.25,266.1328 C802.17,266.1328 700.5,266.1328 700.5,266.1328 C700.5,266.1328 700.5,394.7328 700.5,394.7328 " fill="none" id="p0-&gt;cg_x1" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="700.5,399.7328,704.5,390.7328,700.5,394.7328,696.5,390.7328,700.5,399.7328" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="208" x="701.5" y="363.1997">read from committed offset</text><!--MD5=[fa20c4ec5b43ad2cb91320d3eaca9f3a]
+link p1 to cg_x2--><path d="M1150.5,278.4728 C1150.5,278.4728 1150.5,395.1328 1150.5,395.1328 " fill="none" id="p1-&gt;cg_x2" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1150.5,400.1328,1154.5,391.1328,1150.5,395.1328,1146.5,391.1328,1150.5,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="208" x="1198.5" y="363.1997">read from committed offset</text><!--MD5=[3772bf9680659b00b633c7cf1fde799b]
+link p0 to cg_y--><path d="M944.5,278.4728 C944.5,278.4728 944.5,395.1328 944.5,395.1328 " fill="none" id="p0-&gt;cg_y" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="944.5,400.1328,948.5,391.1328,944.5,395.1328,940.5,391.1328,944.5,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="144" x="951.5" y="363.1997">independent offset</text><!--MD5=[f2530b1387ce56b38d8b16b09b95780e]
+link p1 to cg_y--><path d="M1063,278.4728 C1063,278.4728 1063,395.1328 1063,395.1328 " fill="none" id="p1-&gt;cg_y" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1063,400.1328,1067,391.1328,1063,395.1328,1059,391.1328,1063,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><!--MD5=[fcc2df042c7ed64d76cd9ac28f82b2a5]
+link broker to GMN19--><path d="M818.3096,253.1328 C818.0307,253.1328 817.745,253.1328 817.4526,253.1328 C812.7745,253.1328 806.387,253.1328 798.5389,253.1328 C782.8426,253.1328 761.3037,253.1328 735.9117,253.1328 C685.1278,253.1328 618.9319,253.1328 553.2413,253.1328 C421.86,253.1328 292.5,253.1328 292.5,253.1328 C292.5,253.1328 292.5,344.3528 292.5,396.7428 " fill="none" id="broker-GMN19" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[e622ab409b47345134f3f9eb4b607ed0]
+@startuml kafka-basics
+title Kafka Basics: Broker, Topic, Producer, Consumer
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam componentStyle rectangle
+skinparam component {
+  BackgroundColor #F5F5F5
+  BorderColor #888888
+}
+skinparam rectangle {
+  BackgroundColor #FFFDE7
+  BorderColor #AAAAAA
+}
+skinparam note {
+  BackgroundColor #FAFAFA
+  BorderColor #AAAAAA
+}
+
+rectangle "Producer\n(writes events)" as producer
+
+package "Broker" as broker {
+
+  package "Topic A" as topicA {
+    rectangle "Partition 0\n[0][1][2][3]..." as p0
+    rectangle "Partition 1\n[0][1][2][3]..." as p1
+  }
+
+  package "Topic B" as topicB {
+    rectangle "Partition 0\n[0][1][2]..."   as p2
+  }
+
+}
+
+rectangle "Consumer Group X\nInstance 1\n(reads Partition 0)" as cg_x1
+rectangle "Consumer Group X\nInstance 2\n(reads Partition 1)" as cg_x2
+
+rectangle "Consumer Group Y\nInstance 1\n(reads Topic A independently)" as cg_y
+
+producer - -> p0 : append by key hash
+producer - -> p1 : append by key hash
+producer - -> p2 : append
+
+p0 - -> cg_x1 : read from committed offset
+p1 - -> cg_x2 : read from committed offset
+p0 - -> cg_y  : independent offset
+p1 - -> cg_y
+
+note bottom of broker
+  Events are immutable and ordered within a partition.
+  Each consumer group tracks its own committed offset per partition.
+  Multiple groups can read the same topic without affecting each other.
+  A crashed consumer resumes from its last committed offset.
+end note
+
+@enduml
+
+PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
+(GPL source distribution)
+Java Runtime: OpenJDK Runtime Environment
+JVM: OpenJDK 64-Bit Server VM
+Java Version: 17.0.20+8
+Operating System: Linux
+Default Encoding: UTF-8
+Language: en
+Country: null
+--></g></svg>
