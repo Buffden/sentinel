@@ -1,4 +1,4 @@
-// CP1 — prove Node.js/TypeScript can produce a Kafka event.
+// Kafka producer experiment — prove Node.js/TypeScript can produce a Kafka event.
 //
 // This is a learning experiment, not the final OpenSky ingestion poller.
 // It publishes one synthetic event to adsb.raw and exits.
@@ -26,7 +26,7 @@ const kafka = new Kafka({
 const producer = kafka.producer({
   // DefaultPartitioner is deprecated in kafkajs v2. LegacyPartitioner preserves
   // the v1 behaviour; JavaCompatiblePartitioner matches the Java client's murmur2
-  // hash. For CP1 with 1 partition the choice has no effect, but we must be
+  // hash. With 1 partition the choice has no routing effect, but we must be
   // explicit to avoid the deprecation warning.
   createPartitioner: Partitioners.LegacyPartitioner,
 });
@@ -47,7 +47,7 @@ function log(level: 'info' | 'warn' | 'error', message: string, extra?: Record<s
 
 const TOPIC = 'adsb.raw';
 
-// Synthetic CP1 payload. This is not the final OpenSky contract.
+// Synthetic experiment payload. This is not the final OpenSky contract.
 // The entity_id key field is the canonical Sentinel entity identifier.
 const event = {
   entity_id: 'test-aircraft-1',

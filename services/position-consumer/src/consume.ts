@@ -1,12 +1,12 @@
-// CP1 — prove Node.js/TypeScript can consume a Kafka event from a consumer group.
+// Kafka consumer experiment — prove Node.js/TypeScript can consume a Kafka event from a consumer group.
 //
 // This is a learning experiment, not the final Position Consumer implementation.
 // It subscribes to adsb.raw, logs each message with full Kafka context, and runs
 // until interrupted.
 //
-// Consumer group: cp1-experiment
-//   A disposable group for CP1. The canonical application group (position-consumer)
-//   is reserved for the real Position Consumer implementation in CP3+.
+// Consumer group: kafka-experiment
+//   A disposable group for this experiment. The canonical application group
+//   (position-consumer) is reserved for the real Position Consumer implementation.
 //
 // fromBeginning: true
 //   On the first run the group has no committed offset. fromBeginning tells kafkajs
@@ -30,7 +30,7 @@ const kafka = new Kafka({
 });
 
 const consumer = kafka.consumer({
-  groupId: 'cp1-experiment',
+  groupId: 'kafka-experiment',
 });
 
 function log(level: 'info' | 'warn' | 'error', message: string, extra?: Record<string, unknown>) {
@@ -48,7 +48,7 @@ function log(level: 'info' | 'warn' | 'error', message: string, extra?: Record<s
 const TOPIC = 'adsb.raw';
 
 async function run() {
-  log('info', 'consumer connecting', { brokers, group: 'cp1-experiment' });
+  log('info', 'consumer connecting', { brokers, group: 'kafka-experiment' });
 
   await consumer.connect();
   log('info', 'consumer connected');
