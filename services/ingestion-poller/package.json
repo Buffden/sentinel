@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "produce": "tsx src/produce.ts"
+    "produce": "tsx src/produce.ts",
+    "poll": "tsx src/poller.ts"
   },
   "dependencies": {
     "kafkajs": "^2.2.4"
