@@ -1,106 +1,107 @@
 # Consumer Group and Offset Model
 
-## Three distinct offsets
+## There are three different things called "offset" and they're easy to confuse
 
-| Offset concept | What it is | Where it lives | Survives crash? |
-| --- | --- | --- | --- |
-| **Record offset** | Fixed position of a record in a partition. Assigned by the broker on write. Never changes. | Broker partition log | N/A — immutable |
-| **Consumer current position** | Where the consumer is reading right now. Advances as records are fetched. | Consumer process memory | No |
-| **Committed consumer-group offset** | Position stored on the broker for a named group. The resume point after restart. | Broker (`__consumer_offsets`) | Yes |
+Picture the partition log as a list of records, each numbered from zero:
 
 ```text
-Partition 0 of adsb.raw:
-  [0] {"entity_id": "test-aircraft-1", "timestamp_ms": ...}
-  [1] {"entity_id": "test-aircraft-2", "timestamp_ms": ...}
-  [2] ...
+adsb.raw — Partition 0:
+  [0]  {"checkpoint":5, "source":"manual-store-verification"}
+  [1]  {"checkpoint":5, "source":"manual-store-verification"}
+  [2]  ...
+  [3]  {"entity_id":"test-aircraft-1", "timestamp_ms":...}
 ```
 
+The number next to each record is its **record offset**. The broker assigns it when the record is written. It never changes. Even after a consumer reads a record, its offset stays the same and the record stays in the log. Consumption is not deletion.
+
+Now, when your consumer process is running, it keeps track of where it's currently reading — "I'm about to fetch offset 2." That's the **consumer's current position**, and it lives only in memory. Kill the process and it's gone.
+
+The third offset is the one that actually survives a restart: the **committed consumer-group offset**. This is what the broker stores on behalf of a named group in an internal topic called `__consumer_offsets`. It's the answer to "if this consumer restarts, where should it resume from?"
+
+These three are independent. The record offset is set by the broker when a record is written. The current position is set by the consumer as it fetches. The committed offset is set by the consumer when it explicitly (or automatically) tells the broker "I've processed up to here."
+
 ---
 
-## autoCommit
+## autoCommit: what it does and when it matters
 
-kafkajs default: `autoCommit: true`. After each `eachMessage` handler returns without throwing, kafkajs commits the offset on a background timer (default 5 s).
+kafkajs defaults to `autoCommit: true`. After your `eachMessage` handler returns without throwing, kafkajs queues an offset commit. It doesn't fire immediately — it runs on a background timer, every 5 seconds by default.
 
-If the process crashes after processing a record but before the timer fires, the offset is not committed. On restart the consumer re-reads from the last committed offset — the record is processed again.
+This gap is the source of at-least-once delivery. If your process crashes after the handler runs but before that 5-second timer fires, the offset was never committed. When the process restarts, the broker has no record of that commit, so it delivers the same record again.
+
+That's not a bug to fix — it's the guarantee Kafka gives you, and it's honest about it. The implication is that anything your handler does with that record (writing to TimescaleDB, updating Redis) needs to be safe to do twice with the same input.
 
 ---
 
-## fromBeginning
+## fromBeginning: only matters the first time
 
 ```typescript
 await consumer.subscribe({ topic: TOPIC, fromBeginning: true });
 ```
 
-On first run, the group has no committed offset. `fromBeginning: true` → start from offset 0. Without it, the consumer starts from the latest offset and misses records produced before it started.
+When a consumer group has never run before, there's no committed offset for it. `fromBeginning: true` tells kafkajs to start from the earliest available record in the partition. Without it, the consumer would start from the latest offset — meaning it would skip everything that was produced before it first connected.
 
-After the first commit, `fromBeginning` has no effect — the group resumes from its committed offset.
+Once the group has committed an offset at least once, `fromBeginning` is ignored. The group always resumes from its committed position.
 
----
-
-## Restart behavior
-
-Normal (offset committed before stop):
-
-```text
-consumer reads offset 0 → handler returns → autoCommit fires → CURRENT-OFFSET = 1
-consumer stops → restarts → resumes from offset 1 → offset 0 not re-delivered
-```
-
-Crash before commit:
-
-```text
-consumer reads offset 0 → handler returns → process crashes before autoCommit
-CURRENT-OFFSET still = 0 → consumer restarts → reads offset 0 again → re-delivered
-```
-
-Re-delivery is the at-least-once guarantee. All durable side effects must be idempotent.
+In the CP1 experiment this is why the consumer picked up the Phase 01 records at offsets 1 and 2 on first run — the `cp1-experiment` group had no committed offset yet, so it started from the beginning of whatever was left in the log.
 
 ---
 
-## Consumer group independence
+## What happens on restart
 
-Each consumer group maintains its own committed offset. One group consuming a record has no effect on any other group.
+Clean shutdown (offset was committed before the process stopped):
 
 ```text
-adsb.raw partition 0:
-  [0]  {"entity_id": "test-aircraft-1", ...}
-
-cp1-experiment:    CURRENT-OFFSET = 1  (consumed offset 0)
-cp1-second-group:  CURRENT-OFFSET = 0  (has not consumed anything)
+consumer reads offset 3
+handler returns
+autoCommit fires — CURRENT-OFFSET = 4
+process stops
+process restarts
+resumes from offset 4 — offset 3 not re-delivered
 ```
 
-Records are not deleted on consumption. Deletion occurs only when the retention window expires. Consumers are independent pointers into a retained log.
+Crash before commit (the dangerous case):
 
-This enables:
+```text
+consumer reads offset 3
+handler returns
+process crashes — autoCommit never fired
+CURRENT-OFFSET still = 3
+process restarts
+reads offset 3 again — re-delivered
+```
 
-| Property | Sentinel use |
-| --- | --- |
-| Fan-out | `position.normalized` consumed independently by Deviation Detector and Correlation Worker |
-| Replay | New consumer group starts from offset 0 and reprocesses topic history |
-| Isolated crash recovery | One group crashing does not affect others |
+The second scenario is not hypothetical — network kills, OOM events, and deploy restarts all produce it. This is why the position-consumer's TimescaleDB write uses `ON CONFLICT DO NOTHING` and the Redis write checks timestamps before overwriting.
 
 ---
 
-## `rpk` inspection commands
+## Consumer group independence: why this matters for Sentinel
+
+Each consumer group maintains its own committed offset, completely independently. One group reading a record has zero effect on any other group.
+
+This is why `position.normalized` can be consumed independently by the Deviation Detector and the Correlation Worker without either one affecting the other. They're separate groups, separate committed offsets, separate lag counters.
+
+It also means replay is free: create a new consumer group, start it from the beginning, and it reprocesses the entire topic without touching any other group's state. No coordination needed.
+
+You can see this yourself with `rpk`:
 
 ```bash
-# Partition state and HIGH-WATERMARK
-docker exec sentinel-redpanda rpk topic describe -p adsb.raw
+# See every consumer group and their lag
+docker exec sentinel-redpanda rpk group list
 
-# Committed offset for a consumer group
+# Inspect a specific group's committed position
 docker exec sentinel-redpanda rpk group describe cp1-experiment
 
-# Read a specific record by offset (no group involved)
-docker exec sentinel-redpanda rpk topic consume adsb.raw --offset 0 --num 1
+# Read a record by offset without involving any consumer group
+docker exec sentinel-redpanda rpk topic consume adsb.raw --offset 3 --num 1
 
-# Reset a group's committed offset to the beginning
+# Reset a group to the beginning (simulates a crash / force replay)
 docker exec sentinel-redpanda rpk group seek cp1-experiment --to start --topics adsb.raw
 ```
 
-`rpk group describe` columns:
+The columns in `rpk group describe` that matter:
 
-| Column | Meaning |
-| --- | --- |
-| `CURRENT-OFFSET` | Next offset the group will read from |
-| `LOG-END-OFFSET` | Next offset the broker will write to (HIGH-WATERMARK) |
-| `LAG` | `LOG-END-OFFSET` minus `CURRENT-OFFSET`; unconsumed records for this group |
+- `CURRENT-OFFSET` — the next offset the group will fetch from (not the last one it read)
+- `LOG-END-OFFSET` — the next offset the broker will write to (one past the last record)
+- `LAG` — how many records the group hasn't consumed yet (`LOG-END-OFFSET` minus `CURRENT-OFFSET`)
+
+LAG = 0 means the group is caught up. LAG > 0 means records are waiting.
