@@ -19,10 +19,10 @@ Filled in when all Phase 02 checkpoints are complete.
 
 ## 2. Services
 
-| Service | CP introduced | Status |
+| Service | Introduced in | Status |
 | --- | --- | --- |
-| ingestion-poller | CP1 | |
-| position-consumer | CP1 | |
+| ingestion-poller | Kafka experiment | |
+| position-consumer | Kafka experiment | |
 
 ---
 

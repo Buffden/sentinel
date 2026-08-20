@@ -49,7 +49,7 @@ services/
 const brokers = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
 ```
 
-Host-side Node processes use `localhost:9092` — the externally-advertised `PLAINTEXT` listener mapped by Docker Compose. Container-to-container communication uses `redpanda:29092` (`PLAINTEXT_INTERNAL`). No `.env` file for CP1.
+Host-side Node processes use `localhost:9092` — the externally-advertised `PLAINTEXT` listener mapped by Docker Compose. Container-to-container communication uses `redpanda:29092` (`PLAINTEXT_INTERNAL`). No `.env` file for this experiment.
 
 ---
 
