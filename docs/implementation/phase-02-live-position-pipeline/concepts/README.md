@@ -1,7 +1,7 @@
 # Phase 02 Concepts
 
-Concept notes and debrief records for Phase 02 checkpoints.
+Concept notes and debrief records for Phase 02 checkpoints, in the order you'd read them while working through the phase.
 
-| Folder | Scope |
+| Folder | What's inside |
 | --- | --- |
-| [kafka-experiment/](kafka-experiment/) | Node.js/TypeScript Kafka experiment: producer, consumer, offsets, group behavior |
+| [kafka-experiment/](kafka-experiment/) | Producer, consumer, offset model, group behavior — everything from CP1 |
