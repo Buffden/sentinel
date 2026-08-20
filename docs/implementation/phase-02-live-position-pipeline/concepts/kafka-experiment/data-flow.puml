@@ -37,12 +37,12 @@ package "Redpanda broker\nlocalhost:9092" as broker {
 }
 
 ' ── Consumer Group ──────────────────────────────────────────
-package "Consumer Group: cp1-experiment" as group {
+package "Consumer Group: kafka-experiment" as group {
   rectangle "position-consumer\n(Node.js process)\n\nkafka.consumer({ groupId })\nconsumer.subscribe()\nconsumer.run()" as consumer
 }
 
 ' ── Committed offset store ───────────────────────────────────
-rectangle "__consumer_offsets\n(Redpanda internal topic)\n\ncp1-experiment :: adsb.raw[0]\nCURRENT-OFFSET: 1" as offsets
+rectangle "__consumer_offsets\n(Redpanda internal topic)\n\nkafka-experiment :: adsb.raw[0]\nCURRENT-OFFSET: 1" as offsets
 
 ' ── Flow ────────────────────────────────────────────────────
 producer --> partition : produce\nkey=entity_id\nvalue=JSON

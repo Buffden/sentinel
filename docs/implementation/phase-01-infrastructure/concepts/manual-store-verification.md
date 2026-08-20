@@ -35,7 +35,7 @@ Listed all 8 canonical topics; inspected `adsb.raw` partition metadata; produced
 
 `EPOCH 3` is the current leadership epoch. It shows that the partition leadership metadata has advanced, commonly due to broker restarts/elections, but it should not be interpreted as exactly three leadership changes. Data survived because of the named Docker volume.
 
-Producing the CP5 record:
+Producing the manual verification record:
 
 ```text
 Produced to partition 0 at offset 1 with timestamp ...
@@ -47,7 +47,7 @@ Consuming at explicit offset 1:
 {"topic":"adsb.raw","value":"{\"checkpoint\":5,\"source\":\"manual-store-verification\"}","partition":0,"offset":1}
 ```
 
-Consumer group `cp5-manual-test` result after consuming from `--offset start` (read offset 0):
+Consumer group `manual-store-verification-test` result after consuming from `--offset start` (read offset 0):
 
 | Field | Value | Meaning |
 | --- | --- | --- |
@@ -70,7 +70,7 @@ rpk topic consume definitely-does-not-exist
 
 ### Cleanup
 
-Consumer group `cp5-manual-test` left in place (Redpanda does not support dropping groups cleanly via `rpk` in this version). It holds no application state. The disposable CP5 record at offset 1 of `adsb.raw` remains -- records are immutable; deletion is by retention policy, not explicit delete.
+Consumer group `manual-store-verification-test` left in place (Redpanda does not support dropping groups cleanly via `rpk` in this version). It holds no application state. The disposable manual verification record at offset 1 of `adsb.raw` remains -- records are immutable; deletion is by retention policy, not explicit delete.
 
 ---
 
@@ -195,7 +195,7 @@ ERR value is not a valid float
 
 ### What I did
 
-Verified CP4 constraints; created two Entity nodes with a KNOWN_ASSOCIATE relationship; created a PROXIMITY_EVENT relationship; attempted a duplicate PROXIMITY_EVENT via CREATE (rejected); demonstrated MERGE as the replay-safe alternative; cleaned up.
+Verified Neo4j uniqueness constraints; created two Entity nodes with a KNOWN_ASSOCIATE relationship; created a PROXIMITY_EVENT relationship; attempted a duplicate PROXIMITY_EVENT via CREATE (rejected); demonstrated MERGE as the replay-safe alternative; cleaned up.
 
 ### Commands
 

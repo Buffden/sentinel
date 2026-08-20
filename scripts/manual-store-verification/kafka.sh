@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CP-05 Kafka / Redpanda manual verification
+# Kafka / Redpanda manual store verification
 # Run from the project root after: make up && make topics
 
 set -euo pipefail
@@ -10,7 +10,7 @@ docker exec sentinel-redpanda rpk topic list
 # Inspect adsb.raw partition metadata
 docker exec sentinel-redpanda rpk topic describe adsb.raw
 
-# Produce the CP5 synthetic record
+# Produce the manual store verification synthetic record
 echo '{"checkpoint":5,"source":"manual-store-verification"}' | \
   docker exec -i sentinel-redpanda rpk topic produce adsb.raw
 

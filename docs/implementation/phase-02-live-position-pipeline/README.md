@@ -37,8 +37,8 @@ position.normalized
 
 | CP | Scope | Status |
 | --- | --- | --- |
-| CP1 | Node.js/TypeScript Kafka experiment: produce and consume one event; observe consumer group and offset behavior | In progress |
-| CP2 | OpenSky ingestion poller: real ADS-B telemetry → `adsb.raw` | Pending |
+| CP1 | Node.js/TypeScript Kafka experiment: produce and consume one event; observe consumer group and offset behavior | Done |
+| CP2 | OpenSky ingestion poller: real ADS-B telemetry → `adsb.raw` | In progress |
 | CP3 | Position Consumer normalization: raw event → canonical schema | Pending |
 | CP4 | Validation and DLQ routing for malformed records | Pending |
 | CP5 | TimescaleDB persistence with idempotency (`ON CONFLICT DO NOTHING`) | Pending |
