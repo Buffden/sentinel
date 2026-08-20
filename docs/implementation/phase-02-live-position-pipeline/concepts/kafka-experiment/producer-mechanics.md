@@ -8,7 +8,7 @@ First, `producer.connect()` opens a TCP connection and does a version handshake 
 
 Then `producer.send()` fires off a ProduceRequest. The broker receives it, appends the record to the partition log, assigns it an offset, and sends back a RecordMetadata response telling you exactly where the record landed. From your code's perspective it's one async call, but underneath there's a round trip happening.
 
-Finally `producer.disconnect()` closes the TCP session cleanly. In the CP1 experiment the producer does its job and exits — it's not a long-running process yet.
+Finally `producer.disconnect()` closes the TCP session cleanly. In the Kafka experiment the producer does its job and exits — it's not a long-running process yet.
 
 ---
 

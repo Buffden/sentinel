@@ -42,7 +42,7 @@ When a consumer group has never run before, there's no committed offset for it. 
 
 Once the group has committed an offset at least once, `fromBeginning` is ignored. The group always resumes from its committed position.
 
-In the CP1 experiment this is why the consumer picked up the Phase 01 records at offsets 1 and 2 on first run — the `cp1-experiment` group had no committed offset yet, so it started from the beginning of whatever was left in the log.
+In the Kafka experiment this is why the consumer picked up the Phase 01 records at offsets 1 and 2 on first run — the `kafka-experiment` group had no committed offset yet, so it started from the beginning of whatever was left in the log.
 
 ---
 
@@ -89,13 +89,13 @@ You can see this yourself with `rpk`:
 docker exec sentinel-redpanda rpk group list
 
 # Inspect a specific group's committed position
-docker exec sentinel-redpanda rpk group describe cp1-experiment
+docker exec sentinel-redpanda rpk group describe kafka-experiment
 
 # Read a record by offset without involving any consumer group
 docker exec sentinel-redpanda rpk topic consume adsb.raw --offset 3 --num 1
 
 # Reset a group to the beginning (simulates a crash / force replay)
-docker exec sentinel-redpanda rpk group seek cp1-experiment --to start --topics adsb.raw
+docker exec sentinel-redpanda rpk group seek kafka-experiment --to start --topics adsb.raw
 ```
 
 The columns in `rpk group describe` that matter:

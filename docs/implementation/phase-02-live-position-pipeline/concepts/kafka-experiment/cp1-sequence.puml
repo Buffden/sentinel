@@ -1,5 +1,5 @@
 @startuml cp1-sequence
-title CP1: Producer and Consumer — Observed Interaction
+title Kafka Experiment: Producer and Consumer — Observed Interaction
 
 skinparam defaultFontName Monospaced
 skinparam defaultFontSize 12
@@ -25,7 +25,7 @@ Consumer -> Broker : connect()\n+ version handshake
 Consumer -> Broker : subscribe(adsb.raw, fromBeginning: true)
 
 note right of Broker
-  No committed offset exists for cp1-experiment yet.
+  No committed offset exists for kafka-experiment yet.
   fromBeginning: true — start from LOG-START-OFFSET = 1.
   (Offset 0 was deleted by retention between sessions.)
 end note
@@ -66,8 +66,8 @@ Consumer -> Consumer : eachMessage handler
 
 == autoCommit (background timer, fires ~5s after handler returns) ==
 
-Consumer -> Broker : commit offset\ncp1-experiment :: adsb.raw[0] = 4
-Broker -> Offsets : persist\ncp1-experiment: CURRENT-OFFSET = 4
+Consumer -> Broker : commit offset\nkafka-experiment :: adsb.raw[0] = 4
+Broker -> Offsets : persist\nkafka-experiment: CURRENT-OFFSET = 4
 
 note over Consumer, Offsets
   CURRENT-OFFSET = 4 means "next fetch starts at offset 4".
@@ -78,9 +78,9 @@ end note
 
 == Crash recovery experiment (simulated with rpk group seek) ==
 
-dev -> Broker : rpk group seek cp1-experiment --to start
+dev -> Broker : rpk group seek kafka-experiment --to start
 
-Broker -> Offsets : reset cp1-experiment\nCURRENT-OFFSET: 4 → 1
+Broker -> Offsets : reset kafka-experiment\nCURRENT-OFFSET: 4 → 1
 
 note right of Offsets
   Simulates a crash before autoCommit fired.
@@ -97,7 +97,7 @@ Broker --> Consumer : re-deliver offset 3\n{entity_id: "test-aircraft-1"} — sa
 
 note right of Consumer
   At-least-once delivery.
-  The CP1 event was processed twice with identical payload.
+  The same event was processed twice with identical payload.
   This is why TimescaleDB uses ON CONFLICT DO NOTHING
   and Redis checks timestamps before overwriting.
 end note

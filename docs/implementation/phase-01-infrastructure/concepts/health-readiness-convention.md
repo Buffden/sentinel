@@ -11,7 +11,7 @@ This document defines what "live" and "ready" mean, which dependency states affe
 - Make process health observable without a service mesh or external monitoring agent.
 - Prevent unnecessary process restarts when a downstream service is temporarily unavailable.
 - Allow orchestrators and load balancers to stop routing work to a service that is starting up, shutting down, or unable to process.
-- Align with the CP6 logging convention so health transitions emit structured log events.
+- Align with the structured logging convention so health transitions emit structured log events.
 
 ---
 
@@ -191,7 +191,7 @@ The Correlation Worker must fail-closed on KNOWN_ASSOCIATE read errors: do not p
 
 ## 8. Health log events
 
-Health transitions must emit structured log events following the CP6 convention.
+Health transitions must emit structured log events following the structured logging convention.
 
 **Service ready:**
 

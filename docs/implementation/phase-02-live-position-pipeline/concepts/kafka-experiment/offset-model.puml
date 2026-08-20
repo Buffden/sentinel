@@ -28,12 +28,12 @@ package "adsb.raw — Partition 0\n(Broker log — immutable)" as log {
 }
 
 ' ── Consumer group A ────────────────────────────────────────
-package "Consumer Group: cp1-experiment" as groupA {
+package "Consumer Group: kafka-experiment" as groupA {
   rectangle "CURRENT-OFFSET = 2\n\nHas committed through offset 1.\nWill next fetch from offset 2.\nLAG = 1 (offset 2 not yet consumed)" as cA
 }
 
 ' ── Consumer group B ────────────────────────────────────────
-package "Consumer Group: cp1-second-group" as groupB {
+package "Consumer Group: kafka-second-group" as groupB {
   rectangle "CURRENT-OFFSET = 1\n\nHas committed through offset 0.\nWill next fetch from offset 1.\nLAG = 2 (offsets 1,2 not yet consumed)" as cB
 }
 
