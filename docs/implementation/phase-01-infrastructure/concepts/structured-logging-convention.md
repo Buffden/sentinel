@@ -1,6 +1,6 @@
 # Structured Logging Convention
 
-Established in Phase 01 Checkpoint 6. Every Sentinel service must follow this contract from its first commit.
+Established in Phase 01. Every Sentinel service must follow this contract from its first commit.
 
 This document defines the log event shape, level semantics, contextual fields, error format, and safety rules. It does not prescribe a logging library or a central log backend.
 

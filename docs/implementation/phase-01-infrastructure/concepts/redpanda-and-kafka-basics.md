@@ -59,6 +59,6 @@ The practical differences for local development:
 
 In production Sentinel targets **Amazon MSK**, which is managed Kafka on AWS. The application code does not change between environments:it uses the Kafka protocol in both cases. Redpanda is the local stand-in.
 
-## What runs in Checkpoint 1
+## What runs at infrastructure startup
 
-At this point, Redpanda is running and healthy but has no topics and no producers or consumers connected to it. The cluster is empty. Checkpoint 3 will create the canonical topics and exercise the producer/consumer cycle manually.
+At this point, Redpanda is running and healthy but has no topics and no producers or consumers connected to it. The cluster is empty. The Kafka topic provisioning step will create the canonical topics and exercise the producer/consumer cycle manually.

@@ -1,5 +1,5 @@
 @startuml cp-02-migration-flow
-title Checkpoint 2: TimescaleDB Migration Flow
+title TimescaleDB Migration Flow
 
 skinparam linetype ortho
 skinparam defaultFontName Monospaced
@@ -49,7 +49,7 @@ partition "verify inside psql" {
 }
 
 if (schema matches expected?) then (yes)
-  :Checkpoint 2 complete;
+  :migrations complete;
   stop
 else (no)
   :make reset;

@@ -47,7 +47,7 @@ Consumer groups:
 
 | Broker | Group | Members |
 | --- | --- | --- |
-| 0 | cp5-manual-test | 0 (no active members) |
+| 0 | manual-store-verification-test | 0 (no active members) |
 
 No application consumer groups exist yet. `__consumer_offsets` (3 partitions) is the internal Redpanda topic for persisting committed offsets; it is created automatically and is not in the provisioned list.
 
