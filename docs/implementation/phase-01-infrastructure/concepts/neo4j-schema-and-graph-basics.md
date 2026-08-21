@@ -1,6 +1,6 @@
 # Neo4j Schema and Graph Basics
 
-Concepts exercised in Checkpoint 4. This is not a full Neo4j or Cypher reference.
+Concepts exercised in the Neo4j schema setup. This is not a full Neo4j or Cypher reference.
 
 ---
 
@@ -39,7 +39,7 @@ Without the uniqueness constraint, concurrent workers could create duplicate nod
 
 ---
 
-## Checkpoint 4 schema
+## Neo4j schema
 
 See [`infra/neo4j/schema.cypher`](../../../../infra/neo4j/schema.cypher). Applied by `make neo4j-schema`.
 

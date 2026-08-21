@@ -1,6 +1,6 @@
 # Kafka Topics, Partitions, and Offsets
 
-Concepts exercised in Checkpoint 3. This is not a full Kafka reference.
+Concepts exercised in the Kafka topic provisioning. This is not a full Kafka reference.
 
 ---
 
@@ -27,7 +27,7 @@ Sentinel's 8 canonical topics map directly to data-flow boundaries:
 
 A topic is split into one or more partitions. Each partition is an independent ordered log.
 
-In Checkpoint 3, every Sentinel topic has 1 partition. This is a local implementation choice:
+Every Sentinel topic has 1 partition in this local setup. This is a local implementation choice:
 - single Redpanda broker in dev-container mode
 - no application consumers yet, so parallelism requirements are unknown
 - 1 partition gives total ordering within each topic, simplest mental model
@@ -59,7 +59,7 @@ What an offset is NOT:
 - not a database row ID
 - not globally ordered across all partitions or all topics
 
-Because Checkpoint 3 uses 1 partition per topic, all records within a topic are globally ordered by offset. In multi-partition topics, offsets are per-partition only.
+Because this local setup uses 1 partition per topic, all records within a topic are globally ordered by offset. In multi-partition topics, offsets are per-partition only.
 
 ---
 
@@ -79,7 +79,7 @@ This is what `rpk topic describe -p` shows as the log end:
 
 A process that writes records to a topic. No consumer needs to exist.
 
-Manual produce in Checkpoint 3:
+Manual produce:
 ```bash
 echo '{"checkpoint":3}' | docker exec -i sentinel-redpanda rpk topic produce adsb.raw
 # Produced to partition 0 at offset 0 with timestamp ...
@@ -113,7 +113,7 @@ In Sentinel, the canonical application groups are (defined in docs/ARCHITECTURE.
 - `alert-evaluator`
 - `api`
 
-The Checkpoint 3 disposable group `cp3-manual-test` was created only for this exercise.
+The disposable group `manual-store-verification-test` was created only for this exercise.
 
 ---
 
@@ -127,7 +127,7 @@ These are distinct and should not be conflated:
 
 **Committed consumer-group offset** -- the position stored on the broker for a named group. The broker records this so the group can resume from the right place after a restart. What `rpk group describe` shows as `CURRENT-OFFSET`.
 
-After consuming offset 0 with group `cp3-manual-test`:
+After consuming offset 0 with group `manual-store-verification-test`:
 | TOPIC | PARTITION | CURRENT-OFFSET | LOG-END-OFFSET | LAG |
 |---|---|---|---|---|
 | `adsb.raw` | 0 | 1 | 1 | 0 |
@@ -142,7 +142,7 @@ This is the foundation of at-least-once processing: if a consumer crashes after 
 
 Replication factor 1 means only one broker holds the partition. In a multi-broker production cluster (MSK), replication factor > 1 means the partition has copies on multiple brokers. If the leader fails, a follower is elected.
 
-`EPOCH` in `rpk topic describe -p` is the leadership epoch -- it increments each time a new leader is elected. After a broker restart in Checkpoint 3, EPOCH incremented from 1 to 2. Topics and data survived because of the named Docker volume.
+`EPOCH` in `rpk topic describe -p` is the leadership epoch -- it increments each time a new leader is elected. After a broker restart during local setup, EPOCH incremented from 1 to 2. Topics and data survived because of the named Docker volume.
 
 ---
 

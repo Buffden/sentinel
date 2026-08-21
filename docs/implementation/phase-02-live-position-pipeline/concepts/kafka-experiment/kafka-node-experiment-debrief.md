@@ -1,4 +1,4 @@
-# CP1 Debrief: Node.js/TypeScript Kafka Experiment
+# Node.js/TypeScript Kafka Experiment Debrief
 
 ---
 
@@ -21,7 +21,7 @@ node_modules/.bin/tsx src/consume.ts
 ```
 
 ```json
-{"timestamp":"2026-08-19T21:03:14.901Z","level":"info","service":"position-consumer","message":"consumer connecting","brokers":["localhost:9092"],"group":"cp1-experiment"}
+{"timestamp":"2026-08-19T21:03:14.901Z","level":"info","service":"position-consumer","message":"consumer connecting","brokers":["localhost:9092"],"group":"kafka-experiment"}
 {"timestamp":"2026-08-19T21:03:14.918Z","level":"info","service":"position-consumer","message":"consumer connected"}
 {"timestamp":"2026-08-19T21:03:14.923Z","level":"info","service":"position-consumer","message":"consumer subscribed","topic":"adsb.raw","fromBeginning":true}
 {"timestamp":"2026-08-19T21:03:14.967Z","level":"info","service":"position-consumer","message":"kafka message received","topic":"adsb.raw","partition":0,"offset":"1","key":null,"payload":{"checkpoint":5,"source":"manual-store-verification"}}
@@ -52,7 +52,7 @@ Event landed at partition 0, offset 3. Producer disconnected and exited.
 
 ---
 
-## 3. Consumer receives CP1 event
+## 3. Consumer receives the experiment event
 
 Immediately after the producer ran, the consumer logged:
 
@@ -102,7 +102,7 @@ Record exists in the broker's log independently of any consumer group. The consu
 ## 6. Consumer group state after consumption
 
 ```bash
-docker exec sentinel-redpanda rpk group describe cp1-experiment
+docker exec sentinel-redpanda rpk group describe kafka-experiment
 ```
 
 | Field | Value |
@@ -143,7 +143,7 @@ Group state while stopped:
 Reset the group's committed offset to simulate a crash before commit:
 
 ```bash
-docker exec sentinel-redpanda rpk group seek cp1-experiment --to start --topics adsb.raw
+docker exec sentinel-redpanda rpk group seek kafka-experiment --to start --topics adsb.raw
 ```
 
 ```text
@@ -165,7 +165,7 @@ Restarted the consumer. All three records re-delivered:
 {"message":"kafka message received","partition":0,"offset":"3","key":"test-aircraft-1","payload":{"entity_id":"test-aircraft-1","timestamp_ms":1787173715941}}
 ```
 
-Our CP1 event was processed a second time with identical payload. This is at-least-once delivery. Durable side effects must be idempotent.
+The experiment event was processed a second time with identical payload. This is at-least-once delivery. Durable side effects must be idempotent.
 
 ---
 
@@ -173,15 +173,15 @@ Our CP1 event was processed a second time with identical payload. This is at-lea
 
 ```bash
 docker exec sentinel-redpanda rpk topic consume adsb.raw \
-  --group cp1-second-group --offset start --num 3
+  --group kafka-second-group --offset start --num 3
 ```
 
-`cp1-second-group` read all three records from offset 1 independently. Final group state:
+`kafka-second-group` read all three records from offset 1 independently. Final group state:
 
 | Group | CURRENT-OFFSET | LOG-END-OFFSET | LAG |
 | --- | --- | --- | --- |
-| cp1-experiment | 4 | 4 | 0 |
-| cp1-second-group | 4 | 4 | 0 |
+| kafka-experiment | 4 | 4 | 0 |
+| kafka-second-group | 4 | 4 | 0 |
 
 Both groups committed through offset 3. Neither affected the other. Records at offsets 1, 2, 3 remain in the partition log — not deleted by consumption from either group.
 
@@ -197,13 +197,13 @@ docker exec sentinel-redpanda rpk topic describe -p adsb.raw
 docker exec sentinel-redpanda rpk topic consume adsb.raw --offset 3 --num 1
 
 # Consumer group committed position
-docker exec sentinel-redpanda rpk group describe cp1-experiment
+docker exec sentinel-redpanda rpk group describe kafka-experiment
 
 # List all consumer groups
 docker exec sentinel-redpanda rpk group list
 
 # Reset a group to the beginning
-docker exec sentinel-redpanda rpk group seek cp1-experiment --to start --topics adsb.raw
+docker exec sentinel-redpanda rpk group seek kafka-experiment --to start --topics adsb.raw
 ```
 
 ---
@@ -229,4 +229,4 @@ Both producer and consumer logged:
 TimeoutNegativeWarning: -1787173394918 is a negative number. Timeout duration was set to 1.
 ```
 
-kafkajs computes an internal session timeout relative to broker metadata timestamps. The Phase 01 records have timestamps in the far future relative to the configured timeout, producing a negative `setTimeout` value. Node.js clamps it to 1ms. Harmless for CP1; no records were lost or delayed. This warning will disappear once all records in the topic are from the current session.
+kafkajs computes an internal session timeout relative to broker metadata timestamps. The Phase 01 records have timestamps in the far future relative to the configured timeout, producing a negative `setTimeout` value. Node.js clamps it to 1ms. Harmless for this experiment; no records were lost or delayed. This warning will disappear once all records in the topic are from the current session.

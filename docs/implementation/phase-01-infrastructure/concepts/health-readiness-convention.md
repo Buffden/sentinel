@@ -1,6 +1,6 @@
 # Health and Readiness Convention
 
-Established in Phase 01 Checkpoint 7. Every Sentinel service must follow this contract from its first implementation.
+Established in Phase 01. Every Sentinel service must follow this contract from its first implementation.
 
 This document defines what "live" and "ready" mean, which dependency states affect each, how health is exposed over HTTP, how graceful shutdown interacts with health, and what is deferred to later phases.
 

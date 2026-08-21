@@ -1,0 +1,116 @@
+@startuml polling-sequence
+title OpenSky Ingestion Poller — Observed Interaction
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+actor Developer as dev
+
+participant "ingestion-poller\n(poller.ts)" as Poller #DBEAFE
+participant "OpenSky Network\nREST API" as OpenSky #D1FAE5
+participant "Redpanda\nadsb.raw — Partition 0" as Broker #FEF9C3
+
+== Startup ==
+
+dev -> Poller : tsx src/poller.ts
+Poller -> Broker : connect()\n+ version handshake
+Broker --> Poller : connected
+
+note right of Poller
+  producer connected
+  poller starting
+  url: .../states/all?lamin=49&lomin=-8&lamax=61&lomax=10
+  poll_interval_ms: 10000
+end note
+
+== Cycle 1 — fires immediately on startup ==
+
+Poller -> OpenSky : GET /api/states/all?lamin=49&lomin=-8&lamax=61&lomax=10\nAbortSignal.timeout(8_000)
+OpenSky --> Poller : 200 OK\n{"time": 1787261900, "states": [[...], ...]}
+
+note right of Poller
+  449 state vectors received.
+  Each array entry mapped to a named AdsbRawEvent.
+  fetched_at_ms = Date.now() appended to every record.
+end note
+
+Poller -> Broker : ProduceRequest (449 messages)\nkey: icao24, value: AdsbRawEvent JSON
+Broker -> Broker : append to partition log\noffsets 0–448\nHIGH-WATERMARK: 0 → 449
+Broker --> Poller : RecordMetadata\n(partition=0, first_offset="0")
+
+note right of Poller
+  poll cycle complete
+  state_vectors: 449, topic: adsb.raw, first_offset: "0"
+end note
+
+Poller -> Poller : scheduleNextPoll()\nsetTimeout(10_000)
+
+== Wait — 10 s interval + ~1 s fetch/publish latency ==
+
+... ~11 s elapsed ...
+
+== Cycle 2 ==
+
+Poller -> OpenSky : GET /api/states/all (same bounding box)
+OpenSky --> Poller : 200 OK\n{"time": 1787261910, "states": [[...], ...]}
+
+note right of Poller
+  449 state vectors received.
+  Aircraft 471efa (WMT581): lon advanced +0.0186°, lat -0.0025°.
+  time_position advanced from 1787261405 to 1787261410 (+5 s).
+  Real movement — not a cached snapshot.
+end note
+
+Poller -> Broker : ProduceRequest (449 messages)\nkey: icao24, value: AdsbRawEvent JSON
+Broker -> Broker : append to partition log\noffsets 449–897\nHIGH-WATERMARK: 449 → 898
+Broker --> Poller : RecordMetadata\n(partition=0, first_offset="449")
+
+note right of Poller
+  poll cycle complete
+  state_vectors: 449, topic: adsb.raw, first_offset: "449"
+end note
+
+Poller -> Poller : scheduleNextPoll()\nsetTimeout(10_000)
+
+... ~11 s elapsed ...
+
+== Cycle 3 ==
+
+Poller -> OpenSky : GET /api/states/all (same bounding box)
+OpenSky --> Poller : 200 OK\n449 → 446 aircraft (3 left the bounding box)
+
+Poller -> Broker : ProduceRequest (446 messages)
+Broker -> Broker : append to partition log\noffsets 898–1343\nHIGH-WATERMARK: 898 → 1344
+Broker --> Poller : RecordMetadata\n(partition=0, first_offset="898")
+
+Poller -> Poller : scheduleNextPoll()
+
+== Graceful shutdown (SIGTERM received between cycles) ==
+
+dev -> Poller : SIGTERM
+Poller -> Poller : stopping = true\nclearTimeout(pollTimeout)
+
+note right of Poller
+  shutdown initiated, signal: SIGTERM
+  In-flight setTimeout cancelled.
+  No new poll cycle will be scheduled.
+end note
+
+Poller -> Broker : disconnect()
+Broker --> Poller : disconnected
+
+note right of Poller
+  producer disconnected
+  Process exits cleanly.
+  HIGH-WATERMARK remains at 1344.
+  LOG-START-OFFSET remains at 0 — all records available.
+end note
+
+@enduml

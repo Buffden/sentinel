@@ -1,4 +1,4 @@
-# Checkpoint 5 Debrief -- Manual Store Verification
+# Manual Store Verification Debrief
 
 All four infrastructure stores verified by direct CLI interaction before any application code is written.
 
@@ -96,7 +96,7 @@ Hypertable metadata before insert:
 
 `time_interval` comes from `timescaledb_information.dimensions`; the `hypertables` view does not expose it directly.
 
-After inserting `cp5-test-entity` at `timestamp_ms = 1700000000000`:
+After inserting `test-entity` at `timestamp_ms = 1700000000000`:
 
 | num_chunks | chunk_name | range_start | range_end |
 | --- | --- | --- | --- |
@@ -110,7 +110,7 @@ Idempotency test:
 | Second insert | INSERT 0 0 | silently discarded by ON CONFLICT DO NOTHING |
 | Row count | 1 | no duplicate |
 
-After `DELETE FROM position_history WHERE entity_id = 'cp5-test-entity'`: `num_chunks` remains 1 -- chunk persists after row deletion.
+After `DELETE FROM position_history WHERE entity_id = 'test-entity'`: `num_chunks` remains 1 -- chunk persists after row deletion.
 
 ### Concept demonstrated
 
@@ -143,7 +143,7 @@ Created a canonical-shape `entity:live:*` hash; inspected TTL behavior; created 
 
 ### What I observed
 
-Hash contents after `HSET entity:live:cp5-test-entity ...`:
+Hash contents after `HSET entity:live:test-entity ...`:
 
 | Field | Value |
 | --- | --- |
@@ -157,9 +157,9 @@ TTL behavior:
 
 | Command | Result | Meaning |
 | --- | --- | --- |
-| TTL entity:live:cp5-test-entity | -1 | key exists, no expiry set |
+| TTL entity:live:test-entity | -1 | key exists, no expiry set |
 | PEXPIRE ... 30000 | 1 | TTL set to 30 000ms |
-| PTTL entity:live:cp5-test-entity | ~29941 | milliseconds remaining |
+| PTTL entity:live:test-entity | ~29941 | milliseconds remaining |
 
 `-1` means the key exists but has no expiry set. `-2` would mean the key does not exist.
 
@@ -167,8 +167,8 @@ Sorted set freshness query -- members with scores above 1700000003000:
 
 | Member | Score | Result |
 | --- | --- | --- |
-| cp5-test-entity-b | 1700000005000 | included: fresh |
-| cp5-test-entity-a | 1700000000000 | excluded: stale |
+| test-entity-b | 1700000005000 | included: fresh |
+| test-entity-a | 1700000000000 | excluded: stale |
 
 ### Concept demonstrated
 
@@ -179,7 +179,7 @@ Redis hashes store all live entity state in one key, making a single `HGETALL` o
 ### Failure observed
 
 ```text
-ZADD geo-cell:cp5-test-cell not-a-number cp5-test-entity-c
+ZADD geo-cell:test-cell not-a-number test-entity-c
 ERR value is not a valid float
 ```
 
@@ -187,7 +187,7 @@ ERR value is not a valid float
 
 ### Cleanup
 
-`DEL entity:live:cp5-test-entity geo-cell:cp5-test-cell` -- both keys gone (the hash had already expired from the 30s TTL before DEL ran). `EXISTS` returned 0 for both.
+`DEL entity:live:test-entity geo-cell:test-cell` -- both keys gone (the hash had already expired from the 30s TTL before DEL ran). `EXISTS` returned 0 for both.
 
 ---
 
@@ -214,18 +214,18 @@ KNOWN_ASSOCIATE query result:
 
 | entity_a | entity_b | rel_type | established_at |
 | --- | --- | --- | --- |
-| cp5-aircraft | cp5-vessel | same-fleet | 1700000000000 |
+| test-aircraft | test-vessel | same-fleet | 1700000000000 |
 
 PROXIMITY_EVENT query result:
 
 | entity_a | entity_b | key | start_ms | min_dist_m | lat | lon |
 | --- | --- | --- | --- | --- | --- | --- |
-| cp5-aircraft | cp5-vessel | cp5-test-pair:1234567890 | 1234567890 | 85.5 | 51.5074 | -0.1278 |
+| test-aircraft | test-vessel | test-pair:1234567890 | 1234567890 | 85.5 | 51.5074 | -0.1278 |
 
 Duplicate CREATE attempt:
 
 ```text
-Relationship(N) already exists with type `PROXIMITY_EVENT` and property `idempotency_key` = 'cp5-test-pair:1234567890'
+Relationship(N) already exists with type `PROXIMITY_EVENT` and property `idempotency_key` = 'test-pair:1234567890'
 exit code: 1
 ```
 
@@ -252,7 +252,7 @@ MATCH (n:Entity) WHERE n.nonexistent_function() RETURN n
 
 ### Cleanup
 
-`MATCH (n:Entity) WHERE n.id STARTS WITH 'cp5-' DETACH DELETE n` -- removed both nodes and both relationships (KNOWN_ASSOCIATE + PROXIMITY_EVENT). Zero cp5- entities remain.
+`MATCH (n:Entity) WHERE n.id STARTS WITH 'test-' DETACH DELETE n` -- removed both nodes and both relationships (KNOWN_ASSOCIATE + PROXIMITY_EVENT). Zero test- entities remain.
 
 ---
 

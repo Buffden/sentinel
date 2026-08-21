@@ -1,10 +1,10 @@
-# Phase 01 — Checkpoint 2 Prerequisite Notes
+# TimescaleDB Migrations: Prerequisite Notes
 
-Checkpoint 2 applies Sentinel's canonical PostgreSQL/TimescaleDB schema through explicit SQL migrations.
+This covers applying Sentinel's canonical PostgreSQL/TimescaleDB schema through explicit SQL migrations.
 
 ---
 
-## 1. What Checkpoint 2 Does
+## 1. What the Migrations Do
 
 ```text
 TimescaleDB running
@@ -46,7 +46,7 @@ A versioned SQL file applied in numeric order:
 003_users.sql
 ```
 
-Checkpoint 2 uses plain SQL files without a migration framework. Without a history table there is no record of which versions were applied — `make reset` is the recovery path if something goes wrong.
+The migrations use plain SQL files without a migration framework. Without a history table there is no record of which versions were applied — `make reset` is the recovery path if something goes wrong.
 
 ---
 
@@ -54,7 +54,7 @@ Checkpoint 2 uses plain SQL files without a migration framework. Without a histo
 
 **Idempotency**: re-running a statement does not corrupt the result — achieved with `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `if_not_exists => TRUE` on TimescaleDB functions.
 
-**Migration tracking**: a ledger recording which versions have been applied. Checkpoint 2 has idempotency but not tracking. Do not confuse the two.
+**Migration tracking**: a ledger recording which versions have been applied. These migrations have idempotency but not tracking. Do not confuse the two.
 
 ---
 
@@ -103,7 +103,7 @@ Both are set in the migration and should be verified after apply.
 
 `alerts.superseded_by` references `alerts.alert_id` on the same table. A composite alert supersedes individual alerts in one transaction. Inserting the composite first and then updating the individual alerts means a standard FK works without deferral, as long as the transaction follows that order.
 
-Checkpoint 2 only needs to create the constraint. The transaction ordering is a Phase 06 concern.
+This migration only needs to create the constraint. The transaction ordering is a Phase 06 concern.
 
 ---
 
@@ -134,7 +134,7 @@ Migrations run via `make migrate`, not automatically on `docker compose up`. Kee
 make reset → make up → make migrate
 ```
 
-If this always produces an identical schema, Checkpoint 2 is complete.
+If this always produces an identical schema, the migrations are complete.
 
 ---
 
@@ -159,7 +159,7 @@ Run [`scripts/timescaledb-schema/failure-experiment.sql`](../../../../scripts/ti
 
 ## 16. Concepts Deferred
 
-Do not study these for Checkpoint 2:
+Do not study these during migrations:
 
 - Kafka: partitions, offsets, consumer groups, delivery semantics
 - Redis: all data structures and patterns
