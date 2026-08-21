@@ -20,10 +20,10 @@ docker exec sentinel-redpanda rpk topic consume adsb.raw \
 
 # Consume with named group from the start
 docker exec sentinel-redpanda rpk topic consume adsb.raw \
-  --group cp5-manual-test --offset start --num 1
+  --group manual-store-verification-test --offset start --num 1
 
 # Inspect group committed offset and lag
-docker exec sentinel-redpanda rpk group describe cp5-manual-test
+docker exec sentinel-redpanda rpk group describe manual-store-verification-test
 
 # Verify downstream topics have no records yet
 docker exec sentinel-redpanda rpk topic describe position.normalized

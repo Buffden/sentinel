@@ -1,4 +1,4 @@
--- CP-05 TimescaleDB manual verification
+-- TimescaleDB manual store verification
 -- Run: docker exec -it sentinel-timescaledb psql -U sentinel -d sentinel
 -- Then paste or \i this file.
 
@@ -22,7 +22,7 @@ WHERE proc_name = 'policy_retention';
 INSERT INTO position_history
   (entity_id, entity_type, observed_at, timestamp_ms, geo_cell, lat, lon, source)
 VALUES (
-  'cp5-test-entity',
+  'test-entity',
   'aircraft',
   to_timestamp(1700000000000 / 1000.0),
   1700000000000,
@@ -41,7 +41,7 @@ WHERE hypertable_name = 'position_history';
 INSERT INTO position_history
   (entity_id, entity_type, observed_at, timestamp_ms, geo_cell, lat, lon, source)
 VALUES (
-  'cp5-test-entity',
+  'test-entity',
   'aircraft',
   to_timestamp(1700000000000 / 1000.0),
   1700000000000,
@@ -53,10 +53,10 @@ VALUES (
 ON CONFLICT (entity_id, observed_at) DO NOTHING;
 
 -- Verify exactly one row
-SELECT COUNT(*) FROM position_history WHERE entity_id = 'cp5-test-entity';
+SELECT COUNT(*) FROM position_history WHERE entity_id = 'test-entity';
 
 -- Cleanup: delete the row
-DELETE FROM position_history WHERE entity_id = 'cp5-test-entity';
+DELETE FROM position_history WHERE entity_id = 'test-entity';
 
 -- Verify chunk persists after row deletion
 SELECT chunk_name FROM timescaledb_information.chunks
