@@ -33,18 +33,18 @@ position.normalized
 
 ---
 
-## Checkpoint status
+## Workstream progress
 
-| CP | Scope | Status |
+| Workstream | Scope | Status |
 | --- | --- | --- |
-| CP1 | Node.js/TypeScript Kafka experiment: produce and consume one event; observe consumer group and offset behavior | Done |
-| CP2 | OpenSky ingestion poller: real ADS-B telemetry → `adsb.raw` | In progress |
-| CP3 | Position Consumer normalization: raw event → canonical schema | Pending |
-| CP4 | Validation and DLQ routing for malformed records | Pending |
-| CP5 | TimescaleDB persistence with idempotency (`ON CONFLICT DO NOTHING`) | Pending |
-| CP6 | Redis live state with stale-event protection (monotonic timestamp guard) | Pending |
-| CP7 | H3 geo-cell computation and Redis live spatial index membership | Pending |
-| CP8 | `position.normalized` publication; replay and failure lab | Pending |
+| Kafka experiment | Node.js/TypeScript: produce and consume one event; observe consumer group and offset behavior | Done |
+| OpenSky ingestion poller | Real ADS-B telemetry → `adsb.raw` | In progress |
+| Position Consumer normalization | Raw event → canonical schema | Pending |
+| Validation and DLQ routing | Malformed records → `adsb.dlq` with rejection reason | Pending |
+| TimescaleDB persistence | Idempotent position history writes (`ON CONFLICT DO NOTHING`) | Pending |
+| Redis live state | Monotonic timestamp guard; stale-event protection | Pending |
+| H3 geo-cell indexing | Geo-cell computation and Redis live spatial index membership | Pending |
+| Pipeline completion | `position.normalized` publication; replay and failure lab | Pending |
 
 ---
 
@@ -70,7 +70,7 @@ make up          # start all four containers; wait for healthy
 make topics      # provision 8 canonical Kafka topics (idempotent)
 ```
 
-CP1 experiment:
+Kafka experiment:
 
 ```bash
 # Terminal A — start consumer first

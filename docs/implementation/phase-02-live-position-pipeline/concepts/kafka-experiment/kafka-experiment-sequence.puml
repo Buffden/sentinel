@@ -1,4 +1,4 @@
-@startuml cp1-sequence
+@startuml kafka-experiment-sequence
 title Kafka Experiment: Producer and Consumer — Observed Interaction
 
 skinparam defaultFontName Monospaced

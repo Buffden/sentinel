@@ -1,4 +1,4 @@
-# Checkpoint 2 Debrief -- TimescaleDB Schema and Migrations
+# TimescaleDB Schema and Migrations Debrief
 
 ## Schema created
 
@@ -66,7 +66,7 @@ This is the at-least-once Kafka guarantee made safe: the Position Consumer can r
 
 ## Deferred
 
-- Kafka topic creation (Checkpoint 3)
+- Kafka topic creation
 - Redis key-space design
 - Neo4j constraints (`MERGE` idempotency)
 - Application code -- nothing written yet
@@ -82,7 +82,7 @@ One existing constraint confirmed: Neo4j Community Edition does not support uniq
 
 ## Knowledge check
 
-Before moving to Checkpoint 3, you should be able to answer these without looking:
+Before moving to Kafka topic provisioning, you should be able to answer these without looking:
 
 1. Why must the unique index on `position_history` include `observed_at`?
 2. What does `ON_ERROR_STOP=1` change about psql's default behavior?

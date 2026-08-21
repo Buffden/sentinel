@@ -15,7 +15,7 @@ TOPICS=(
     "ais.dlq"
 )
 
-# Local Checkpoint 3 settings -- implementation choices, not production MSK sizing
+# Local dev settings -- implementation choices, not production MSK sizing
 # Partitions: 1 per topic; single broker, no application consumers yet, ordering simple
 # Replication: 1; forced by single-broker dev setup -- not a production decision
 PARTITIONS=1
