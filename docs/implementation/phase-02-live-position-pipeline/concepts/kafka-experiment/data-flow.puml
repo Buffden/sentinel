@@ -3,7 +3,7 @@ title Node.js Producer → adsb.raw → Node.js Consumer Group
 
 skinparam linetype ortho
 skinparam defaultFontName Monospaced
-skinparam defaultFontSize 14
+skinparam defaultFontSize 13
 skinparam ArrowColor #555555
 skinparam componentStyle rectangle
 
