@@ -16,7 +16,7 @@ Do not change without an ADR.
 | Live state / leases / pub-sub | Redis |
 | Backend runtime | Node.js / TypeScript |
 | API | Express + WebSocket |
-| Dashboard | Angular + Leaflet |
+| Dashboard | Next.js (CSR) + Blueprint.js + react-leaflet |
 | Auth | Google OAuth 2.0 + application JWT |
 | Deployment | Docker Compose → AWS |
 

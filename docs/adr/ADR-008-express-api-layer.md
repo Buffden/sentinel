@@ -7,7 +7,7 @@
 
 ## Context
 
-The platform needs an API layer that serves the Angular dashboard over REST and WebSocket. Requirements:
+The platform needs an API layer that serves the Next.js dashboard over REST and WebSocket. Requirements:
 
 - REST endpoints for querying position history, entity state, alerts, and investigation timelines
 - WebSocket server for pushing live position updates and alert events to the dashboard, filtered by each operator's saved scope
