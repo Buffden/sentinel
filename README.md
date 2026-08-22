@@ -1,6 +1,6 @@
 # Sentinel
 
-A real-time geospatial entity-tracking and rule-based anomaly-correlation platform. Sentinel ingests ADS-B/AIS positional telemetry, maintains current and historical entity state, detects rule-based anomalies, correlates weak signals, and surfaces operator-visible alerts on an Angular + Leaflet dashboard.
+A real-time geospatial entity-tracking and rule-based anomaly-correlation platform. Sentinel ingests ADS-B/AIS positional telemetry, maintains current and historical entity state, detects rule-based anomalies, correlates weak signals, and surfaces operator-visible alerts on a Next.js + Blueprint.js dashboard.
 
 Sentinel is a portfolio/learning project designed to demonstrate distributed-systems reasoning: streaming ingestion, replay/idempotency, polyglot persistence, leader election, geospatial indexing, stateful correlation, and observable failure behavior.
 
@@ -23,7 +23,7 @@ Sentinel is a portfolio/learning project designed to demonstrate distributed-sys
 | Alert coordination | Redis leader lease | one active Alert Evaluator under normal operation |
 | Alert durability | Plain PostgreSQL table on TimescaleDB | transactional lifecycle and replay-safe dedup |
 | API | Express + WebSocket | async event serving with lightweight REST/WS layer |
-| Dashboard | Angular + Leaflet | functional operator interface |
+| Dashboard | Next.js + Blueprint.js + react-leaflet | functional operator interface |
 
 ---
 
@@ -75,7 +75,8 @@ ADR-001 through ADR-015 live in `docs/adr/`.
 | ADR-006 | Geospatial candidate indexing | Uber H3 hex cells | Two resolutions: history column in TimescaleDB, live sorted sets in Redis; reduces proximity candidates before exact distance |
 | ADR-007 | Idempotency strategy | Deterministic logical IDs | Replay safety without exactly-once transport; type-specific alert IDs and `(entity_id, observed_at)` position key |
 | ADR-008 | API layer | Express + WebSocket | Lightweight async runtime; REST for queries, WebSocket for live alert and position fan-out |
-| ADR-009 | Operator dashboard | Angular + Leaflet | Functional map interface; WebSocket client tolerates duplicate lifecycle events |
+| ADR-009 | Operator dashboard | Angular + Leaflet (superseded by ADR-016) | Functional map interface; WebSocket client tolerates duplicate lifecycle events |
+| ADR-016 | Operator dashboard | Next.js + Blueprint.js + react-leaflet | Blueprint.js Palantir-aesthetic components; stronger React geospatial ecosystem; no Angular code existed |
 | ADR-010 | Alert persistence | PostgreSQL table on TimescaleDB | Transactional lifecycle transitions; deterministic `alert_id` gives idempotent upsert on replay |
 | ADR-011 | Operator authentication | Google OAuth 2.0 + application JWT | No password management; trusted identity; short-lived JWT for API session |
 | ADR-012 | Multi-tenant data scoping | Server-side workspace filtering | Workspace membership enforced at API; no client-side trust |
