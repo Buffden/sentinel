@@ -177,7 +177,7 @@ If the process crashes after the DB write but before offset commit, replay is sa
 
 ### Dashboard
 
-**Runtime:** Angular + Leaflet (ADR-009)
+**Runtime:** Next.js (CSR) + Blueprint.js + react-leaflet (ADR-016, supersedes ADR-009)
 
 The dashboard communicates only with the API. It renders live positions, alert feed, workspace-scoped data, and investigation evidence. WebSocket clients must tolerate duplicate alert lifecycle events and converge by `alert_id` plus status/version semantics.
 
@@ -277,7 +277,7 @@ Redis alert-state / recent-loss / deviation-state ─→ Alert Evaluator
                                                          → TimescaleDB alerts
                                                          → Redis alert-events
                                                          → REST/WebSocket
-                                                         → Angular dashboard
+                                                         → Next.js dashboard
 
 API → Neo4j only for operator investigation/evidence reads.
 ```

@@ -97,7 +97,7 @@ node "API Layer" #1a2a3a {
 }
 
 node "Dashboard" #1e3a2a {
-    component [Angular + Leaflet\nLive Map + Alert Feed + Investigation] as DASH #2d5a3d
+    component [Next.js + Blueprint.js + Leaflet\nLive Map + Alert Feed + Investigation] as DASH #2d5a3d
 }
 
 ADSB -[#4ade80]down-> POLLER

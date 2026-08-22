@@ -1,6 +1,6 @@
 # ADR-009: Angular + Leaflet for the Dashboard
 
-**Status:** Accepted
+**Status:** Superseded by ADR-016
 **Date:** 2026-08-06
 
 ---

@@ -22,7 +22,7 @@ Requirements:
 
 Use Google OAuth 2.0 for operator authentication. The flow is:
 
-1. The Angular dashboard initiates a Google OAuth popup using the Google Identity Services SDK
+1. The Next.js dashboard initiates a Google OAuth popup using the Google Identity Services SDK
 2. On success, Google returns an ID token to the client
 3. The client sends the ID token to `POST /auth/google` on the Express API
 4. The Express API verifies the token with Google's token info endpoint (or via the `google-auth-library` package)
@@ -84,5 +84,5 @@ The JWT is verified by Express middleware on every protected route and WebSocket
 - A `user_workspaces` table is added to TimescaleDB - see ADR-012
 - `POST /auth/google` is the only unauthenticated endpoint (beyond the health check)
 - All other REST routes and the WebSocket upgrade require a valid JWT in the `Authorization: Bearer <token>` header
-- The Angular dashboard handles the Google OAuth popup using `@google/identity` and stores the Sentinel JWT in memory (not localStorage) for the session duration
+- The Next.js dashboard handles the Google OAuth popup using `@react-oauth/google` and stores the Sentinel JWT in memory (not localStorage) for the session duration
 - The JWT secret is an environment variable - never committed to source
