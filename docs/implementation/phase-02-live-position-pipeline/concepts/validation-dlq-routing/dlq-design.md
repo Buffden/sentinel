@@ -72,11 +72,11 @@ dlq publish failed; not committing offset — Kafka will redeliver
 
 ### Why the offset is not committed on DLQ failure
 
-At CP5, `raw_events` is written before the DLQ publish attempt. If the DLQ publish fails and the offset were committed anyway, the rejection envelope would be permanently lost. The `raw_events` row exists (it was written first), but the DLQ entry — which carries the rejection reason — would be missing.
+With `raw_events` persistence, `raw_events` is written before the DLQ publish attempt. If the DLQ publish fails and the offset were committed anyway, the rejection envelope would be permanently lost. The `raw_events` row exists (it was written first), but the DLQ entry — which carries the rejection reason — would be missing.
 
 Retrying is safer: on redeliver, the `raw_events` insert hits `ON CONFLICT DO NOTHING`, and the DLQ publish is attempted again. This continues until the publish succeeds or the consumer is manually restarted and the broker issue is investigated.
 
-**Note:** this behavior changed at CP5. The original CP4 design committed the offset unconditionally even on DLQ failure. CP5 corrected this once `raw_events` made replay fully idempotent for all record types.
+**Note:** this behavior changed when `raw_events` persistence was added. The original DLQ routing implementation committed the offset unconditionally even on DLQ failure. Adding persistence corrected this once `raw_events` made replay fully idempotent for all record types.
 
 ---
 

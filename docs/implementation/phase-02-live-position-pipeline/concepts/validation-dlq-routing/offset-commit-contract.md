@@ -39,9 +39,9 @@ If the consumer crashes after `commitOffsets` returns, the broker does not redel
 
 A DLQ publish failure causes `handleMessage` to throw. The commit line is not reached. Kafka redelivers.
 
-At CP5, `raw_events` is written before the DLQ attempt. The `raw_events` insert is idempotent on redeliver via `ON CONFLICT DO NOTHING`. The DLQ publish is retried. This continues until either the broker recovers and the publish succeeds, or the consumer is manually restarted and investigated.
+With `raw_events` persistence, `raw_events` is written before the DLQ attempt. The `raw_events` insert is idempotent on redeliver via `ON CONFLICT DO NOTHING`. The DLQ publish is retried. This continues until either the broker recovers and the publish succeeds, or the consumer is manually restarted and investigated.
 
-**Note:** the original CP4 design committed the offset unconditionally even on DLQ failure, to avoid stalling the pipeline on an unprocessable record. CP5 revised this because `raw_events` now makes every redeliver idempotent — retrying is safe, and losing the DLQ envelope is not acceptable when it can be avoided.
+**Note:** the original DLQ routing implementation committed the offset unconditionally even on DLQ failure, to avoid stalling the pipeline on an unprocessable record. Adding `raw_events` persistence revised this because `raw_events` now makes every redeliver idempotent — retrying is safe, and losing the DLQ envelope is not acceptable when it can be avoided.
 
 ---
 
