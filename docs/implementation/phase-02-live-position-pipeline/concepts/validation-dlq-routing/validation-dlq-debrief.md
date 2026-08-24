@@ -1,4 +1,4 @@
-# CP4 Debrief
+# Validation and DLQ Routing Debrief
 
 ---
 
@@ -28,7 +28,7 @@ offset 3  valid             — full ADS-B record, category=3 (small fixed-wing)
 
 `rpk topic produce` compresses records with Snappy by default. kafkajs v2 does not implement Snappy decompression. Even when the consumer is asked to start from an offset after the compressed records, Redpanda returns the full segment batch from its internal segment boundary, which can include earlier Snappy-compressed messages. The consumer crashes with `KafkaJSNotImplemented: Snappy compression not implemented`.
 
-The fix for this session: delete and recreate the topic, then inject all test records via a kafkajs producer script. That produces uncompressed batches that the consumer can decode. Once real poller records fill the topic in CP5 and later, this is no longer a concern — the poller uses kafkajs and produces uncompressed records.
+The fix for this session: delete and recreate the topic, then inject all test records via a kafkajs producer script. That produces uncompressed batches that the consumer can decode. Once the poller is running continuously and its records fill the topic, this is no longer a concern — the poller uses kafkajs and produces uncompressed records.
 
 ---
 

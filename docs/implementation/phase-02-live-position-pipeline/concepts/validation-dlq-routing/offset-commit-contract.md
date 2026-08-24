@@ -22,10 +22,10 @@ There is no path where the offset is committed before `handleMessage` finishes. 
 
 If the consumer crashes anywhere inside `handleMessage` — or even just after `handleMessage` returns but before `commitOffsets` executes — Kafka redelivers the message on restart. The consumer processes it again from the beginning.
 
-For CP4 this is safe because:
+At this stage replay is safe because:
 - A `parse_error` record is still malformed on replay. It goes to the DLQ again, potentially creating a duplicate DLQ entry. Duplicate DLQ entries are harmless.
 - A `no_position` record is still a no_position. It is skipped again.
-- A valid record currently just logs. CP5 will write to `position_history`, which is idempotent (`ON CONFLICT DO NOTHING`). A duplicate write changes nothing.
+- A valid record currently just logs. The `position_history` write added in the next checkpoint is idempotent (`ON CONFLICT DO NOTHING`). A duplicate write changes nothing.
 
 The at-least-once guarantee combined with idempotent downstream effects gives the same correctness as exactly-once without requiring the coordination overhead of transactions.
 
