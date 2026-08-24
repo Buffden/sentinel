@@ -1,4 +1,5 @@
-// Position Consumer — CP5: TimescaleDB persistence.
+// Position Consumer: normalize raw telemetry, persist to TimescaleDB,
+// maintain Redis live state, and publish downstream.
 //
 // Consumer group: position-consumer (canonical; do not change without ADR).
 //
@@ -7,7 +8,9 @@
 //   2. Branch by normalization result:
 //        parse_error / missing_entity_id → DLQ publish → commit
 //        no_position                     → warn log → commit
-//        valid position                  → INSERT position_history → commit
+//        valid position                  → INSERT position_history
+//                                          → updateLiveState (Redis)
+//                                          → commit
 //
 // DLQ publish failures block offset commit.
 //   A transient broker error on the DLQ path propagates out of handleMessage.
@@ -20,28 +23,36 @@
 //   Kafka redelivers. The INSERT is idempotent via
 //   ON CONFLICT (source_topic, source_partition, source_offset) DO NOTHING.
 //
+// Redis live state — monotonic guard:
+//   entity:live:{entity_id} is updated via a Lua script that atomically checks
+//   last_seen_ms before writing. A stale or equal timestamp is rejected without
+//   touching the hash. A newer timestamp updates all fields together and resets
+//   the 24h TTL. This prevents out-of-order or replayed telemetry from
+//   regressing the live state.
+//   live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
+//
 // Offset commit strategy: manual (autoCommit: false).
 //   The commit is the LAST action for every message. A crash before
 //   the commit causes Kafka to redeliver the message on restart.
 //   All downstream writes are idempotent so replay is always safe.
 //
-// geo_cell is written as NULL at CP5.
-//   CP7 owns H3 computation (latlon → H3 cell) and will populate it.
+// geo_cell in position_history is NULL until H3 geo-cell indexing is implemented.
 //
-// CP4 note — testing malformed records:
+// Testing malformed records (DLQ routing):
 //   Inject fresh test records for DLQ experiments. Records already
 //   committed will not be redelivered unless the group offset is reset:
 //     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
-// Checkpoints yet to implement (marked with TODO-CP):
-//   CP6: Redis entity:live:{entity_id} monotonic update
-//   CP7: H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update
-//   CP8: position.normalized Kafka publish
-//   CP8: Redis position-updates pub/sub publish
+// Not yet implemented:
+//   H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update;
+//   live_geo_cell field added to entity:live hash.
+//   position.normalized Kafka publish.
+//   Redis position-updates pub/sub publish.
 
 import { hostname } from 'os';
 import { Kafka, Partitioners } from 'kafkajs';
 import pg from 'pg';
+import { Redis } from 'ioredis';
 import { normalizeAdsbRaw, type NormalizedPosition } from './normalize.js';
 
 const { Pool } = pg;
@@ -53,6 +64,12 @@ const SOURCE_TOPIC = 'adsb.raw';
 const DLQ_TOPIC = 'adsb.dlq';
 const GROUP_ID = 'position-consumer';
 const PG_URL = process.env['PG_URL'] ?? 'postgresql://sentinel:sentinel-dev@localhost:5433/sentinel';
+const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
+
+// TTL applied to entity:live:{entity_id} on every accepted write.
+// 24h — deliberately longer than signal-loss detection timing so a recently
+// lost entity's last known position remains readable by the Alert Evaluator.
+const LIVE_STATE_TTL_SECONDS = 86400;
 
 // Stable identifier for this consumer instance, used in DLQ records so
 // operators can trace which consumer instance rejected a message.
@@ -79,6 +96,41 @@ const producer = kafka.producer({
 // ---- Database setup --------------------------------------------------------
 
 const pool = new Pool({ connectionString: PG_URL });
+
+// ---- Redis setup -----------------------------------------------------------
+
+const redis = new Redis(REDIS_URL, {
+	// Disable ioredis auto-reconnect logging noise on clean shutdown.
+	lazyConnect: false,
+	enableReadyCheck: true,
+});
+
+// Lua script: monotonic guard for entity:live:{entity_id}.
+//
+// Atomically checks last_seen_ms before writing. Redis executes Lua scripts
+// as a single unit — no other command can interleave between the check and
+// the HSET. This prevents two concurrent consumer instances from racing.
+//
+// Returns 0 if the incoming timestamp is stale (current >= incoming).
+// Returns 1 if the write was accepted and TTL was refreshed.
+//
+// KEYS[1]  = entity:live:{entity_id}
+// ARGV[1]  = incoming last_seen_ms (milliseconds, as string)
+// ARGV[2]  = TTL in seconds
+// ARGV[3..] = flat field/value pairs for HSET
+const LIVE_STATE_LUA = `
+local current = redis.call('HGET', KEYS[1], 'last_seen_ms')
+if current and tonumber(current) >= tonumber(ARGV[1]) then
+  return 0
+end
+local fields = {}
+for i = 3, #ARGV do
+  fields[#fields + 1] = ARGV[i]
+end
+redis.call('HSET', KEYS[1], unpack(fields))
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`;
 
 // ---- Logging ---------------------------------------------------------------
 
@@ -134,7 +186,7 @@ async function writeRawEvent(
 // Called only for valid normalized positions (not for parse_error / no_position).
 //
 // observed_at is derived from source event time, not processing time.
-// geo_cell is NULL at CP5; CP7 populates it after computing the H3 cell.
+// geo_cell is NULL here; H3 geo-cell indexing populates it once cells are computed.
 // ON CONFLICT (entity_id, observed_at) DO NOTHING: replay-safe idempotency.
 async function writePositionHistory(position: NormalizedPosition): Promise<void> {
 	const observedAt = new Date(position.timestamp_ms);
@@ -147,8 +199,8 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
       callsign, entity_subtype, provider_category, squawk, spi, position_source,
       position_accuracy, destination, eta, draught_m
     ) VALUES (
-      $1,  $2,  $3,  $4,  NULL,
-      $5,  $6,  $7,  $8,  $9,
+      $1, $2, $3, $4, NULL,
+      $5, $6, $7, $8, $9,
       $10, $11, $12, $13, $14,
       $15, $16, $17, $18, $19,
       $20, $21, $22, $23, $24, $25,
@@ -164,6 +216,52 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
 			position.position_accuracy, position.destination, position.eta, position.draught_m,
 		],
 	);
+}
+
+// ---- Redis live state ------------------------------------------------------
+
+// Update entity:live:{entity_id} with the monotonic Lua guard.
+//
+// Returns true if the hash was written, false if the event was stale.
+// A stale result is logged at warn but is not an error — out-of-order
+// delivery is normal in at-least-once Kafka pipelines.
+//
+// live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
+// All fields are written as strings — Redis stores everything as strings
+// regardless of the declared type.
+async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
+	const key = `entity:live:${position.entity_id}`;
+
+	// Flatten all fields into the ARGV[3..] pairs expected by the Lua script.
+	// null values are stored as the empty string so HGET returns '' rather
+	// than nil, which simplifies readers that always expect a string field.
+	const fields = [
+		'last_seen_ms', String(position.timestamp_ms),
+		'entity_type', position.entity_type,
+		'lat', String(position.lat),
+		'lon', String(position.lon),
+		'altitude_m', position.altitude_m != null ? String(position.altitude_m) : '',
+		'speed_mps', position.speed_mps != null ? String(position.speed_mps) : '',
+		'course_deg', position.course_deg != null ? String(position.course_deg) : '',
+		'heading_deg', position.heading_deg != null ? String(position.heading_deg) : '',
+		'vertical_rate_mps', position.vertical_rate_mps != null ? String(position.vertical_rate_mps) : '',
+		'on_ground', position.on_ground != null ? String(position.on_ground) : '',
+		'navigation_status', position.navigation_status ?? '',
+		'callsign', position.callsign ?? '',
+		'entity_subtype', position.entity_subtype ?? '',
+		'provider', position.provider ?? '',
+	];
+
+	const result = await redis.eval(
+		LIVE_STATE_LUA,
+		1,
+		key,
+		String(position.timestamp_ms),
+		String(LIVE_STATE_TTL_SECONDS),
+		...fields,
+	);
+
+	return result === 1;
 }
 
 // ---- DLQ publish -----------------------------------------------------------
@@ -286,6 +384,19 @@ async function handleMessage(
 	// Step 2: write canonical position history.
 	await writePositionHistory(position);
 
+	// Step 3: update Redis live state under monotonic timestamp guard.
+	const accepted = await updateLiveState(position);
+	if (!accepted) {
+		// Stale event: a newer position for this entity is already in Redis.
+		// position_history still received the row (idempotent by observed_at),
+		// but the live state is not regressed.
+		log('warn', 'live state not updated — stale event', {
+			entity_id: position.entity_id,
+			timestamp_ms: position.timestamp_ms,
+			offset,
+		});
+	}
+
 	log('info', 'position persisted', {
 		entity_id: position.entity_id,
 		entity_type: position.entity_type,
@@ -296,14 +407,13 @@ async function handleMessage(
 		course_deg: position.course_deg,
 		altitude_m: position.altitude_m,
 		callsign: position.callsign,
+		live_state_accepted: accepted,
 		offset,
 	});
-
-	// TODO-CP6: await updateRedisLiveState(position);
-	// TODO-CP7: const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
-	// TODO-CP7: await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
-	// TODO-CP8: await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
-	// TODO-CP8: await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
+	// TODO (H3 geo-cell indexing): const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
+	// TODO (H3 geo-cell indexing): await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
+	// TODO (downstream publishing): await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
+	// TODO (downstream publishing): await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
 
 // ---- Consumer loop ---------------------------------------------------------
@@ -316,7 +426,7 @@ async function run(): Promise<void> {
 		dlq_topic: DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		checkpoint: 'CP5',
+		features: 'raw-events,position-history,redis-live-state',
 	});
 
 	await producer.connect();
@@ -358,7 +468,8 @@ async function shutdown(signal: string): Promise<void> {
 	await consumer.disconnect();
 	await producer.disconnect();
 	await pool.end();
-	log('info', 'consumer, dlq producer, and db pool disconnected');
+	await redis.quit();
+	log('info', 'consumer, dlq producer, db pool, and redis disconnected');
 	process.exit(0);
 }
 

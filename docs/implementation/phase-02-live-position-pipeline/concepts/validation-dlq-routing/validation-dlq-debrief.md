@@ -40,7 +40,7 @@ npm run consumer
 ```
 
 ```json
-{"level":"info","message":"consumer starting","group":"position-consumer","source_topic":"adsb.raw","dlq_topic":"adsb.dlq","consumer_id":"Harshwardhans-MacBook-Pro.local-20820","from_beginning":true,"checkpoint":"CP4"}
+{"level":"info","message":"consumer starting","group":"position-consumer","source_topic":"adsb.raw","dlq_topic":"adsb.dlq","consumer_id":"Harshwardhans-MacBook-Pro.local-20820","from_beginning":true,"features":"raw-events,position-history,redis-live-state"}
 {"level":"info","message":"dlq producer connected"}
 {"level":"info","message":"consumer connected"}
 {"level":"info","message":"consumer subscribed","topic":"adsb.raw"}

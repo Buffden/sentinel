@@ -46,7 +46,7 @@ Regular Postgres table. Primary key on `id` (BIGSERIAL). Unique constraint on `(
 
 ## Setup
 
-The same four-record test set used in CP4 was injected into `adsb.raw` using a kafkajs producer:
+The same four-record test set used in the DLQ routing validation was injected into `adsb.raw` using a kafkajs producer:
 
 ```text
 offset 4  parse_error       — "this is not json"
@@ -55,7 +55,7 @@ offset 6  no_position       — icao24 present, lat/lon/time_position all null
 offset 7  valid             — full ADS-B record, entity_id: def456
 ```
 
-Offsets 0–3 are earlier CP4 test records that were in the topic from a previous session.
+Offsets 0–3 are earlier test records from the DLQ routing session that were already in the topic.
 
 ---
 
@@ -69,7 +69,7 @@ FROM_BEGINNING=false pnpm run consumer
 Consumer output:
 
 ```json
-{"level":"info","message":"consumer starting","checkpoint":"CP5"}
+{"level":"info","message":"consumer starting","features":"raw-events,position-history,redis-live-state"}
 {"level":"warn","message":"record routed to dlq","rejection_reason":"parse_error: ...","source_offset":"4"}
 {"level":"warn","message":"record routed to dlq","rejection_reason":"missing_entity_id: ...","source_offset":"5"}
 {"level":"warn","message":"skipping record with no position","entity_id":"abc999","offset":"6"}
@@ -128,9 +128,9 @@ Consumer was restarted. All 8 records (offsets 0–7) were reprocessed. DB state
 
 ### Why 8 raw_events rows is correct
 
-Offsets 0–3 were processed by CP4 before `raw_events` was wired up. They had no prior `raw_events` rows. The replay inserted them for the first time — 4 new rows, one per unique Kafka record.
+Offsets 0–3 were processed by the DLQ routing implementation before `raw_events` was wired up. They had no prior `raw_events` rows. The replay inserted them for the first time — 4 new rows, one per unique Kafka record.
 
-Offsets 4–7 were already in `raw_events` from the first CP5 run. The replay attempts hit `ON CONFLICT DO NOTHING` — confirmed by the row `id` values jumping from 8 to 9 with no ids allocated for the duplicate attempts.
+Offsets 4–7 were already in `raw_events` from the first persistence run. The replay attempts hit `ON CONFLICT DO NOTHING` — confirmed by the row `id` values jumping from 8 to 9 with no ids allocated for the duplicate attempts.
 
 The result: 8 rows, one per unique `(source_topic, source_partition, source_offset)` triple. No duplicates. This is correct idempotency behavior.
 
@@ -163,7 +163,7 @@ docker exec sentinel-redpanda rpk group describe position-consumer
 | `parse_error` payload stored as JSONB string scalar | `jsonb_typeof(payload) = 'string'` for offset 4; original bytes preserved |
 | `no_position` archived, not skipped from DB | `entity_id: abc999` appears in `raw_events` with null `source_event_time` |
 | `position_history` written only for valid positions | Only offset 7 produced a `position_history` row |
-| `geo_cell` is NULL | `position_history` row shows empty `geo_cell`; CP7 will populate it |
+| `geo_cell` is NULL | `position_history` row shows empty `geo_cell`; H3 geo-cell indexing will populate it |
 | `ON CONFLICT DO NOTHING` on `raw_events` replay | Offsets 4–7 replayed without duplicating rows; id sequence gaps confirm conflict was hit |
 | `ON CONFLICT DO NOTHING` on `position_history` replay | One row for `def456` regardless of how many times the same Kafka record is processed |
 | Offset committed only after all writes succeed | Consumer log shows `position persisted` before consumer shutdown; group CURRENT-OFFSET advanced correctly |
