@@ -41,7 +41,7 @@ position.normalized
 | CP2 | OpenSky ingestion poller: real ADS-B telemetry → `adsb.raw` | Done |
 | CP3 | Parse + normalize → log canonical position object; schema contract docs | Done — verified against real adsb.raw records |
 | CP4 | Validation + DLQ routing: malformed records → `adsb.dlq` with rejection reason | Done — all four rejection paths verified |
-| CP5 | TimescaleDB: idempotent `position_history` write; `raw_events` write; offset commit after both | Pending |
+| CP5 | TimescaleDB: idempotent `position_history` write; `raw_events` write; offset commit after both | Done — persistence and replay idempotency verified |
 | CP6 | Redis `entity:live:{entity_id}`: monotonic timestamp guard; stale-event protection | Pending |
 | CP7 | H3 geo-cell: `geo-cell:{cell}` sorted-set membership; cell-change ZREM/ZADD | Pending |
 | CP8 | `position.normalized` Kafka publish; Redis `position-updates` pub/sub; replay and failure lab | Pending |

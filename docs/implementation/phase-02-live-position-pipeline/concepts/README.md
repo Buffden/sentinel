@@ -8,4 +8,5 @@ Concept notes and debrief records for Phase 02 checkpoints, in the order you'd r
 | [opensky-ingestion/](opensky-ingestion/) | OpenSky API shape, polling loop design, provider-fidelity boundary, observed debrief |
 | [normalization-schema-plan.md](normalization-schema-plan.md) | Full canonical schema design: NormalizedPosition fields, source vs provider taxonomy, NavigationStatus enum |
 | [position-normalization/](position-normalization/) | Normalization as a pure function, OpenSky field mapping to canonical schema, observed debrief |
-| [validation-dlq-routing/](validation-dlq-routing/) | Rejection classification (parse_error vs missing_entity_id vs no_position), DLQ envelope design, unconditional offset commit contract, observed debrief |
+| [validation-dlq-routing/](validation-dlq-routing/) | Rejection classification (parse_error vs missing_entity_id vs no_position), DLQ envelope design, offset commit contract, observed debrief |
+| [timescaledb-persistence/](timescaledb-persistence/) | raw_events design, idempotency model for both tables, write order and availability dependency, observed debrief |
