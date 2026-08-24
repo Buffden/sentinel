@@ -4,7 +4,7 @@
 
 ## Two tables, two identity keys
 
-CP5 introduces two idempotent writes per Kafka message. Each uses the identity of the logical fact being stored, not a shared universal key.
+The persistence layer introduces two idempotent writes per Kafka message. Each uses the identity of the logical fact being stored, not a shared universal key.
 
 | Table | Identity key | What it represents |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ In both cases, replay produces the same database state. This is the at-least-onc
 
 ## The two writes are not in a single transaction
 
-CP5 issues two separate `INSERT` statements. A crash between them leaves `raw_events` with a row and `position_history` without one.
+The persistence layer issues two separate `INSERT` statements. A crash between them leaves `raw_events` with a row and `position_history` without one.
 
 On replay:
 - The `raw_events` insert hits `ON CONFLICT DO NOTHING`.

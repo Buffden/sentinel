@@ -1,6 +1,6 @@
 # TimescaleDB Persistence
 
-Concept notes and debrief for CP5 — idempotent `raw_events` and `position_history` writes.
+Concept notes and debrief for idempotent `raw_events` and `position_history` writes.
 
 | File | What's inside |
 | --- | --- |

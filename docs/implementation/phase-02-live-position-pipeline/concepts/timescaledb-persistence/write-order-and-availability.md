@@ -39,9 +39,9 @@ If `raw_events` were written only on the happy path, the archive would be incomp
 
 ## DLQ publish failure blocks offset commit
 
-At CP4, a DLQ publish failure was logged and the offset was committed anyway. This was incorrect.
+In the original DLQ routing implementation, a DLQ publish failure was logged and the offset was committed anyway. This was incorrect.
 
-At CP5, the DLQ path is:
+With raw_events persistence, the DLQ path is:
 
 ```
 raw_events insert succeeds
@@ -72,8 +72,8 @@ In every case, the final database state after replay is identical to the state a
 
 ---
 
-## geo_cell is NULL at CP5
+## geo_cell is NULL until H3 indexing
 
-`position_history.geo_cell` is written as NULL at CP5. The column is nullable (migration 007 dropped the NOT NULL constraint). The column and its indexes remain in place.
+`position_history.geo_cell` is written as NULL for now. The column is nullable (migration 007 dropped the NOT NULL constraint). The column and its indexes remain in place.
 
-CP7 owns H3 computation. At CP7, the consumer will compute the H3 cell from `lat` and `lon` and write it alongside the position. CP5 persistence is complete and correct without it.
+H3 geo-cell indexing owns this. When implemented, the consumer will compute the H3 cell from `lat` and `lon` and write it alongside the position. Persistence is complete and correct without it.
