@@ -6,10 +6,10 @@
 //   parse_error / missing_entity_id → adsb.dlq with rejection envelope
 //   no_position                     → skip with warn (not a DLQ candidate)
 //
-// DLQ publish failures do NOT block offset commit.
-//   A transient broker error on the DLQ path must not stall the main
-//   pipeline on a record it will never be able to process. The failure
-//   is logged so operators can investigate. The pipeline moves on.
+// DLQ publish failures block offset commit.
+//   A transient broker error on the DLQ path propagates out of handleMessage.
+//   The offset is NOT committed. Kafka redelivers the message on the next
+//   consumer start. The raw_events insert is idempotent on replay.
 //
 // Offset commit strategy: manual (autoCommit: false).
 //   The commit is the LAST action for every message. A crash before
@@ -143,15 +143,17 @@ async function handleMessage(
 				dlq_topic: DLQ_TOPIC,
 			});
 		} catch (err) {
-			// DLQ publish failed. Log and move on — a transient broker error on
-			// the DLQ path must not stall the pipeline on an unprocessable record.
-			log('error', 'dlq publish failed; skipping record', {
+			// DLQ publish failed. Log and rethrow — the offset must NOT be
+			// committed. Kafka will redeliver the message on restart.
+			// The raw_events insert (CP5) is idempotent on replay.
+			log('error', 'dlq publish failed; not committing offset — Kafka will redeliver', {
 				rejection_reason: dlqEvent.rejection_reason,
 				source_topic: topic,
 				source_partition: partition,
 				source_offset: offset,
 				error: err instanceof Error ? err.message : String(err),
 			});
+			throw err;
 		}
 
 		return;
