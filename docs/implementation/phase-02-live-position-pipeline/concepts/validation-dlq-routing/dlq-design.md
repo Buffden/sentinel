@@ -56,14 +56,13 @@ Throughout Sentinel, `timestamp_ms` refers to source event time. The DLQ envelop
 
 If `adsb.dlq` is unavailable when the consumer tries to publish a rejection envelope, the consumer:
 
-1. Catches the error.
-2. Logs it at the `error` level with the rejection reason and source coordinates.
-3. Does **not** retry.
-4. Does **not** block or crash.
-5. Commits the offset and continues to the next record.
+1. Logs the error at `error` level with the rejection reason and source coordinates.
+2. Rethrows the error.
+3. Does **not** commit the original Kafka offset.
+4. Kafka redelivers the message on the next consumer start.
 
 ```
-dlq publish failed; skipping record
+dlq publish failed; not committing offset — Kafka will redeliver
   rejection_reason: parse_error: ...
   source_topic: adsb.raw
   source_partition: 0
@@ -71,16 +70,13 @@ dlq publish failed; skipping record
   error: Connection refused
 ```
 
-### Why this is correct
+### Why the offset is not committed on DLQ failure
 
-The record at offset 105185 will never be processable. It is malformed. If the consumer blocked on a failed DLQ publish:
+At CP5, `raw_events` is written before the DLQ publish attempt. If the DLQ publish fails and the offset were committed anyway, the rejection envelope would be permanently lost. The `raw_events` row exists (it was written first), but the DLQ entry — which carries the rejection reason — would be missing.
 
-- A transient broker blip would stall the entire pipeline on a record it will never be able to process.
-- Every healthy record behind offset 105185 would be held up.
+Retrying is safer: on redeliver, the `raw_events` insert hits `ON CONFLICT DO NOTHING`, and the DLQ publish is attempted again. This continues until the publish succeeds or the consumer is manually restarted and the broker issue is investigated.
 
-The tradeoff: a DLQ publish failure means the rejection envelope is lost (the bad record is neither in the DLQ nor in `position_history`). The operator log at `error` level is the signal. Operators must monitor for DLQ publish errors and investigate both the DLQ availability issue and the original records that were silently skipped.
-
-This tradeoff is explicit and intentional. The alternative (blocking the pipeline) is worse in every scenario involving a transient fault.
+**Note:** this behavior changed at CP5. The original CP4 design committed the offset unconditionally even on DLQ failure. CP5 corrected this once `raw_events` made replay fully idempotent for all record types.
 
 ---
 
