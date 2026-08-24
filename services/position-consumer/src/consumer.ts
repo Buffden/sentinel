@@ -1,4 +1,5 @@
-// Position Consumer — CP6: Redis live state with monotonic timestamp guard.
+// Position Consumer: normalize raw telemetry, persist to TimescaleDB,
+// maintain Redis live state, and publish downstream.
 //
 // Consumer group: position-consumer (canonical; do not change without ADR).
 //
@@ -28,25 +29,25 @@
 //   touching the hash. A newer timestamp updates all fields together and resets
 //   the 24h TTL. This prevents out-of-order or replayed telemetry from
 //   regressing the live state.
-//   live_geo_cell is omitted at CP6; CP7 adds it after computing the H3 cell.
+//   live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
 //
 // Offset commit strategy: manual (autoCommit: false).
 //   The commit is the LAST action for every message. A crash before
 //   the commit causes Kafka to redeliver the message on restart.
 //   All downstream writes are idempotent so replay is always safe.
 //
-// geo_cell in position_history is NULL until CP7.
+// geo_cell in position_history is NULL until H3 geo-cell indexing is implemented.
 //
-// CP4 note — testing malformed records:
+// Testing malformed records (DLQ routing):
 //   Inject fresh test records for DLQ experiments. Records already
 //   committed will not be redelivered unless the group offset is reset:
 //     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
-// Checkpoints yet to implement (marked with TODO-CP):
-//   CP7: H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update;
-//        live_geo_cell field added to entity:live hash
-//   CP8: position.normalized Kafka publish
-//   CP8: Redis position-updates pub/sub publish
+// Not yet implemented:
+//   H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update;
+//   live_geo_cell field added to entity:live hash.
+//   position.normalized Kafka publish.
+//   Redis position-updates pub/sub publish.
 
 import { hostname } from 'os';
 import { Kafka, Partitioners } from 'kafkajs';
@@ -185,7 +186,7 @@ async function writeRawEvent(
 // Called only for valid normalized positions (not for parse_error / no_position).
 //
 // observed_at is derived from source event time, not processing time.
-// geo_cell is NULL at CP5; CP7 populates it after computing the H3 cell.
+// geo_cell is NULL here; H3 geo-cell indexing populates it once cells are computed.
 // ON CONFLICT (entity_id, observed_at) DO NOTHING: replay-safe idempotency.
 async function writePositionHistory(position: NormalizedPosition): Promise<void> {
 	const observedAt = new Date(position.timestamp_ms);
@@ -198,8 +199,8 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
       callsign, entity_subtype, provider_category, squawk, spi, position_source,
       position_accuracy, destination, eta, draught_m
     ) VALUES (
-      $1,  $2,  $3,  $4,  NULL,
-      $5,  $6,  $7,  $8,  $9,
+      $1, $2, $3, $4, NULL,
+      $5, $6, $7, $8, $9,
       $10, $11, $12, $13, $14,
       $15, $16, $17, $18, $19,
       $20, $21, $22, $23, $24, $25,
@@ -225,7 +226,7 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
 // A stale result is logged at warn but is not an error — out-of-order
 // delivery is normal in at-least-once Kafka pipelines.
 //
-// live_geo_cell is omitted here; CP7 adds it once H3 is computed.
+// live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
 // All fields are written as strings — Redis stores everything as strings
 // regardless of the declared type.
 async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
@@ -236,19 +237,19 @@ async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
 	// than nil, which simplifies readers that always expect a string field.
 	const fields = [
 		'last_seen_ms', String(position.timestamp_ms),
-		'entity_type',  position.entity_type,
-		'lat',          String(position.lat),
-		'lon',          String(position.lon),
-		'altitude_m',   position.altitude_m != null ? String(position.altitude_m) : '',
-		'speed_mps',    position.speed_mps != null ? String(position.speed_mps) : '',
-		'course_deg',   position.course_deg != null ? String(position.course_deg) : '',
-		'heading_deg',  position.heading_deg != null ? String(position.heading_deg) : '',
+		'entity_type', position.entity_type,
+		'lat', String(position.lat),
+		'lon', String(position.lon),
+		'altitude_m', position.altitude_m != null ? String(position.altitude_m) : '',
+		'speed_mps', position.speed_mps != null ? String(position.speed_mps) : '',
+		'course_deg', position.course_deg != null ? String(position.course_deg) : '',
+		'heading_deg', position.heading_deg != null ? String(position.heading_deg) : '',
 		'vertical_rate_mps', position.vertical_rate_mps != null ? String(position.vertical_rate_mps) : '',
-		'on_ground',    position.on_ground != null ? String(position.on_ground) : '',
+		'on_ground', position.on_ground != null ? String(position.on_ground) : '',
 		'navigation_status', position.navigation_status ?? '',
-		'callsign',     position.callsign ?? '',
+		'callsign', position.callsign ?? '',
 		'entity_subtype', position.entity_subtype ?? '',
-		'provider',     position.provider ?? '',
+		'provider', position.provider ?? '',
 	];
 
 	const result = await redis.eval(
@@ -409,10 +410,10 @@ async function handleMessage(
 		live_state_accepted: accepted,
 		offset,
 	});
-	// TODO-CP7: const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
-	// TODO-CP7: await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
-	// TODO-CP8: await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
-	// TODO-CP8: await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
+	// TODO (H3 geo-cell indexing): const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
+	// TODO (H3 geo-cell indexing): await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
+	// TODO (downstream publishing): await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
+	// TODO (downstream publishing): await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
 
 // ---- Consumer loop ---------------------------------------------------------
@@ -425,7 +426,7 @@ async function run(): Promise<void> {
 		dlq_topic: DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		checkpoint: 'CP6',
+		features: 'raw-events,position-history,redis-live-state',
 	});
 
 	await producer.connect();

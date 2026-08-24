@@ -249,7 +249,7 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 			lon,
 			speed_mps,
 			course_deg,
-			heading_deg: null,       // ADS-B does not report heading separately from course
+			heading_deg: null, // ADS-B does not report heading separately from course
 			source: 'adsb',
 			provider: 'opensky',
 
