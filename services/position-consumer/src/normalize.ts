@@ -223,9 +223,10 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 	const squawk = typeof r['squawk'] === 'string' && r['squawk'] !== '' ? r['squawk'] : null;
 	const spi = typeof r['spi'] === 'boolean' ? r['spi'] : null;
 	const position_source = typeof r['position_source'] === 'number' ? r['position_source'] : null;
-	// callsign: use as-is from the canonical field in the raw payload.
-	// Trimming/mutation belongs in the consumer or presentation layer, not here.
-	const callsign = typeof r['callsign'] === 'string' && r['callsign'] !== '' ? r['callsign'] : null;
+	// callsign: trim provider whitespace padding before storing in the canonical
+	// record. OpenSky pads callsigns to a fixed width with trailing spaces.
+	// The raw value is preserved verbatim in raw_events.payload.
+	const callsign = typeof r['callsign'] === 'string' && r['callsign'].trim() !== '' ? r['callsign'].trim() : null;
 
 	// Step 7: Entity classification.
 	// category is only present when the poller adds extended=1 to the OpenSky URL.
