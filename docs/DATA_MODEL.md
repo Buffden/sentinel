@@ -28,7 +28,7 @@ Schema below reflects target state after migration 007 (applied at CP5).
 | `entity_type` | TEXT | No | `aircraft`, `vessel`, `satellite`, `ground_vehicle`, or `unknown` |
 | `observed_at` | TIMESTAMPTZ | No | `to_timestamp(timestamp_ms / 1000.0)`; hypertable time column |
 | `timestamp_ms` | BIGINT | No | Source event time in Unix ms |
-| `geo_cell` | TEXT | No | H3 cell at `HISTORY_H3_RESOLUTION`; indexed query column, not partition dimension |
+| `geo_cell` | TEXT | Yes | H3 cell at `HISTORY_H3_RESOLUTION`; indexed query column, not partition dimension. Nullable: CP5 persists NULL; CP7 owns H3 computation and populates this column. |
 | `lat` | DOUBLE PRECISION | No | Decimal degrees |
 | `lon` | DOUBLE PRECISION | No | Decimal degrees |
 | `altitude_m` | REAL | Yes | Preferred altitude (geo ?? baro); metres; null for vessels. Renamed from `altitude` in migration 007. |
@@ -78,13 +78,17 @@ Plain PostgreSQL table (not a hypertable) on the TimescaleDB instance. Applied a
 | `source_offset` | BIGINT | No | Kafka offset within the partition |
 | `received_at` | TIMESTAMPTZ | No | Processing time of this write |
 | `source_event_time` | TIMESTAMPTZ | Yes | `to_timestamp(timestamp_ms / 1000.0)` |
-| `payload` | JSONB | No | Complete original provider JSON |
+| `payload` | JSONB | No | Provider JSON object for valid records; JSONB string scalar for parse_error records |
 
 Unique constraint: `(source_topic, source_partition, source_offset)`. Offsets are only unique within a partition, so the partition column is mandatory for correct idempotency. Replaying a message produces the same `(topic, partition, offset)` triple and is rejected by `ON CONFLICT DO NOTHING`.
 
 Index: `(entity_id, received_at DESC)` for per-entity raw payload lookup.
 
-`received_at` is processing time (audit). `source_event_time` is provider event time. Join to `position_history` on `(entity_id, source_event_time)`.
+`received_at` is processing time (audit). `source_event_time` is provider event time.
+
+`raw_events` has no FK or guaranteed correlation key to `position_history`. `entity_id` + `source_event_time` may support best-effort investigation but are not guaranteed unique: `parse_error` and `no_position` records carry a null `source_event_time`, and two records for the same entity at the same event second are possible. The authoritative Kafka identity is `(source_topic, source_partition, source_offset)`.
+
+Availability dependency: successful `raw_events` archival is required before offset commit. If the insert fails, the offset must not be committed. Kafka will redeliver the message and the insert will be retried idempotently via `ON CONFLICT DO NOTHING`.
 
 ### `route_references`
 

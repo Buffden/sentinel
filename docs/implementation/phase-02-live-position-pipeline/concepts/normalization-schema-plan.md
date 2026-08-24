@@ -280,7 +280,7 @@ Vessel:
 
 ---
 
-## Poller fix required before CP5
+## Poller fix required before persistence
 
 Two changes needed in `services/ingestion-poller/src/poller.ts`:
 
@@ -413,21 +413,20 @@ so a crash causes full replay and both writes are retried idempotently.
 
 ---
 
-## Checkpoint boundaries
+## Implementation plan
 
 ```text
-CP3: parse + normalize + log canonical object (no persistence)
-CP4: validation + DLQ routing
-CP5: position_history write + raw_events write + idempotency + offset commit behavior
-     Redis live state + geo-cell index
-     position.normalized publish
-     position-updates pub/sub publish
+normalization and schema contract: parse + normalize + log canonical object (no persistence)
+validation and DLQ routing
+TimescaleDB persistence: position_history write + raw_events write + idempotency + offset commit behavior
+Redis live state + geo-cell index
+downstream publishing: position.normalized publish + position-updates pub/sub publish
 ```
 
 Schema contract documentation (`DATA_MODEL.md`, `ARCHITECTURE.md`, PUMLs) is updated
-during CP3 because the canonical shape is settled. Actual persistence is CP5 work.
+during normalization because the canonical shape is settled. Actual persistence comes later.
 
-### Consumer write order at CP5
+### Consumer write order
 
 ```text
 1. INSERT position_history            (canonical columns; ON CONFLICT DO NOTHING)
@@ -490,7 +489,7 @@ The canonical schema field names differ from DB column names in one place:
 
 ## Files to change
 
-### Now (CP3 — schema contract, no persistence)
+### Now (schema contract, no persistence)
 
 | File | Change |
 | --- | --- |
@@ -500,19 +499,19 @@ The canonical schema field names differ from DB column names in one place:
 | `docs/ARCHITECTURE.md` | Redis `entity:live` hash field list |
 | `docs/use-cases/US-02-live-map-updates/update-push.puml` | `altitude` → `altitude_m` in HSET, PUBLISH, and push payload |
 
-### Before CP5
+### Before persistence
 
 | File | Change |
 | --- | --- |
 | `services/ingestion-poller/src/poller.ts` | Add `extended=1`; capture `category` at index 17 |
 
-### At CP5
+### With persistence
 
 | File | Change |
 | --- | --- |
 | `infra/migrations/007_position_history_expand.sql` | Rename `altitude` → `altitude_m`; add new columns |
 | `infra/migrations/008_raw_events_table.sql` | Create regular `raw_events` table with `source_partition` in unique key |
-| `services/position-consumer/src/consumer.ts` | Full CP5 persistence; follow write order above; commit offset last |
+| `services/position-consumer/src/consumer.ts` | Full persistence implementation; follow write order above; commit offset last |
 
 ### After migration 007 runs
 

@@ -4,15 +4,15 @@
 
 ## The rule
 
-The offset commit is **always the last action** for every message, and it is **unconditional**.
+The offset commit is **always the last action** for every message. It is committed only when all required writes for that message succeed.
 
 ```
 receive message
-  → handleMessage (normalize, route to DLQ or log)
-  → commitOffsets (always, regardless of outcome)
+  → handleMessage (archive, normalize, route to DLQ or persist)
+  → commitOffsets (only on success)
 ```
 
-There is no path where the offset is committed before `handleMessage` finishes. There is no path where a rejection or DLQ failure prevents the commit.
+There is no path where the offset is committed before `handleMessage` finishes. A write failure or DLQ publish failure causes `handleMessage` to throw, and the commit line is never reached.
 
 ---
 
@@ -35,17 +35,13 @@ If the consumer crashes after `commitOffsets` returns, the broker does not redel
 
 ---
 
-## Why DLQ failure does not prevent commit
+## Why DLQ failure prevents commit
 
-The commit is unconditional by design. Specifically, a DLQ publish failure does not block the commit.
+A DLQ publish failure causes `handleMessage` to throw. The commit line is not reached. Kafka redelivers.
 
-The record at that offset is unprocessable. It was unprocessable before the DLQ attempt and it will be unprocessable on every future attempt. If the commit were withheld until the DLQ publish succeeded:
+With `raw_events` persistence, `raw_events` is written before the DLQ attempt. The `raw_events` insert is idempotent on redeliver via `ON CONFLICT DO NOTHING`. The DLQ publish is retried. This continues until either the broker recovers and the publish succeeds, or the consumer is manually restarted and investigated.
 
-- A sustained `adsb.dlq` outage would stop the consumer at the first malformed record.
-- Every healthy record at higher offsets would be blocked indefinitely.
-- The pipeline would halt on a record it cannot process, which is the exact failure mode the DLQ is designed to prevent.
-
-DLQ publish failures are logged at `error` level with full context. Operators can act on those logs. But the pipeline continues.
+**Note:** the original DLQ routing implementation committed the offset unconditionally even on DLQ failure, to avoid stalling the pipeline on an unprocessable record. Adding `raw_events` persistence revised this because `raw_events` now makes every redeliver idempotent — retrying is safe, and losing the DLQ envelope is not acceptable when it can be avoided.
 
 ---
 
@@ -88,5 +84,5 @@ With `autoCommit: false`, the commit only happens when the code explicitly calls
 | Crash before handleMessage completes | Redeliver on restart; idempotent replay |
 | Crash between handleMessage and commitOffsets | Redeliver on restart; idempotent replay |
 | Crash after commitOffsets | No redeliver; normal at-least-once guarantee |
-| DLQ publish fails | Log error; commit anyway; pipeline continues |
+| DLQ publish fails | Log error; throw; offset not committed; Kafka redelivers |
 | Valid record processed successfully | Commit; advance to next record |
