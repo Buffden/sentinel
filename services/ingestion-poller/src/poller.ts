@@ -53,31 +53,31 @@ const FETCH_TIMEOUT_MS = 8_000;
 
 // Provider-fidelity shape of one adsb.raw Kafka message.
 // Field names follow OpenSky's own naming so the raw log faithfully represents
-// the source. The Position Consumer maps these to the canonical schema.
-//
-// fetched_at_ms is an operational timestamp (processing time, not source event
-// time). It documents when the poll cycle ran and is useful for measuring the
-// lag between OpenSky's update interval and Kafka delivery. It is never used
-// as a canonical event-time anchor — that role belongs to time_position.
+// the source. No trimming, coercion, or dropping of fields — that is the
+// Position Consumer's job. The only addition is fetched_at_ms, an operational
+// timestamp that captures when this poll cycle ran (processing time, not source
+// event time). It documents the lag between OpenSky's update interval and Kafka
+// delivery and is useful for operational monitoring.
 interface AdsbRawEvent {
 	icao24: string;
-	callsign: string | null;
+	callsign: string | null;       // preserved verbatim; Position Consumer normalises
 	origin_country: string;
-	time_position: number | null; // Unix seconds; source event time for this position
-	last_contact: number; // Unix seconds; last time any transponder message arrived
+	time_position: number | null;  // Unix seconds; source event time for this position
+	last_contact: number;          // Unix seconds; last transponder message received
 	lon: number | null;
 	lat: number | null;
-	baro_altitude: number | null; // metres above mean sea level (barometric)
+	baro_altitude: number | null;  // metres above mean sea level (barometric)
 	on_ground: boolean;
-	velocity: number | null; // m/s ground speed
-	true_track: number | null; // degrees clockwise from north
-	vertical_rate: number | null; // m/s; positive = climbing
-	geo_altitude: number | null; // metres; GNSS altitude; may differ from baro
+	velocity: number | null;       // m/s ground speed
+	true_track: number | null;     // degrees clockwise from north
+	vertical_rate: number | null;  // m/s; positive = climbing
+	sensors: number[] | null;      // receiver IDs that contributed to this state vector
+	geo_altitude: number | null;   // metres; GNSS altitude; may differ from baro
 	squawk: string | null;
 	spi: boolean;
-	position_source: number; // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
-	category: number | null; // ADS-B emitter category; index 17; only present with extended=1
-	fetched_at_ms: number; // processing time of this poll cycle; NOT source event time
+	position_source: number;       // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
+	category: number | null;       // ADS-B emitter category; index 17; only with extended=1
+	fetched_at_ms: number;         // processing time of this poll cycle; NOT source event time
 }
 
 // ---- Kafka setup -----------------------------------------------------------
@@ -122,7 +122,9 @@ function log(
 function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEvent {
 	return {
 		icao24: state[0] as string,
-		callsign: typeof state[1] === 'string' ? state[1].trim() || null : null,
+		// callsign preserved verbatim — no trimming or mutation here.
+		// Position Consumer is responsible for normalisation.
+		callsign: typeof state[1] === 'string' ? state[1] : null,
 		origin_country: state[2] as string,
 		time_position: state[3] as number | null,
 		last_contact: state[4] as number,
@@ -133,7 +135,8 @@ function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEvent {
 		velocity: state[9] as number | null,
 		true_track: state[10] as number | null,
 		vertical_rate: state[11] as number | null,
-		// [12] sensors — skipped
+		// [12] sensors: receiver IDs; preserved for provider fidelity
+		sensors: Array.isArray(state[12]) ? (state[12] as number[]) : null,
 		geo_altitude: state[13] as number | null,
 		squawk: state[14] as string | null,
 		spi: state[15] as boolean,

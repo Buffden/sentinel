@@ -8,16 +8,13 @@
 //                                      no current GPS fix — not malformed)
 //   ok                               → persist, update live state, publish
 //
+// H3 geo-cell computation is intentionally absent here.
+// history_geo_cell and live_geo_cell are added to the position in CP7 when
+// the Redis geo-cell sorted-set write is implemented. Keeping them out of CP3
+// keeps this module free of spatial-index concerns.
+//
 // This module owns no I/O. It is a pure function on a string so it can be
 // exercised directly in a Node.js REPL or unit test without any infrastructure.
-
-import { latLngToCell } from 'h3-js';
-
-// H3 resolutions are configurable. ADR-006 suggests HISTORY starting at 5.
-// LIVE is finer-grained so the sorted-set candidate sets stay small before
-// exact distance calculation in the Correlation Worker.
-export const HISTORY_H3_RESOLUTION = Number(process.env['HISTORY_H3_RESOLUTION'] ?? 5);
-export const LIVE_H3_RESOLUTION = Number(process.env['LIVE_H3_RESOLUTION'] ?? 7);
 
 // ---- navigation_status enum ------------------------------------------------
 //
@@ -42,6 +39,8 @@ export type NavigationStatus =
 // The canonical form that flows into position_history, Redis, and
 // position.normalized. No raw provider payload embedded — that is written to
 // raw_events independently from the original Kafka message string.
+//
+// H3 geo-cells (history_geo_cell, live_geo_cell) are added in CP7.
 //
 // Universal movement core: fields present for every source type.
 // Decision-support fields: nullable; null meaning depends on entity_type.
@@ -94,10 +93,6 @@ export interface NormalizedPosition {
 	//   ADS-B: OpenSky category integer as string (requires extended=1 URL param).
 	//   AIS:   ship type code as string.
 	provider_category: string | null;
-
-	// --- Geo-cell index (pure H3 computation, no I/O) ---
-	history_geo_cell: string; // H3 at HISTORY_H3_RESOLUTION → DB geo_cell column
-	live_geo_cell: string;    // H3 at LIVE_H3_RESOLUTION → Redis geo-cell:* key
 }
 
 // Typed rejection variants so the consumer can branch without string-matching.
@@ -114,29 +109,37 @@ export type NormalizeResult =
 // ---- ADS-B entity_subtype mapping ------------------------------------------
 //
 // OpenSky category codes (only present when poller URL includes extended=1).
-// 0–1: no information / no category info
-// 2: Light (<15500 lbs)
-// 3: Small (15500–75000 lbs)
-// 4: Large (75000–300000 lbs)
-// 5: High vortex large
-// 6: Heavy (>300000 lbs)
-// 7: High performance
-// 8: Rotorcraft
-// 9: Glider/sailplane
+// Source: https://opensky-network.org/apidoc/rest.html
+//
+//  0: No information
+//  1: No ADS-B emitter category information
+//  2: Light (< 15500 lbs)
+//  3: Small (15500–75000 lbs)
+//  4: Large (75000–300000 lbs)
+//  5: High Vortex Large (e.g. B-757)
+//  6: Heavy (> 300000 lbs)
+//  7: High Performance (> 5g acceleration and 400 kts)
+//  8: Rotorcraft
+//  9: Glider / sailplane
 // 10: Lighter-than-air
-// 11: Parachutist/skydiver
-// 12: Ultralight/hang-glider
+// 11: Parachutist / skydiver
+// 12: Ultralight / hang-glider / paraglider
 // 13: Reserved
-// 14: UAV
-// 15: Space/trans-atmospheric
-// 16–18: surface vehicle / obstacle (not aircraft in flight)
+// 14: Unmanned Aerial Vehicle
+// 15: Space / trans-atmospheric vehicle
+// 16: Surface vehicle — emergency
+// 17: Surface vehicle — service
+// 18: Point obstacle (includes tethered balloons)
+// 19: Cluster obstacle
+// 20: Line obstacle
 function adsbCategoryToSubtype(category: number | null): string | null {
 	if (category == null) return null;
 	if (category === 8) return 'rotorcraft';
 	if (category === 10) return 'lighter_than_air';
 	if (category === 14) return 'uav';
+	// 2–7: all are fixed-wing aircraft of varying size/performance
 	if (category >= 2 && category <= 7) return 'fixed_wing';
-	// 0, 1, 9, 11–13, 15–18 → not enough information to classify
+	// 0, 1, 9, 11–13, 15–20: insufficient information to classify
 	return 'unknown';
 }
 
@@ -220,10 +223,9 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 	const squawk = typeof r['squawk'] === 'string' && r['squawk'] !== '' ? r['squawk'] : null;
 	const spi = typeof r['spi'] === 'boolean' ? r['spi'] : null;
 	const position_source = typeof r['position_source'] === 'number' ? r['position_source'] : null;
-	const callsign =
-		typeof r['callsign'] === 'string' && r['callsign'].trim() !== ''
-			? r['callsign'].trim()
-			: null;
+	// callsign: use as-is from the canonical field in the raw payload.
+	// Trimming/mutation belongs in the consumer or presentation layer, not here.
+	const callsign = typeof r['callsign'] === 'string' && r['callsign'] !== '' ? r['callsign'] : null;
 
 	// Step 7: Entity classification.
 	// category is only present when the poller adds extended=1 to the OpenSky URL.
@@ -232,13 +234,6 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 	const category = typeof r['category'] === 'number' ? r['category'] : null;
 	const entity_subtype = adsbCategoryToSubtype(category);
 	const provider_category = category !== null ? String(category) : null;
-
-	// Step 8: H3 geo-cell computation.
-	// Pure functions of lat/lon — no I/O, no side effects.
-	// history_geo_cell maps to the DB geo_cell column (written at CP5).
-	// live_geo_cell is the Redis sorted-set key suffix (written at CP7).
-	const history_geo_cell = latLngToCell(lat, lon, HISTORY_H3_RESOLUTION);
-	const live_geo_cell = latLngToCell(lat, lon, LIVE_H3_RESOLUTION);
 
 	return {
 		ok: true,
@@ -280,9 +275,6 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 			callsign,
 			entity_subtype,
 			provider_category,
-
-			history_geo_cell,
-			live_geo_cell,
 		},
 	};
 }

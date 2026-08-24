@@ -7,25 +7,36 @@
 // inspected against real records. No persistence, no Redis, no downstream
 // Kafka writes, no DLQ publishing yet — those belong to later checkpoints.
 //
+// H3 geo-cell computation is CP7. history_geo_cell and live_geo_cell are
+// absent from NormalizedPosition until then.
+//
 // Offset commit strategy: manual (autoCommit: false).
 //   The commit is the LAST action for every message. A crash before the commit
 //   causes Kafka to redeliver the message to the next consumer run.
 //
-//   At CP3 there are no durable side effects, so the commit is unconditional.
-//   From CP5 onward the commit moves after all persistence writes succeed.
+//   At CP3 there are no durable side effects, so the commit is unconditional
+//   for both valid and invalid records. Malformed records are logged but not
+//   DLQ'd — that is CP4 work.
+//
+// CP4 note — offset behaviour:
+//   CP3 commits all offsets including those for malformed records. When CP4
+//   adds DLQ routing, inject fresh malformed test records rather than relying
+//   on replay of records already committed here. Alternatively, reset the
+//   consumer group offset before CP4 testing:
+//     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
 // Checkpoints yet to implement (marked with TODO-CP):
 //   CP4: DLQ publish for parse_error / missing_entity_id
 //   CP5: INSERT position_history (idempotent)
 //   CP5: INSERT raw_events (idempotent; uses source_topic + partition + offset)
 //   CP6: Redis entity:live:{entity_id} monotonic update
-//   CP7: Redis geo-cell:{live_geo_cell} sorted-set update
+//   CP7: H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update
 //   CP8: position.normalized Kafka publish
 //   CP8: Redis position-updates pub/sub publish
 
 import { hostname } from 'os';
 import { Kafka } from 'kafkajs';
-import { normalizeAdsbRaw, HISTORY_H3_RESOLUTION, LIVE_H3_RESOLUTION } from './normalize.js';
+import { normalizeAdsbRaw } from './normalize.js';
 
 // ---- Configuration ---------------------------------------------------------
 
@@ -37,7 +48,8 @@ const GROUP_ID = 'position-consumer';
 const CONSUMER_ID = `${hostname()}-${process.pid}`;
 
 // fromBeginning: true on first run to process all existing adsb.raw records
-// and observe normalization without waiting for new polls.
+// and observe normalization without waiting for new polls. Once the group
+// commits offsets, subsequent restarts resume from the committed position.
 const FROM_BEGINNING = (process.env['FROM_BEGINNING'] ?? 'true') === 'true';
 
 // ---- Kafka setup -----------------------------------------------------------
@@ -97,8 +109,7 @@ async function handleMessage(offset: string, rawValue: string): Promise<void> {
 	const { position } = result;
 
 	// CP3: log the full canonical position so the normalized shape can be
-	// inspected against real adsb.raw records. This is the observability
-	// deliverable for CP3.
+	// inspected against real adsb.raw records.
 	log('info', 'position normalized', {
 		entity_id: position.entity_id,
 		entity_type: position.entity_type,
@@ -118,16 +129,15 @@ async function handleMessage(offset: string, rawValue: string): Promise<void> {
 		provider_category: position.provider_category,
 		provider: position.provider,
 		source: position.source,
-		history_geo_cell: position.history_geo_cell,
-		live_geo_cell: position.live_geo_cell,
 		offset,
 	});
 
 	// TODO-CP5: await writePositionHistory(position, rawValue, SOURCE_TOPIC, partition, offset);
 	// TODO-CP6: await updateRedisLiveState(position);
-	// TODO-CP7: await updateGeoCell(position);
-	// TODO-CP8: await publishNormalized(position);
-	// TODO-CP8: await publishPositionUpdate(position);
+	// TODO-CP7: const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
+	// TODO-CP7: await updateGeoCell(entity_id, live_geo_cell, timestamp_ms);
+	// TODO-CP8: await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
+	// TODO-CP8: await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
 
 // ---- Consumer loop ---------------------------------------------------------
@@ -139,8 +149,6 @@ async function run(): Promise<void> {
 		source_topic: SOURCE_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		history_h3_resolution: HISTORY_H3_RESOLUTION,
-		live_h3_resolution: LIVE_H3_RESOLUTION,
 		checkpoint: 'CP3',
 	});
 
