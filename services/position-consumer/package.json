@@ -4,7 +4,8 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"consume": "tsx src/consume.ts"
+		"consumer": "tsx src/consumer.ts",
+		"experiment": "tsx src/consume.ts"
 	},
 	"dependencies": {
 		"kafkajs": "^2.2.4"

@@ -13,8 +13,8 @@ participant "Express API\n(ws library)" as API
 participant "Angular\nDashboard" as Dashboard
 actor Operator
 
-Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude, last_seen_ms, entity_type }
-Consumer -> Redis : PUBLISH position-updates\n{ entity_id, lat, lon, altitude, last_seen_ms, entity_type }
+Consumer -> Redis : HSET entity:live:{entity_id}\n{ lat, lon, altitude_m, last_seen_ms, entity_type, ... }
+Consumer -> Redis : PUBLISH position-updates\n{ entity_id, lat, lon, altitude_m, last_seen_ms, entity_type, ... }
 
 note over API
   Redis pub/sub fans updates out
@@ -31,7 +31,7 @@ loop for each active WebSocket connection
   end note
 
   alt entity position within scope geo bounds\nAND entity_type in scope.entity_types
-    API -> Dashboard : push { entity_id, lat, lon,\n  altitude, entity_type, last_seen_ms }
+    API -> Dashboard : push { entity_id, lat, lon,\n  altitude_m, entity_type, last_seen_ms }
     Dashboard -> Dashboard : update entity position on map
     Dashboard --> Operator : entity moves to new position
   else entity outside scope bounds or wrong type

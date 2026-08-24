@@ -33,18 +33,18 @@ position.normalized
 
 ---
 
-## Workstream progress
+## Checkpoint progress
 
-| Workstream | Scope | Status |
+| CP | Scope | Status |
 | --- | --- | --- |
-| Kafka experiment | Node.js/TypeScript: produce and consume one event; observe consumer group and offset behavior | Done |
-| OpenSky ingestion poller | Real ADS-B telemetry → `adsb.raw` | In progress |
-| Position Consumer normalization | Raw event → canonical schema | Pending |
-| Validation and DLQ routing | Malformed records → `adsb.dlq` with rejection reason | Pending |
-| TimescaleDB persistence | Idempotent position history writes (`ON CONFLICT DO NOTHING`) | Pending |
-| Redis live state | Monotonic timestamp guard; stale-event protection | Pending |
-| H3 geo-cell indexing | Geo-cell computation and Redis live spatial index membership | Pending |
-| Pipeline completion | `position.normalized` publication; replay and failure lab | Pending |
+| CP1 | Kafka experiment: produce and consume one event; observe consumer group and offset behavior | Done |
+| CP2 | OpenSky ingestion poller: real ADS-B telemetry → `adsb.raw` | Done |
+| CP3 | Parse + normalize → log canonical position object; schema contract docs | Done — verified against real adsb.raw records |
+| CP4 | Validation + DLQ routing: malformed records → `adsb.dlq` with rejection reason | Done — all four rejection paths verified |
+| CP5 | TimescaleDB: idempotent `position_history` write; `raw_events` write; offset commit after both | Pending |
+| CP6 | Redis `entity:live:{entity_id}`: monotonic timestamp guard; stale-event protection | Pending |
+| CP7 | H3 geo-cell: `geo-cell:{cell}` sorted-set membership; cell-change ZREM/ZADD | Pending |
+| CP8 | `position.normalized` Kafka publish; Redis `position-updates` pub/sub; replay and failure lab | Pending |
 
 ---
 
