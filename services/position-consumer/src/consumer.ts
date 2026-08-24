@@ -1,32 +1,28 @@
-// Position Consumer — CP3: parse + normalize + log canonical output.
+// Position Consumer — CP4: validation + DLQ routing.
 //
 // Consumer group: position-consumer (canonical; do not change without ADR).
 //
-// CP3 scope: consume adsb.raw, normalize each record using the canonical
-// schema, log the canonical position object so the normalized shape can be
-// inspected against real records. No persistence, no Redis, no downstream
-// Kafka writes, no DLQ publishing yet — those belong to later checkpoints.
+// CP4 adds DLQ publishing for unprocessable records:
+//   parse_error / missing_entity_id → adsb.dlq with rejection envelope
+//   no_position                     → skip with warn (not a DLQ candidate)
 //
-// H3 geo-cell computation is CP7. history_geo_cell and live_geo_cell are
-// absent from NormalizedPosition until then.
+// DLQ publish failures do NOT block offset commit.
+//   A transient broker error on the DLQ path must not stall the main
+//   pipeline on a record it will never be able to process. The failure
+//   is logged so operators can investigate. The pipeline moves on.
 //
 // Offset commit strategy: manual (autoCommit: false).
-//   The commit is the LAST action for every message. A crash before the commit
-//   causes Kafka to redeliver the message to the next consumer run.
+//   The commit is the LAST action for every message. A crash before
+//   the commit causes Kafka to redeliver the message on restart.
+//   All downstream writes are idempotent so replay is always safe.
 //
-//   At CP3 there are no durable side effects, so the commit is unconditional
-//   for both valid and invalid records. Malformed records are logged but not
-//   DLQ'd — that is CP4 work.
-//
-// CP4 note — offset behaviour:
-//   CP3 commits all offsets including those for malformed records. When CP4
-//   adds DLQ routing, inject fresh malformed test records rather than relying
-//   on replay of records already committed here. Alternatively, reset the
-//   consumer group offset before CP4 testing:
+// CP4 note — testing malformed records:
+//   Inject fresh test records for DLQ experiments. Records already
+//   committed by CP3 will not be redelivered unless the group offset
+//   is reset first:
 //     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
 // Checkpoints yet to implement (marked with TODO-CP):
-//   CP4: DLQ publish for parse_error / missing_entity_id
 //   CP5: INSERT position_history (idempotent)
 //   CP5: INSERT raw_events (idempotent; uses source_topic + partition + offset)
 //   CP6: Redis entity:live:{entity_id} monotonic update
@@ -35,21 +31,20 @@
 //   CP8: Redis position-updates pub/sub publish
 
 import { hostname } from 'os';
-import { Kafka } from 'kafkajs';
+import { Kafka, Partitioners } from 'kafkajs';
 import { normalizeAdsbRaw } from './normalize.js';
 
 // ---- Configuration ---------------------------------------------------------
 
 const BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
 const SOURCE_TOPIC = 'adsb.raw';
+const DLQ_TOPIC = 'adsb.dlq';
 const GROUP_ID = 'position-consumer';
 
-// Stable identifier for this consumer instance; used in future DLQ records.
+// Stable identifier for this consumer instance, used in DLQ records so
+// operators can trace which consumer instance rejected a message.
 const CONSUMER_ID = `${hostname()}-${process.pid}`;
 
-// fromBeginning: true on first run to process all existing adsb.raw records
-// and observe normalization without waiting for new polls. Once the group
-// commits offsets, subsequent restarts resume from the committed position.
 const FROM_BEGINNING = (process.env['FROM_BEGINNING'] ?? 'true') === 'true';
 
 // ---- Kafka setup -----------------------------------------------------------
@@ -61,6 +56,12 @@ const kafka = new Kafka({
 });
 
 const consumer = kafka.consumer({ groupId: GROUP_ID });
+
+// Producer for publishing DLQ records.
+// LegacyPartitioner for consistent kafkajs v2 behaviour.
+const producer = kafka.producer({
+	createPartitioner: Partitioners.LegacyPartitioner,
+});
 
 // ---- Logging ---------------------------------------------------------------
 
@@ -80,9 +81,33 @@ function log(
 	);
 }
 
+// ---- DLQ publish -----------------------------------------------------------
+
+interface DlqEvent {
+	raw_payload: string;
+	rejection_reason: string;
+	source_topic: string;
+	source_partition: number;
+	source_offset: string;
+	consumer_id: string;
+	timestamp_ms: number; // processing time — this is an audit record, not a position event
+}
+
+async function publishToDlq(event: DlqEvent): Promise<void> {
+	await producer.send({
+		topic: DLQ_TOPIC,
+		messages: [{ value: JSON.stringify(event) }],
+	});
+}
+
 // ---- Message handler -------------------------------------------------------
 
-async function handleMessage(offset: string, rawValue: string): Promise<void> {
+async function handleMessage(
+	topic: string,
+	partition: number,
+	offset: string,
+	rawValue: string,
+): Promise<void> {
 	const result = normalizeAdsbRaw(rawValue);
 
 	if (!result.ok) {
@@ -97,19 +122,43 @@ async function handleMessage(offset: string, rawValue: string): Promise<void> {
 		}
 
 		// parse_error or missing_entity_id — record is unprocessable.
-		// TODO-CP4: publish to DLQ before returning.
-		log('warn', 'record rejected; dlq routing added in cp4', {
-			kind: result.kind,
-			detail: result.detail,
-			offset,
-		});
+		// Publish to DLQ so operators can inspect without blocking the pipeline.
+		const dlqEvent: DlqEvent = {
+			raw_payload: rawValue,
+			rejection_reason: `${result.kind}: ${result.detail}`,
+			source_topic: topic,
+			source_partition: partition,
+			source_offset: offset,
+			consumer_id: CONSUMER_ID,
+			timestamp_ms: Date.now(),
+		};
+
+		try {
+			await publishToDlq(dlqEvent);
+			log('warn', 'record routed to dlq', {
+				rejection_reason: dlqEvent.rejection_reason,
+				source_topic: topic,
+				source_partition: partition,
+				source_offset: offset,
+				dlq_topic: DLQ_TOPIC,
+			});
+		} catch (err) {
+			// DLQ publish failed. Log and move on — a transient broker error on
+			// the DLQ path must not stall the pipeline on an unprocessable record.
+			log('error', 'dlq publish failed; skipping record', {
+				rejection_reason: dlqEvent.rejection_reason,
+				source_topic: topic,
+				source_partition: partition,
+				source_offset: offset,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+
 		return;
 	}
 
 	const { position } = result;
 
-	// CP3: log the full canonical position so the normalized shape can be
-	// inspected against real adsb.raw records.
 	log('info', 'position normalized', {
 		entity_id: position.entity_id,
 		entity_type: position.entity_type,
@@ -132,10 +181,10 @@ async function handleMessage(offset: string, rawValue: string): Promise<void> {
 		offset,
 	});
 
-	// TODO-CP5: await writePositionHistory(position, rawValue, SOURCE_TOPIC, partition, offset);
+	// TODO-CP5: await writePositionHistory(position, rawValue, topic, partition, offset);
 	// TODO-CP6: await updateRedisLiveState(position);
 	// TODO-CP7: const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
-	// TODO-CP7: await updateGeoCell(entity_id, live_geo_cell, timestamp_ms);
+	// TODO-CP7: await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
 	// TODO-CP8: await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
 	// TODO-CP8: await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
@@ -147,10 +196,14 @@ async function run(): Promise<void> {
 		brokers: BROKERS,
 		group: GROUP_ID,
 		source_topic: SOURCE_TOPIC,
+		dlq_topic: DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		checkpoint: 'CP3',
+		checkpoint: 'CP4',
 	});
+
+	await producer.connect();
+	log('info', 'dlq producer connected');
 
 	await consumer.connect();
 	log('info', 'consumer connected');
@@ -161,18 +214,18 @@ async function run(): Promise<void> {
 	await consumer.run({
 		autoCommit: false,
 
-		eachMessage: async ({ partition, message }) => {
+		eachMessage: async ({ topic, partition, message }) => {
 			const rawValue = message.value?.toString() ?? '';
 			const offset = message.offset;
 
-			await handleMessage(offset, rawValue);
+			await handleMessage(topic, partition, offset, rawValue);
 
-			// Commit offset after processing. Crash before commit → redeliver on restart.
-			// At CP3 there are no durable side effects so the commit is unconditional.
-			// From CP5 onward this commit moves after all persistence writes succeed.
+			// Commit offset AFTER all processing — including DLQ publish attempt.
+			// Crash before commit → redeliver on restart → idempotent replay.
+			// Crash after commit → no redeliver → normal at-least-once guarantee.
 			await consumer.commitOffsets([
 				{
-					topic: SOURCE_TOPIC,
+					topic,
 					partition,
 					offset: (BigInt(offset) + 1n).toString(),
 				},
@@ -186,7 +239,8 @@ async function run(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
 	log('info', 'shutdown initiated', { signal });
 	await consumer.disconnect();
-	log('info', 'consumer disconnected');
+	await producer.disconnect();
+	log('info', 'consumer and dlq producer disconnected');
 	process.exit(0);
 }
 
