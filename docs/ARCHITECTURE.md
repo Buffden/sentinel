@@ -227,7 +227,7 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 
 | Key / Channel | Writer | Reader | Purpose |
 | --- | --- | --- | --- |
-| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Latest monotonic live state |
+| `entity:live:{entity_id}` | Position Consumer | Alert Evaluator, Correlation Worker, API | Latest monotonic live state: `lat`, `lon`, `altitude_m`, `entity_type`, `last_seen_ms`, `live_geo_cell`, `speed_mps`, `course_deg`, `heading_deg`, `vertical_rate_mps`, `on_ground`, `navigation_status`, `callsign`, `entity_subtype`, `provider` |
 | `geo-cell:{h3_cell_id}` | Position Consumer | Correlation Worker | Live H3 sorted-set candidate index |
 | `proximity-episode:{pair_key}` | Correlation Worker | Correlation Worker | Encounter episode/retry state |
 | `alert-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Active signal-loss/composite state |
