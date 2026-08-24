@@ -39,9 +39,12 @@ const LOMIN = Number(process.env['OPENSKY_LOMIN'] ?? -8.0);
 const LAMAX = Number(process.env['OPENSKY_LAMAX'] ?? 61.0);
 const LOMAX = Number(process.env['OPENSKY_LOMAX'] ?? 10.0);
 
+// extended=1 instructs OpenSky to include the category field (index 17 in the
+// state vector). Without it, entity_subtype and provider_category are always
+// null in the canonical schema. Must appear before the bounding-box params.
 const OPENSKY_URL =
 	`https://opensky-network.org/api/states/all` +
-	`?lamin=${LAMIN}&lomin=${LOMIN}&lamax=${LAMAX}&lomax=${LOMAX}`;
+	`?extended=1&lamin=${LAMIN}&lomin=${LOMIN}&lamax=${LAMAX}&lomax=${LOMAX}`;
 
 // Fetch timeout leaves headroom inside the poll interval.
 const FETCH_TIMEOUT_MS = 8_000;
@@ -73,6 +76,7 @@ interface AdsbRawEvent {
 	squawk: string | null;
 	spi: boolean;
 	position_source: number; // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
+	category: number | null; // ADS-B emitter category; index 17; only present with extended=1
 	fetched_at_ms: number; // processing time of this poll cycle; NOT source event time
 }
 
@@ -134,6 +138,8 @@ function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEvent {
 		squawk: state[14] as string | null,
 		spi: state[15] as boolean,
 		position_source: state[16] as number,
+		// [17] category — ADS-B emitter category; present only when extended=1 was in URL
+		category: typeof state[17] === 'number' ? state[17] : null,
 		fetched_at_ms: fetchedAtMs,
 	};
 }

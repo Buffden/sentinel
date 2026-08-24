@@ -20,17 +20,40 @@ Canonical schemas for Sentinel's persistent stores, Redis state, and Kafka contr
 
 Partitioned on `observed_at` only. Default chunk interval: 1 day. Default retention: 30 days.
 
+Schema below reflects target state after migration 007 (applied at CP5).
+
 | Column | Type | Nullable | Description |
 | --- | --- | --- | --- |
 | `entity_id` | TEXT | No | ICAO hex, MMSI, or synthetic entity ID |
-| `entity_type` | TEXT | No | `aircraft` or `vessel` |
+| `entity_type` | TEXT | No | `aircraft`, `vessel`, `satellite`, `ground_vehicle`, or `unknown` |
 | `observed_at` | TIMESTAMPTZ | No | `to_timestamp(timestamp_ms / 1000.0)`; hypertable time column |
 | `timestamp_ms` | BIGINT | No | Source event time in Unix ms |
 | `geo_cell` | TEXT | No | H3 cell at `HISTORY_H3_RESOLUTION`; indexed query column, not partition dimension |
 | `lat` | DOUBLE PRECISION | No | Decimal degrees |
 | `lon` | DOUBLE PRECISION | No | Decimal degrees |
-| `altitude` | REAL | Yes | Metres; null for vessels |
-| `source` | TEXT | No | `adsb`, `ais`, or `synthetic` |
+| `altitude_m` | REAL | Yes | Preferred altitude (geo ?? baro); metres; null for vessels. Renamed from `altitude` in migration 007. |
+| `source` | TEXT | No | `adsb`, `ais`, `satellite`, or `synthetic` |
+| `provider` | TEXT | Yes | `opensky`, `aishub`, etc. |
+| `baro_altitude_m` | REAL | Yes | Barometric altitude; metres |
+| `geo_altitude_m` | REAL | Yes | GNSS altitude; metres |
+| `speed_mps` | REAL | Yes | Ground speed; m/s |
+| `course_deg` | REAL | Yes | Direction of movement; degrees clockwise from north |
+| `heading_deg` | REAL | Yes | Vessel heading; degrees; null for aircraft |
+| `vertical_rate_mps` | REAL | Yes | Climb/descent rate; m/s; null for vessels |
+| `on_ground` | BOOLEAN | Yes | Surface-position indicator; null for vessels |
+| `last_contact_ms` | BIGINT | Yes | Last transponder contact; Unix ms; null for AIS |
+| `navigation_status` | TEXT | Yes | Normalized string enum (see below); null for aircraft |
+| `rate_of_turn` | REAL | Yes | ROT; null for aircraft |
+| `callsign` | TEXT | Yes | Callsign trimmed |
+| `entity_subtype` | TEXT | Yes | Normalized class: `fixed_wing`, `rotorcraft`, `cargo`, etc. |
+| `provider_category` | TEXT | Yes | Original provider classification verbatim |
+| `squawk` | TEXT | Yes | 4-digit transponder code; null for AIS |
+| `spi` | BOOLEAN | Yes | Special position identification; null for AIS |
+| `position_source` | SMALLINT | Yes | 0=ADS-B 1=ASTERIX 2=MLAT 3=FLARM; null for AIS |
+| `position_accuracy` | BOOLEAN | Yes | AIS high/low accuracy flag; null for ADS-B |
+| `destination` | TEXT | Yes | DEST; null for ADS-B |
+| `eta` | TEXT | Yes | ETA string; null for ADS-B |
+| `draught_m` | REAL | Yes | Vessel draught; metres; null for aircraft |
 
 Constraints/indexes:
 
@@ -39,6 +62,29 @@ Constraints/indexes:
 - `(geo_cell, observed_at DESC)`.
 
 TimescaleDB does **not** create separate chunks by `geo_cell`. H3 narrows rows inside time chunks through the index.
+
+### `raw_events`
+
+Plain PostgreSQL table (not a hypertable) on the TimescaleDB instance. Applied at CP5 via migration 008.
+
+| Column | Type | Nullable | Description |
+| --- | --- | --- | --- |
+| `id` | BIGSERIAL PK | No | Surrogate key |
+| `entity_id` | TEXT | Yes | ICAO hex, MMSI, or synthetic entity ID |
+| `source` | TEXT | No | `adsb`, `ais`, etc. |
+| `provider` | TEXT | Yes | `opensky`, `aishub`, etc. |
+| `source_topic` | TEXT | No | Kafka topic the record arrived on |
+| `source_partition` | INTEGER | No | Kafka partition number |
+| `source_offset` | BIGINT | No | Kafka offset within the partition |
+| `received_at` | TIMESTAMPTZ | No | Processing time of this write |
+| `source_event_time` | TIMESTAMPTZ | Yes | `to_timestamp(timestamp_ms / 1000.0)` |
+| `payload` | JSONB | No | Complete original provider JSON |
+
+Unique constraint: `(source_topic, source_partition, source_offset)`. Offsets are only unique within a partition, so the partition column is mandatory for correct idempotency. Replaying a message produces the same `(topic, partition, offset)` triple and is rejected by `ON CONFLICT DO NOTHING`.
+
+Index: `(entity_id, received_at DESC)` for per-entity raw payload lookup.
+
+`received_at` is processing time (audit). `source_event_time` is provider event time. Join to `position_history` on `(entity_id, source_event_time)`.
 
 ### `route_references`
 
@@ -181,12 +227,19 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 
 ### `entity:live:{entity_id}` — hash
 
-Fields: `lat`, `lon`, optional `altitude`, `entity_type`, `last_seen_ms`, `live_geo_cell`.
+Fields written by the Position Consumer (CP6):
+
+```text
+lat               lon               altitude_m        entity_type
+last_seen_ms      live_geo_cell     speed_mps         course_deg
+heading_deg       vertical_rate_mps on_ground         navigation_status
+callsign          entity_subtype    provider
+```
 
 - Writer: Position Consumer.
 - Readers: Alert Evaluator, Correlation Worker, API.
 - TTL: 24h safety net, deliberately longer than signal-loss timing.
-- Timestamp guard: stale/out-of-order telemetry cannot replace a newer `last_seen_ms` state.
+- Timestamp guard: stale/out-of-order telemetry cannot replace a newer `last_seen_ms` state. All fields update together under the same guard.
 
 ### `geo-cell:{h3_cell_id}` — sorted set
 
@@ -270,19 +323,40 @@ Provider-fidelity records. Position Consumer owns parsing/normalization.
 
 ### `position.normalized`
 
-| Field | Type |
-| --- | --- |
-| `entity_id` | string |
-| `entity_type` | string |
-| `timestamp_ms` | number |
-| `lat` | number |
-| `lon` | number |
-| `altitude` | number \| null |
-| `source` | string |
-| `history_geo_cell` | string |
-| `live_geo_cell` | string |
+Canonical fields only. No raw provider payload. Published by Position Consumer (CP8); consumed by Correlation Worker and Deviation Detector.
 
-Published by Position Consumer; consumed by Correlation Worker and Deviation Detector.
+| Field | Type | Notes |
+| --- | --- | --- |
+| `entity_id` | string | icao24 or MMSI |
+| `entity_type` | string | `aircraft` \| `vessel` \| `satellite` \| `ground_vehicle` \| `unknown` |
+| `timestamp_ms` | number | source event time |
+| `lat` | number | |
+| `lon` | number | |
+| `speed_mps` | number \| null | |
+| `course_deg` | number \| null | |
+| `heading_deg` | number \| null | vessels only |
+| `source` | string | `adsb` \| `ais` \| `satellite` \| `synthetic` |
+| `provider` | string \| null | `opensky` \| `aishub` \| etc. |
+| `altitude_m` | number \| null | preferred altitude; null for vessels |
+| `baro_altitude_m` | number \| null | |
+| `geo_altitude_m` | number \| null | |
+| `vertical_rate_mps` | number \| null | |
+| `on_ground` | boolean \| null | |
+| `last_contact_ms` | number \| null | ADS-B only |
+| `navigation_status` | string \| null | normalized enum; AIS only |
+| `rate_of_turn` | number \| null | AIS only |
+| `callsign` | string \| null | |
+| `entity_subtype` | string \| null | normalized class |
+| `provider_category` | string \| null | original provider value verbatim |
+| `squawk` | string \| null | ADS-B only |
+| `spi` | boolean \| null | ADS-B only |
+| `position_source` | number \| null | ADS-B only |
+| `position_accuracy` | boolean \| null | AIS only |
+| `destination` | string \| null | AIS only |
+| `eta` | string \| null | AIS only |
+| `draught_m` | number \| null | AIS only |
+| `history_geo_cell` | string | H3 at `HISTORY_H3_RESOLUTION` |
+| `live_geo_cell` | string | H3 at `LIVE_H3_RESOLUTION` |
 
 ### `deviation.candidates`
 
@@ -305,7 +379,7 @@ Fields:
 
 This event already contains everything required to trigger proximity/composite evaluation; the Alert Evaluator does not perform a second Neo4j known-associate check.
 
-### `alerts`
+### `alerts` — Kafka topic
 
 Published by Alert Evaluator; consumed by API.
 
