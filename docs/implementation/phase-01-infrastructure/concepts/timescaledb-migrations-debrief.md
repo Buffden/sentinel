@@ -4,7 +4,7 @@
 
 | Table | Notes |
 | --- | --- |
-| `position_history` | Hypertable, partitioned by `observed_at` (1-day chunks) |
+| `position_history` | Hypertable, partitioned by `observed_at` (1-hour chunks, 48-hour retention) |
 | `users` | |
 | `user_workspaces` | FK to `users` |
 | `route_references` | |
@@ -40,6 +40,8 @@ Failure experiment confirmed both layers:
 ## TimescaleDB result
 
 `position_history` was converted to a hypertable partitioned by `observed_at` with 1-day chunk intervals. The 30-day retention policy is registered.
+
+> **Revised policy (Phase 02):** chunk interval changed to 1 hour, retention changed to 48 hours. 30 days was never a deliberate decision; 48 hours covers all v1 use cases. The migration that applies these values is a Phase 02 task. See `concepts/timescaledb-persistence/retention-and-chunk-policy.md` for the reasoning and SQL.
 
 Immediately after migration, before any inserts, `num_chunks = 0`. TimescaleDB creates a chunk only when the first row is inserted into the corresponding time range. Inserting a test row and then deleting it removes the row but does not remove the chunk -- the chunk continues to exist as an empty partition. Zero rows and zero chunks are different facts: zero rows means no data was written; zero chunks means no insert has ever occurred in that time range.
 
@@ -87,7 +89,7 @@ Before moving to Kafka topic provisioning, you should be able to answer these wi
 1. Why must the unique index on `position_history` include `observed_at`?
 2. What does `ON_ERROR_STOP=1` change about psql's default behavior?
 3. Why is `superseded_by` a plain FK and not `DEFERRABLE`?
-4. What happens to chunks when the 30-day retention policy fires?
+4. What happens to chunks when the retention policy fires? (Policy is now 48 hours, not 30 days.)
 5. What does `num_chunks = 0` tell you about how TimescaleDB creates chunks?
 6. If you add a `007_foo.sql` migration and `make migrate` has already been run, what happens on re-run?
 

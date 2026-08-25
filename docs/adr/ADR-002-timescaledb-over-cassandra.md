@@ -20,7 +20,7 @@ The store must support sustained ingest, time-window filtering, indexed regional
 
 Use TimescaleDB as the position-history store.
 
-`position_history` is a hypertable partitioned by `observed_at TIMESTAMPTZ` only, with a default one-day chunk interval. `geo_cell` is an indexed query column, not a partition/shard dimension.
+`position_history` is a hypertable partitioned by `observed_at TIMESTAMPTZ` only, with a 1-hour chunk interval and a 48-hour retention policy. `geo_cell` is an indexed query column, not a partition/shard dimension.
 
 ---
 
