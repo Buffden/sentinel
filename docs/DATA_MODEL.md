@@ -18,7 +18,7 @@ Canonical schemas for Sentinel's persistent stores, Redis state, and Kafka contr
 
 ### `position_history` — hypertable
 
-Partitioned on `observed_at` only. Default chunk interval: 1 day. Default retention: 30 days.
+Partitioned on `observed_at` only. Chunk interval: 1 hour. Retention: 48 hours.
 
 Schema below reflects target state after migration 007 (applied at CP5).
 

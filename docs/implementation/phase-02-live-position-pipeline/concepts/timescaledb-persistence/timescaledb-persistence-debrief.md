@@ -32,7 +32,7 @@ The migration runner has no tracking table and replays every file on each `make 
 docker exec sentinel-timescaledb psql -U sentinel -d sentinel -c "\d+ position_history"
 ```
 
-Notable: `geo_cell` is now nullable. All 21 new columns are nullable. Existing unique index and both query indexes are intact. Hypertable status and 30-day retention policy unchanged.
+Notable: `geo_cell` is now nullable. All 21 new columns are nullable. Existing unique index and both query indexes are intact. Hypertable status unchanged. Retention policy at this point was still 30 days / 1-day chunks from Phase 01; revised to 48 hours / 1-hour chunks as a separate migration decision — see `retention-and-chunk-policy.md`.
 
 `raw_events` after migration 008:
 
