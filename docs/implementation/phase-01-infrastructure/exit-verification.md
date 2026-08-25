@@ -84,6 +84,8 @@ One chunk exists from the manual store verification insert. Chunks are created l
 | --- | --- | --- | --- |
 | 1000 | policy_retention | 1 day | drop_after: 30 days |
 
+> **Revised policy (Phase 02):** chunk interval changed to 1 hour, retention changed to 48 hours. The values above reflect what the Phase 01 migration installed. A subsequent migration updates both settings.
+
 ### Indexes
 
 | Index | Type | Columns |

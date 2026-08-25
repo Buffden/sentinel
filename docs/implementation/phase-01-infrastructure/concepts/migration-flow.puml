@@ -27,7 +27,7 @@ partition "migrations applied in order" {
   note right: installs timescaledb_information\nand all TimescaleDB functions
 
   :002_position_history.sql\nCREATE TABLE, create_hypertable\nretention policy, indexes;
-  note right: partition column: observed_at\nchunk interval: 1 day\nretention: 30 days
+  note right: partition column: observed_at\nchunk interval: 1 hour\nretention: 48 hours
 
   :003_users.sql\nCREATE TABLE users;
 

@@ -93,7 +93,7 @@ TimescaleDB cannot enforce global uniqueness across independent time chunks unle
 
 ## 9. Chunk Interval and Retention
 
-Sentinel uses a **1-day chunk interval** — TimescaleDB creates one internal partition per day. Retention is **30 days** — old chunks are dropped automatically, which is far more efficient than a row-level DELETE.
+Sentinel uses a **1-hour chunk interval** — TimescaleDB creates one internal partition per hour. Retention is **48 hours** — old chunks are dropped automatically, which is far more efficient than a row-level DELETE. 48 hours covers all v1 use cases (Redis reconstruction, route deviation, operator investigation); no analytical workload requires longer history.
 
 Both are set in the migration and should be verified after apply.
 
