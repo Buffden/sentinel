@@ -10,3 +10,4 @@ Concept notes and debrief records for Phase 02 checkpoints, in the order you'd r
 | [position-normalization/](position-normalization/) | Normalization as a pure function, OpenSky field mapping to canonical schema, observed debrief |
 | [validation-dlq-routing/](validation-dlq-routing/) | Rejection classification (parse_error vs missing_entity_id vs no_position), DLQ envelope design, offset commit contract, observed debrief |
 | [timescaledb-persistence/](timescaledb-persistence/) | raw_events design, idempotency model for both tables, write order and availability dependency, observed debrief |
+| [redis-live-state/](redis-live-state/) | entity:live hash design, monotonic Lua guard, stale-event protection, observed debrief |
