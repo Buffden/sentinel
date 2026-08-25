@@ -12,6 +12,8 @@
 //                                          → HGET old live_geo_cell
 //                                          → updateLiveState (Redis, includes live_geo_cell)
 //                                          → updateGeoCell (ZREM old / ZADD new)
+//                                          → publishNormalized (position.normalized Kafka topic)
+//                                          → publishPositionUpdate (Redis position-updates pub/sub)
 //                                          → commit
 //
 // DLQ publish failures block offset commit.
@@ -51,9 +53,19 @@
 //   committed will not be redelivered unless the group offset is reset:
 //     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
-// Not yet implemented:
-//   position.normalized Kafka publish.
-//   Redis position-updates pub/sub publish.
+// publishNormalized failure handling:
+//   A failed position.normalized publish propagates out of handleMessage.
+//   The offset is NOT committed. Kafka redelivers the message on restart.
+//   All prior writes (raw_events, position_history, Redis) are idempotent on replay.
+//   This is intentional: position.normalized is a canonical output of the Position
+//   Consumer. Downstream services (Deviation Detector, Correlation Worker) consume
+//   nothing else. Dropping a publish silently would permanently lose the event for
+//   those services.
+//
+// publishPositionUpdate failure handling:
+//   Redis pub/sub is fire-and-forget. A missed message means a WebSocket client
+//   misses one map tick and catches up on the next position update. Failure is
+//   logged at error but does not rethrow — the offset is committed regardless.
 
 import { hostname } from 'os';
 import { Kafka, Partitioners } from 'kafkajs';
@@ -69,6 +81,8 @@ const { Pool } = pg;
 const BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
 const SOURCE_TOPIC = 'adsb.raw';
 const DLQ_TOPIC = 'adsb.dlq';
+const NORMALIZED_TOPIC = 'position.normalized';
+const POSITION_UPDATES_CHANNEL = 'position-updates';
 const GROUP_ID = 'position-consumer';
 const PG_URL = process.env['PG_URL'] ?? 'postgresql://sentinel:sentinel-dev@localhost:5433/sentinel';
 const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
@@ -325,6 +339,102 @@ async function updateGeoCell(
 	await redis.zadd(`geo-cell:${newCell}`, lastSeenMs, entityId);
 }
 
+// ---- Downstream publishing -------------------------------------------------
+
+// Publish the canonical normalized position to position.normalized.
+//
+// Consumed by: Deviation Detector, Correlation Worker.
+// Keyed by entity_id so all positions for the same entity land on the same
+// partition, preserving per-entity ordering for stateful consumers.
+//
+// Called for ALL valid positions regardless of whether the Redis live state
+// was accepted. A stale event (older timestamp already in Redis) still
+// carries a valid position that downstream detectors need to evaluate.
+//
+// Failure propagates to the caller — the offset is not committed and Kafka
+// redelivers. Prior writes replay idempotently.
+async function publishNormalized(
+	position: NormalizedPosition,
+	historyGeoCell: string,
+	liveGeoCell: string,
+): Promise<void> {
+	const payload = {
+		entity_id: position.entity_id,
+		entity_type: position.entity_type,
+		timestamp_ms: position.timestamp_ms,
+		lat: position.lat,
+		lon: position.lon,
+		speed_mps: position.speed_mps,
+		course_deg: position.course_deg,
+		heading_deg: position.heading_deg,
+		source: position.source,
+		provider: position.provider,
+		altitude_m: position.altitude_m,
+		baro_altitude_m: position.baro_altitude_m,
+		geo_altitude_m: position.geo_altitude_m,
+		vertical_rate_mps: position.vertical_rate_mps,
+		on_ground: position.on_ground,
+		last_contact_ms: position.last_contact_ms,
+		navigation_status: position.navigation_status,
+		rate_of_turn: position.rate_of_turn,
+		callsign: position.callsign,
+		entity_subtype: position.entity_subtype,
+		provider_category: position.provider_category,
+		squawk: position.squawk,
+		spi: position.spi,
+		position_source: position.position_source,
+		position_accuracy: position.position_accuracy,
+		destination: position.destination,
+		eta: position.eta,
+		draught_m: position.draught_m,
+		history_geo_cell: historyGeoCell,
+		live_geo_cell: liveGeoCell,
+	};
+
+	await producer.send({
+		topic: NORMALIZED_TOPIC,
+		messages: [{ key: position.entity_id, value: JSON.stringify(payload) }],
+	});
+}
+
+// Publish a lightweight position snapshot to the position-updates Redis pub/sub channel.
+//
+// Consumed by: API instances, which fan the update out to connected WebSocket clients.
+// Redis pub/sub is ephemeral: if no API instance is subscribed, the message is dropped.
+// That is acceptable — WebSocket delivery is at-least-once and clients tolerate gaps.
+//
+// Carries only the fields the API needs to push a live map update. Full canonical
+// fields are in position.normalized for services that need them.
+//
+// Failure is logged but does not rethrow. A missed pub/sub message is a skipped
+// map tick, not a data loss — the next accepted position corrects the client's view.
+async function publishPositionUpdate(
+	position: NormalizedPosition,
+	liveGeoCell: string,
+): Promise<void> {
+	const payload = JSON.stringify({
+		entity_id: position.entity_id,
+		entity_type: position.entity_type,
+		timestamp_ms: position.timestamp_ms,
+		lat: position.lat,
+		lon: position.lon,
+		altitude_m: position.altitude_m,
+		speed_mps: position.speed_mps,
+		course_deg: position.course_deg,
+		callsign: position.callsign,
+		live_geo_cell: liveGeoCell,
+	});
+
+	try {
+		await redis.publish(POSITION_UPDATES_CHANNEL, payload);
+	} catch (err) {
+		log('error', 'position-updates pub/sub publish failed', {
+			entity_id: position.entity_id,
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+}
+
 // ---- DLQ publish -----------------------------------------------------------
 
 interface DlqEvent {
@@ -473,6 +583,14 @@ async function handleMessage(
 		});
 	}
 
+	// Step 6: publish to position.normalized Kafka topic.
+	// Blocks offset commit on failure — see top-of-file comment.
+	await publishNormalized(position, history_geo_cell, live_geo_cell);
+
+	// Step 7: publish to Redis position-updates pub/sub.
+	// Fire-and-forget — does not block offset commit on failure.
+	await publishPositionUpdate(position, live_geo_cell);
+
 	log('info', 'position persisted', {
 		entity_id: position.entity_id,
 		entity_type: position.entity_type,
@@ -488,8 +606,6 @@ async function handleMessage(
 		live_state_accepted: accepted,
 		offset,
 	});
-	// TODO (downstream publishing): await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
-	// TODO (downstream publishing): await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
 
 // ---- Consumer loop ---------------------------------------------------------
@@ -502,7 +618,7 @@ async function run(): Promise<void> {
 		dlq_topic: DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		features: 'raw-events,position-history,redis-live-state,h3-geo-cell',
+		features: 'raw-events,position-history,redis-live-state,h3-geo-cell,normalized-publish,position-updates',
 	});
 
 	await producer.connect();
