@@ -8,7 +8,26 @@
 
 Publishing to `position.normalized` is the last write-side responsibility of the Position Consumer for a valid event.
 
+`position.normalized` is **at-least-once**. A crash between a successful publish and the source offset commit causes the source record to be redelivered, and the publish to be repeated. Downstream consumers must tolerate duplicate events and process them idempotently. Do not assume exactly-once delivery.
+
 ---
+
+## At-least-once delivery and the crash-before-commit scenario
+
+The publish happens before the source `adsb.raw` offset is committed. This sequence is intentional — if the publish fails, the offset is not committed and Kafka redelivers. But it creates a duplicate path:
+
+```
+publishNormalized succeeds
+  → process crashes before source offset commit
+  → Kafka redelivers adsb.raw message on restart
+  → publishNormalized runs again
+  → position.normalized receives a duplicate event
+```
+
+This is the standard at-least-once pattern for Kafka-to-Kafka pipelines. Downstream consumers must handle it:
+
+- **Idempotent state writes**: use source `(entity_id, timestamp_ms)` as the effective identity. A duplicate event with the same pair produces the same output.
+- **Do not use `position.normalized` offset as a uniqueness key**: the same logical event may appear at different `position.normalized` offsets across replays.
 
 ## Why it blocks offset commit
 
