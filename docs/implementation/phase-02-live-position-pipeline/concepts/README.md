@@ -11,3 +11,4 @@ Concept notes and debrief records for Phase 02 checkpoints, in the order you'd r
 | [validation-dlq-routing/](validation-dlq-routing/) | Rejection classification (parse_error vs missing_entity_id vs no_position), DLQ envelope design, offset commit contract, observed debrief |
 | [timescaledb-persistence/](timescaledb-persistence/) | raw_events design, idempotency model for both tables, write order and availability dependency, observed debrief |
 | [redis-live-state/](redis-live-state/) | entity:live hash design, monotonic Lua guard, stale-event protection, observed debrief |
+| [h3-geo-cell/](h3-geo-cell/) | two H3 resolutions and access patterns, geo-cell sorted set design and boundary-crossing update sequence, observed debrief |

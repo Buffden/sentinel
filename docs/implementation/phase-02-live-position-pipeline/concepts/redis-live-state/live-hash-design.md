@@ -42,7 +42,7 @@ Hash also keeps the write atomic: `HSET` with multiple field/value pairs is a si
 
 Redis stores everything as strings. Null values are stored as empty string `''` so that readers always get a string back from `HGET`, never `nil`. This simplifies consumer code — no nil-vs-empty branching required.
 
-`live_geo_cell` is absent until H3 geo-cell indexing is implemented. When added, it will hold the H3 cell ID of the entity's current position, used to remove the entity from a stale sorted set on cell change.
+`live_geo_cell` holds the H3 cell ID at `LIVE_H3_RESOLUTION` for the entity's current position. It is used by the consumer to determine which `geo-cell:*` sorted set to `ZREM` from when the entity moves to a new cell. It is also read by the Correlation Worker to know which sorted set to look up during proximity candidate reduction.
 
 ---
 

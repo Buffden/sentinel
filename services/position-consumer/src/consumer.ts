@@ -8,8 +8,10 @@
 //   2. Branch by normalization result:
 //        parse_error / missing_entity_id → DLQ publish → commit
 //        no_position                     → warn log → commit
-//        valid position                  → INSERT position_history
-//                                          → updateLiveState (Redis)
+//        valid position                  → INSERT position_history (with H3 history cell)
+//                                          → HGET old live_geo_cell
+//                                          → updateLiveState (Redis, includes live_geo_cell)
+//                                          → updateGeoCell (ZREM old / ZADD new)
 //                                          → commit
 //
 // DLQ publish failures block offset commit.
@@ -26,17 +28,23 @@
 // Redis live state — monotonic guard:
 //   entity:live:{entity_id} is updated via a Lua script that atomically checks
 //   last_seen_ms before writing. A stale or equal timestamp is rejected without
-//   touching the hash. A newer timestamp updates all fields together and resets
-//   the 24h TTL. This prevents out-of-order or replayed telemetry from
-//   regressing the live state.
-//   live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
+//   touching the hash. A newer timestamp updates all fields together (including
+//   live_geo_cell) and resets the 24h TTL.
+//
+// Redis geo-cell sorted sets:
+//   geo-cell:{live_geo_cell} holds member=entity_id, score=last_seen_ms.
+//   The old live_geo_cell is read via HGET BEFORE the Lua hash write so we know
+//   which sorted set to ZREM from. Sorted set updates happen only when the Lua
+//   guard accepts (i.e. the incoming event is newer). Stale events skip both
+//   ZREM and ZADD.
+//   The ZREM→ZADD pair is not atomic with the hash write. A brief gap where the
+//   entity is absent from the index is acceptable — the Correlation Worker's
+//   freshness score lower bound makes a transiently missing candidate safe.
 //
 // Offset commit strategy: manual (autoCommit: false).
 //   The commit is the LAST action for every message. A crash before
 //   the commit causes Kafka to redeliver the message on restart.
 //   All downstream writes are idempotent so replay is always safe.
-//
-// geo_cell in position_history is NULL until H3 geo-cell indexing is implemented.
 //
 // Testing malformed records (DLQ routing):
 //   Inject fresh test records for DLQ experiments. Records already
@@ -44,8 +52,6 @@
 //     rpk group seek position-consumer --to <offset> --topics adsb.raw
 //
 // Not yet implemented:
-//   H3 geo-cell computation; Redis geo-cell:{live_geo_cell} sorted-set update;
-//   live_geo_cell field added to entity:live hash.
 //   position.normalized Kafka publish.
 //   Redis position-updates pub/sub publish.
 
@@ -53,6 +59,7 @@ import { hostname } from 'os';
 import { Kafka, Partitioners } from 'kafkajs';
 import pg from 'pg';
 import { Redis } from 'ioredis';
+import { latLngToCell } from 'h3-js';
 import { normalizeAdsbRaw, type NormalizedPosition } from './normalize.js';
 
 const { Pool } = pg;
@@ -70,6 +77,18 @@ const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
 // 24h — deliberately longer than signal-loss detection timing so a recently
 // lost entity's last known position remains readable by the Alert Evaluator.
 const LIVE_STATE_TTL_SECONDS = 86400;
+
+// H3 resolution for position_history.geo_cell.
+// Resolution 5: ~252 km² per cell. Indexes spatial rows inside time chunks.
+// A regional historical query translates bounding-box bounds into a set of
+// cells at this resolution, then uses WHERE geo_cell IN (...) AND observed_at BETWEEN.
+const HISTORY_H3_RESOLUTION = 5;
+
+// H3 resolution for Redis geo-cell:{cell_id} sorted sets.
+// Resolution 7: ~5 km² per cell. Keeps proximity candidate sets small.
+// The Correlation Worker queries the incoming entity's cell plus gridDisk(cell, k)
+// to find nearby entities, then runs exact distance on the reduced set.
+const LIVE_H3_RESOLUTION = 7;
 
 // Stable identifier for this consumer instance, used in DLQ records so
 // operators can trace which consumer instance rejected a message.
@@ -132,6 +151,18 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 return 1
 `;
 
+// ---- H3 geo-cell computation -----------------------------------------------
+
+function computeH3Cells(lat: number, lon: number): {
+	history_geo_cell: string;
+	live_geo_cell: string;
+} {
+	return {
+		history_geo_cell: latLngToCell(lat, lon, HISTORY_H3_RESOLUTION),
+		live_geo_cell: latLngToCell(lat, lon, LIVE_H3_RESOLUTION),
+	};
+}
+
 // ---- Logging ---------------------------------------------------------------
 
 function log(
@@ -186,9 +217,10 @@ async function writeRawEvent(
 // Called only for valid normalized positions (not for parse_error / no_position).
 //
 // observed_at is derived from source event time, not processing time.
-// geo_cell is NULL here; H3 geo-cell indexing populates it once cells are computed.
+// history_geo_cell is H3 at HISTORY_H3_RESOLUTION; stored as $30 to avoid
+// renumbering the existing $1-$29 parameters.
 // ON CONFLICT (entity_id, observed_at) DO NOTHING: replay-safe idempotency.
-async function writePositionHistory(position: NormalizedPosition): Promise<void> {
+async function writePositionHistory(position: NormalizedPosition, historyGeoCell: string): Promise<void> {
 	const observedAt = new Date(position.timestamp_ms);
 	await pool.query(
 		`INSERT INTO position_history (
@@ -199,7 +231,7 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
       callsign, entity_subtype, provider_category, squawk, spi, position_source,
       position_accuracy, destination, eta, draught_m
     ) VALUES (
-      $1, $2, $3, $4, NULL,
+      $1, $2, $3, $4, $30,
       $5, $6, $7, $8, $9,
       $10, $11, $12, $13, $14,
       $15, $16, $17, $18, $19,
@@ -214,6 +246,7 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
 			position.vertical_rate_mps, position.on_ground, position.last_contact_ms, position.navigation_status, position.rate_of_turn,
 			position.callsign, position.entity_subtype, position.provider_category, position.squawk, position.spi, position.position_source,
 			position.position_accuracy, position.destination, position.eta, position.draught_m,
+			historyGeoCell,
 		],
 	);
 }
@@ -226,15 +259,13 @@ async function writePositionHistory(position: NormalizedPosition): Promise<void>
 // A stale result is logged at warn but is not an error — out-of-order
 // delivery is normal in at-least-once Kafka pipelines.
 //
-// live_geo_cell is omitted here; H3 geo-cell indexing adds it once cells are computed.
 // All fields are written as strings — Redis stores everything as strings
-// regardless of the declared type.
-async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
+// regardless of the declared type. null values are stored as '' so HGET
+// always returns a string rather than nil.
+async function updateLiveState(position: NormalizedPosition, liveGeoCell: string): Promise<boolean> {
 	const key = `entity:live:${position.entity_id}`;
 
 	// Flatten all fields into the ARGV[3..] pairs expected by the Lua script.
-	// null values are stored as the empty string so HGET returns '' rather
-	// than nil, which simplifies readers that always expect a string field.
 	const fields = [
 		'last_seen_ms', String(position.timestamp_ms),
 		'entity_type', position.entity_type,
@@ -250,6 +281,7 @@ async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
 		'callsign', position.callsign ?? '',
 		'entity_subtype', position.entity_subtype ?? '',
 		'provider', position.provider ?? '',
+		'live_geo_cell', liveGeoCell,
 	];
 
 	const result = await redis.eval(
@@ -262,6 +294,35 @@ async function updateLiveState(position: NormalizedPosition): Promise<boolean> {
 	);
 
 	return result === 1;
+}
+
+// ---- Redis geo-cell sorted sets --------------------------------------------
+
+// Maintain geo-cell:{cell_id} sorted sets: member=entity_id, score=last_seen_ms.
+//
+// Must only be called when the Lua guard accepted the live state write (i.e.
+// the incoming event is newer). Stale events must not mutate sorted sets.
+//
+// oldCell is read from the hash BEFORE the Lua write. If oldCell differs from
+// newCell, the entity moved to a new H3 cell and must be removed from the old
+// sorted set. ZREM on a non-existent member is a no-op — safe on first ping
+// or if a concurrent consumer already moved the entity.
+//
+// The ZREM→ZADD pair is not atomic with the hash update. A brief window where
+// the entity is absent from both sorted sets is acceptable: the Correlation
+// Worker's freshness score lower bound treats transiently missing candidates
+// as not-yet-seen rather than as an error.
+async function updateGeoCell(
+	entityId: string,
+	newCell: string,
+	lastSeenMs: number,
+	oldCell: string | null,
+): Promise<void> {
+	if (oldCell && oldCell !== newCell) {
+		await redis.zrem(`geo-cell:${oldCell}`, entityId);
+	}
+	// ZADD upserts the score — updates last_seen_ms for an existing member.
+	await redis.zadd(`geo-cell:${newCell}`, lastSeenMs, entityId);
 }
 
 // ---- DLQ publish -----------------------------------------------------------
@@ -371,6 +432,9 @@ async function handleMessage(
 
 	const { position } = result;
 
+	// Compute H3 cells once — used in both TimescaleDB and Redis writes.
+	const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
+
 	// Step 1: archive the raw record.
 	await writeRawEvent(
 		rawValue, // valid JSON — store directly as JSONB object
@@ -381,15 +445,27 @@ async function handleMessage(
 		new Date(position.timestamp_ms),
 	);
 
-	// Step 2: write canonical position history.
-	await writePositionHistory(position);
+	// Step 2: write canonical position history with H3 history cell.
+	await writePositionHistory(position, history_geo_cell);
 
-	// Step 3: update Redis live state under monotonic timestamp guard.
-	const accepted = await updateLiveState(position);
-	if (!accepted) {
+	// Step 3: read the entity's current live_geo_cell BEFORE overwriting the hash.
+	// Once the Lua script runs, the old cell is gone from the hash. We need it
+	// to know which sorted set to ZREM from if the entity moved.
+	const oldLiveGeoCell = await redis.hget(`entity:live:${position.entity_id}`, 'live_geo_cell');
+
+	// Step 4: update Redis live state under monotonic timestamp guard.
+	// live_geo_cell is now included in the HSET fields.
+	const accepted = await updateLiveState(position, live_geo_cell);
+
+	if (accepted) {
+		// Step 5: update geo-cell sorted sets.
+		// Only runs when the live state was accepted (newer event). Stale events
+		// must not mutate the sorted sets.
+		await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms, oldLiveGeoCell);
+	} else {
 		// Stale event: a newer position for this entity is already in Redis.
 		// position_history still received the row (idempotent by observed_at),
-		// but the live state is not regressed.
+		// but the live state and sorted sets are not regressed.
 		log('warn', 'live state not updated — stale event', {
 			entity_id: position.entity_id,
 			timestamp_ms: position.timestamp_ms,
@@ -407,11 +483,11 @@ async function handleMessage(
 		course_deg: position.course_deg,
 		altitude_m: position.altitude_m,
 		callsign: position.callsign,
+		history_geo_cell,
+		live_geo_cell,
 		live_state_accepted: accepted,
 		offset,
 	});
-	// TODO (H3 geo-cell indexing): const { history_geo_cell, live_geo_cell } = computeH3Cells(position.lat, position.lon);
-	// TODO (H3 geo-cell indexing): await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms);
 	// TODO (downstream publishing): await publishNormalized({ ...position, history_geo_cell, live_geo_cell });
 	// TODO (downstream publishing): await publishPositionUpdate({ ...position, history_geo_cell, live_geo_cell });
 }
@@ -426,7 +502,7 @@ async function run(): Promise<void> {
 		dlq_topic: DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
 		from_beginning: FROM_BEGINNING,
-		features: 'raw-events,position-history,redis-live-state',
+		features: 'raw-events,position-history,redis-live-state,h3-geo-cell',
 	});
 
 	await producer.connect();
