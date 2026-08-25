@@ -302,6 +302,23 @@ Acquire: `SET NX PX`. Renewal/release must compare current ownership before `PEX
 
 Publisher: Position Consumer. Subscribers: API instances.
 
+Payload (subset of `position.normalized` — only what the API needs to push a map update):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `entity_id` | string | |
+| `entity_type` | string | |
+| `timestamp_ms` | number | source event time |
+| `lat` | number | |
+| `lon` | number | |
+| `altitude_m` | number \| null | |
+| `speed_mps` | number \| null | |
+| `course_deg` | number \| null | |
+| `callsign` | string \| null | |
+| `live_geo_cell` | string | H3 at `LIVE_H3_RESOLUTION`; used for viewport cell filtering |
+
+Published only on accepted live-state writes. Stale/equal-timestamp events are not published. Full canonical fields are in `position.normalized` for services that need them.
+
 ### `alert-events` — pub/sub
 
 Publisher: API. Subscribers: all API instances.
@@ -408,6 +425,91 @@ Payload evidence:
 ### `adsb.dlq` / `ais.dlq`
 
 Fields: `raw_payload`, `rejection_reason`, `source_topic`, `source_offset`, `consumer_id`, operational `timestamp_ms`.
+
+---
+
+## API / WebSocket Client Contracts
+
+These are the shapes the browser actually receives. They are derived from upstream canonical schemas but are not identical to them — the API transforms and namespaces before sending.
+
+### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}`
+
+Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes.
+
+Response: array of entity snapshots.
+
+| Field | Type | Source |
+| --- | --- | --- |
+| `entity_id` | string | Redis hash |
+| `entity_type` | string | Redis hash |
+| `timestamp_ms` | number | `last_seen_ms` from Redis hash |
+| `lat` | number | Redis hash |
+| `lon` | number | Redis hash |
+| `altitude_m` | number \| null | Redis hash |
+| `speed_mps` | number \| null | Redis hash |
+| `course_deg` | number \| null | Redis hash |
+| `callsign` | string \| null | Redis hash |
+| `on_ground` | boolean \| null | Redis hash |
+| `entity_subtype` | string \| null | Redis hash |
+| `live_geo_cell` | string | Redis hash |
+
+### `GET /alerts`
+
+Returns persisted alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered by the authenticated user's workspace scope.
+
+### WebSocket — position update message
+
+Forwarded from `position-updates` Redis pub/sub after viewport filtering. The `type` field namespaces position updates from alert events on the same connection.
+
+```json
+{
+  "type": "position",
+  "entity_id": "abc123",
+  "entity_type": "aircraft",
+  "timestamp_ms": 1787634583000,
+  "lat": 51.5,
+  "lon": -0.1,
+  "altitude_m": 10150,
+  "speed_mps": 220.5,
+  "course_deg": 270,
+  "callsign": "BA100",
+  "live_geo_cell": "87194ad33ffffff"
+}
+```
+
+Clients must render the position with the highest `timestamp_ms` received for a given `entity_id`. Out-of-order messages (possible due to at-least-once pub/sub) must not move a marker backward.
+
+### WebSocket — alert event message
+
+Forwarded from `alert-events` Redis pub/sub. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
+
+```json
+{
+  "type": "alert",
+  "event_type": "ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED",
+  "alert_id": "abc123:SIGNAL_LOSS:1787634000000",
+  "alert_type": "SIGNAL_LOSS",
+  "entity_id": "abc123",
+  "counterparty_entity_id": null,
+  "priority": "STANDARD",
+  "status": "NEW",
+  "detected_at_ms": 1787634583000,
+  "payload": {}
+}
+```
+
+### WebSocket — subscribe message (client to API)
+
+Client sends this on connect and on every viewport pan/zoom to scope the live position stream.
+
+```json
+{
+  "type": "subscribe",
+  "bbox": { "minLat": 49.0, "minLon": -8.0, "maxLat": 61.0, "maxLon": 2.0 }
+}
+```
+
+API uses the bbox to filter which `position-updates` messages it forwards to this connection.
 
 ---
 

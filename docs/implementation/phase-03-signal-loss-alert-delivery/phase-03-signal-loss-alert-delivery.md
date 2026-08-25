@@ -27,8 +27,23 @@ This phase establishes the serving path that all later alert types reuse.
 - basic `GET /alerts`
 - authenticated WebSocket
 - delivery of new alerts to clients connected to the current API instance
+- `GET /entities/live?bbox=...` for initial map seed from Redis live state
+- Redis `position-updates` pub/sub subscriber; forward to connected WebSocket clients
 
 Multi-instance fan-out, workspace scope, acknowledge/resolve, and richer lifecycle semantics are intentionally deferred.
+
+### Dashboard (closes the vertical slice)
+Built last, after the API is serving both position updates and alerts.
+
+- Next.js scaffold with Blueprint.js layout
+- Google OAuth login page and JWT storage
+- react-leaflet map with moving flight markers (course_deg rotation, tooltip)
+- WebSocket hook: receives position updates and alert events on the same connection
+- Filter panel: airborne toggle, entity subtype, altitude range, callsign search
+- Alert list panel: live-updating from WebSocket; new alerts appear without page refresh
+- Operator can watch a flight go dark and see the signal loss alert appear on screen
+
+See `concepts/fe-dashboard-live-map/README.md` in Phase 02 for the full viewport culling and filter design.
 
 ## Required Failure Experiments
 
@@ -36,7 +51,8 @@ Multi-instance fan-out, workspace scope, acknowledge/resolve, and richer lifecyc
 - repeated scans of one dark entity emit one alert per episode
 - crash API after DB write but before offset commit; replay creates no duplicate durable row
 - invalid/expired JWT is rejected for REST and WebSocket
+- WebSocket client reconnects after drop and receives the next position tick without manual refresh
 
 ## Exit Criteria
 
-A signal loss is visible end to end from detection through durable persistence and operator delivery, and every later detector can become operator-visible by publishing the canonical `alerts` contract.
+An operator opens the dashboard, sees live flights on the map, watches a flight go dark, and sees a signal loss alert appear in the alert panel — all without leaving the browser or touching the CLI. Every later detector becomes operator-visible by publishing the canonical `alerts` contract.
