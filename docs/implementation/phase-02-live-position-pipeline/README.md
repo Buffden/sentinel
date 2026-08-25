@@ -43,8 +43,8 @@ position.normalized
 | Validation and DLQ routing | Malformed records → `adsb.dlq` with rejection reason | Done — all four rejection paths verified |
 | TimescaleDB persistence | Idempotent `position_history` write; `raw_events` write; offset commit after both | Done — persistence and replay idempotency verified |
 | Redis live state | `entity:live:{entity_id}`: monotonic timestamp guard; stale-event protection | Done — monotonic guard verified |
-| H3 geo-cell indexing | `geo-cell:{cell}` sorted-set membership; cell-change ZREM/ZADD | Pending |
-| Downstream publishing | `position.normalized` Kafka publish; Redis `position-updates` pub/sub; replay and failure lab | Pending |
+| H3 geo-cell indexing | `geo-cell:{cell}` sorted-set membership; cell-change ZREM/ZADD | Done — boundary crossing, stale-event guard, and sorted-set correctness verified |
+| Downstream publishing | `position.normalized` Kafka publish; Redis `position-updates` pub/sub; replay and failure lab | Done — pub/sub gating on accepted writes only; stale events reach position.normalized but not position-updates; verified |
 
 ---
 

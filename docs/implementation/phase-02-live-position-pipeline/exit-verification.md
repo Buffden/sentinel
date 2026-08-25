@@ -86,6 +86,7 @@ Verified: 2026-08-25
 | --- | --- | --- |
 | Duplicate Kafka delivery (full replay) | No duplicate `position_history` row | 6 total rows before and after replay; `INSERT 0 0` on direct duplicate attempt |
 | Stale telemetry (older timestamp replayed) | Redis live state not regressed | `last_seen_ms` held at `1787634583000` across all 13 replayed offsets; `live_state_accepted: false` on every prior event |
+| Stale event: `position-updates` not published; `position.normalized` published | Stale events must not move UI backward; detectors still need the event | 4 events injected (baseline, +60s, equal ts, -60s); `position-updates` received exactly 2 messages (baseline and +60s, both accepted); stale-equal and older events produced no pub/sub message; all 4 events logged as `position persisted` confirming `position.normalized` published |
 | Entity crosses H3 cell boundary | Old cell membership removed; one current-cell entry | `geo-cell:87194ad33ffffff` empty; `geo-cell:87194ad36ffffff` contains entity |
 | Malformed input (`parse_error`) | Event in `adsb.dlq`; consumer does not crash | DLQ record confirmed with `rejection_reason`; consumer continued processing |
 | Missing entity ID | Event in `adsb.dlq`; consumer does not crash | DLQ record confirmed; consumer continued |
@@ -105,6 +106,7 @@ Verified: 2026-08-25
 | Stale events do not overwrite newer Redis state | PASS — monotonic guard held across full replay |
 | Malformed events land in `adsb.dlq` with a rejection reason | PASS |
 | `position.normalized` events appear in Kafka with both H3 cell IDs | PASS — `history_geo_cell` and `live_geo_cell` confirmed in payload |
+| Stale valid events reach `position.normalized` but not `position-updates` | PASS — equal-ts and older events: no pub/sub message; all 4 events confirmed processed by consumer |
 | Developer can verify all of the above using CLI tools without reading the code | PASS — all checks above use `rpk`, `redis-cli`, and `psql` only |
 
 **Phase 02 exit: COMPLETE — 2026-08-25**
