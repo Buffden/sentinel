@@ -11,9 +11,8 @@
 //        valid position                  → INSERT position_history (with H3 history cell)
 //                                          → HGET old live_geo_cell
 //                                          → updateLiveState (Redis, includes live_geo_cell)
-//                                          → updateGeoCell (ZREM old / ZADD new)
-//                                          → publishNormalized (position.normalized Kafka topic)
-//                                          → publishPositionUpdate (Redis position-updates pub/sub)
+//                                          → if accepted: updateGeoCell + publishPositionUpdate
+//                                          → publishNormalized (position.normalized, always)
 //                                          → commit
 //
 // DLQ publish failures block offset commit.
@@ -62,10 +61,22 @@
 //   nothing else. Dropping a publish silently would permanently lose the event for
 //   those services.
 //
-// publishPositionUpdate failure handling:
-//   Redis pub/sub is fire-and-forget. A missed message means a WebSocket client
-//   misses one map tick and catches up on the next position update. Failure is
-//   logged at error but does not rethrow — the offset is committed regardless.
+// publishPositionUpdate:
+//   Called ONLY when the Redis live-state write was accepted (monotonically newer
+//   event). Stale events must not publish to the live-map channel — doing so would
+//   move an entity backward on the UI.
+//   Fire-and-forget: failure is logged but does not rethrow — offset committed
+//   regardless.
+//
+// publishNormalized:
+//   Called for ALL valid normalized positions, including stale ones. Downstream
+//   detectors (Deviation Detector, Correlation Worker) evaluate every event against
+//   reference geometry or episode state — they do not rely on Redis monotonic order.
+//   Failure propagates — offset not committed; Kafka redelivers; all prior writes
+//   replay idempotently.
+//   position.normalized is at-least-once: a crash between publish and offset commit
+//   causes redelivery and a duplicate publish. Downstream consumers must tolerate
+//   duplicates.
 
 import { hostname } from 'os';
 import { Kafka, Partitioners } from 'kafkajs';
@@ -572,10 +583,15 @@ async function handleMessage(
 		// Only runs when the live state was accepted (newer event). Stale events
 		// must not mutate the sorted sets.
 		await updateGeoCell(position.entity_id, live_geo_cell, position.timestamp_ms, oldLiveGeoCell);
+
+		// Step 6: publish live-map update.
+		// Only published for accepted events — the channel represents the monotonic
+		// live view. Stale events must not push the UI to an older position.
+		await publishPositionUpdate(position, live_geo_cell);
 	} else {
 		// Stale event: a newer position for this entity is already in Redis.
 		// position_history still received the row (idempotent by observed_at),
-		// but the live state and sorted sets are not regressed.
+		// but live state, sorted sets, and the live-map channel are not updated.
 		log('warn', 'live state not updated — stale event', {
 			entity_id: position.entity_id,
 			timestamp_ms: position.timestamp_ms,
@@ -583,13 +599,11 @@ async function handleMessage(
 		});
 	}
 
-	// Step 6: publish to position.normalized Kafka topic.
+	// Step 7: publish to position.normalized Kafka topic.
+	// Published for ALL valid positions regardless of whether the Redis live-state
+	// write was accepted. Downstream detectors need every event.
 	// Blocks offset commit on failure — see top-of-file comment.
 	await publishNormalized(position, history_geo_cell, live_geo_cell);
-
-	// Step 7: publish to Redis position-updates pub/sub.
-	// Fire-and-forget — does not block offset commit on failure.
-	await publishPositionUpdate(position, live_geo_cell);
 
 	log('info', 'position persisted', {
 		entity_id: position.entity_id,

@@ -4,7 +4,7 @@
 
 ## What it is
 
-`position-updates` is a Redis pub/sub channel. The Position Consumer publishes a lightweight position snapshot to it after every accepted write. API instances subscribe and fan the update out to connected WebSocket clients for live map rendering.
+`position-updates` is a Redis pub/sub channel. The Position Consumer publishes a lightweight position snapshot to it after every **accepted** live-state write (i.e., when the Redis monotonic guard confirms the event is newer than the current hash). Stale or equal-timestamp events are not published here. API instances subscribe and fan the update out to connected WebSocket clients for live map rendering.
 
 ---
 
@@ -65,6 +65,23 @@ Full canonical fields (provider, squawk, H3 history cell, etc.) are in `position
 
 ---
 
-## At-least-once from the client's perspective
+## Redis pub/sub delivery guarantee: at-most-once
 
-The DATA_MODEL specifies WebSocket lifecycle delivery as at-least-once. Clients must tolerate duplicate position updates (e.g., if the API reconnects to Redis pub/sub and replays from a different starting point, or if multiple API instances publish to the same client). This is not a correctness concern for a live map — the client renders the most recent position it receives.
+Redis pub/sub is at-most-once, not at-least-once. A message is delivered to currently-connected subscribers exactly once — or not at all if no subscriber is present. There is no persistence, no acknowledgement, and no replay.
+
+This means:
+- If the API is not subscribed when the Position Consumer publishes, the message is silently dropped.
+- If the API subscriber disconnects and reconnects, it receives no catch-up for the gap.
+- There is no retry on publish failure (the failure is logged and the offset is committed).
+
+This is a deliberate design choice. Live map position updates are only useful now. The durable record of every position is in `position_history`.
+
+## WebSocket client duplicate tolerance: a separate concern
+
+The DATA_MODEL specifies that WebSocket lifecycle delivery (alert events and position updates reaching browser clients) is at-least-once from the client's perspective. This is a separate property from the Redis pub/sub transport:
+
+- Multiple API instances may each receive the same pub/sub message and independently push it to the same client via WebSocket.
+- An API instance reconnecting to Redis pub/sub may re-deliver a message it already sent.
+- Clients must render the position with the highest `timestamp_ms` they have received, ignoring updates that would move an entity backward.
+
+The at-least-once characterisation applies to the full path from Position Consumer to browser client, not to the Redis pub/sub hop alone.
