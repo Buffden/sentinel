@@ -18,7 +18,7 @@ Do not change without an ADR.
 | API | Express + WebSocket |
 | Dashboard | Next.js (CSR) + Blueprint.js + react-leaflet |
 | Auth | Google OAuth 2.0 + application JWT |
-| Deployment | Docker Compose → AWS |
+| Deployment | Docker Compose to AWS |
 
 Do not introduce new infrastructure silently.
 
@@ -157,6 +157,18 @@ This is a learning/pair-engineering repository. During implementation:
 - do not implement later phases opportunistically.
 
 After meaningful checkpoints, explain the data flow, guarantee being demonstrated, trade-off, relevant failure, how to inspect it manually, and the next smallest checkpoint.
+
+### Mandatory Learning Gate
+
+Before writing any code for a checkpoint, Claude must produce a teach-back covering all five points below. Do not skip or abbreviate any point. Do not open an editor until the teach-back is complete and the developer has confirmed understanding.
+
+1. **Concept** — what is the mechanism being built, and why does Sentinel need it at this stage rather than later?
+2. **Sentinel intent** — which correctness property, failure mode, or operational guarantee does this checkpoint advance? Name the guarantee explicitly (idempotency, monotonicity, leader exclusivity, etc.).
+3. **Component ownership** — which service owns the work? Which Kafka topics, Redis keys, DB tables, or Neo4j nodes does it read and write? Are there upstream producers or downstream consumers that must already exist?
+4. **Data flow** — trace the event from its source (telemetry ingestion, Kafka message, timer tick, HTTP request) through every transformation to its final durable or ephemeral destination. Name every hop.
+5. **Verification plan** — list the exact manual commands (redis-cli, kafkacat, psql, curl, logs) the developer will run to confirm the checkpoint is working, and what a passing result looks like. Include at least one failure-boundary check, not only the happy path.
+
+Only after covering all five points: write code.
 
 ---
 
