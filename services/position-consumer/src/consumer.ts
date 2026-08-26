@@ -12,6 +12,7 @@
 //                                          → HGET old live_geo_cell
 //                                          → updateLiveState (Redis, includes live_geo_cell)
 //                                          → if accepted: updateGeoCell + publishPositionUpdate
+//                                          → if accepted: clearSignalLossEpisode (recent-loss + del alert-state)
 //                                          → publishNormalized (position.normalized, always)
 //                                          → commit
 //
@@ -588,6 +589,35 @@ async function handleMessage(
 		// Only published for accepted events — the channel represents the monotonic
 		// live view. Stale events must not push the UI to an older position.
 		await publishPositionUpdate(position, live_geo_cell);
+
+		// Step 7: clear signal-loss episode state if the entity was previously dark.
+		// An accepted position means the entity has resumed transmitting. If the
+		// Alert Evaluator emitted a SIGNAL_LOSS alert for this entity, the episode
+		// gate (alert-state:{entity_id}) must be cleared so a future silence can
+		// open a new episode with a new alert_id.
+		//
+		// recent-loss is written first so Phase 06 (composite correlation) can
+		// read the prior episode's dark_since_ms and signal_loss_alert_id.
+		// alert-state is deleted second. A crash between the two leaves both keys
+		// present; the next accepted position for this entity will complete the
+		// cleanup — recent-loss HSET is idempotent and DEL on a missing key is safe.
+		const alertStateKey = `alert-state:${position.entity_id}`;
+		const alertState = await redis.hgetall(alertStateKey);
+		if (alertState && alertState['dark_since_ms']) {
+			await redis.hset(
+				`recent-loss:${position.entity_id}`,
+				'dark_since_ms', alertState['dark_since_ms'],
+				'resumed_at_ms', String(position.timestamp_ms),
+				'signal_loss_alert_id', alertState['signal_loss_alert_id'] ?? '',
+			);
+			await redis.del(alertStateKey);
+			log('info', 'signal loss episode cleared', {
+				entity_id: position.entity_id,
+				dark_since_ms: alertState['dark_since_ms'],
+				resumed_at_ms: position.timestamp_ms,
+				signal_loss_alert_id: alertState['signal_loss_alert_id'],
+			});
+		}
 	} else {
 		// Stale event: a newer position for this entity is already in Redis.
 		// position_history still received the row (idempotent by observed_at),
@@ -599,7 +629,7 @@ async function handleMessage(
 		});
 	}
 
-	// Step 7: publish to position.normalized Kafka topic.
+	// Step 8: publish to position.normalized Kafka topic.
 	// Published for ALL valid positions regardless of whether the Redis live-state
 	// write was accepted. Downstream detectors need every event.
 	// Blocks offset commit on failure — see top-of-file comment.
