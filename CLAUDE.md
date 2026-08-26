@@ -182,7 +182,7 @@ A checkpoint is not complete because Claude wrote the code or tests pass.
 
 ### Dashboard Visual Language
 
-- Before any phase that introduces or changes operator-visible UI, create a low-fidelity mockup (SVG or PNG) consistent with `docs/ui/sentinel-dashboard-reference.png`, covering all behavior delivered by prior phases so the dashboard evolves as one product rather than disconnected screens.
+- Before any phase that introduces or changes operator-visible UI, create a low-fidelity SVG mockup first and save it with the relevant phase/concept documentation. Use PNG only when SVG is unsuitable. The mockup must follow `docs/ui/sentinel-dashboard-reference.png` and include all relevant operator-visible behavior delivered by prior phases so the dashboard evolves cumulatively as one product. Show the mockup to the developer and obtain approval before beginning frontend implementation.
 - Dark map-first operational interface: deep navy/graphite backgrounds, blue-gray borders, electric-blue interaction accents, compact typography, low-radius panels, high information density. Inspired by data-dense operational systems; do not copy proprietary UI.
 - Consistent shell: compact top nav, filter/navigation rail, central map workspace, contextual detail/alert panels, event timeline where the feature requires it. Extend existing patterns; do not redesign the layout per phase.
 - Semantic status colors: green = live/healthy, amber = warning/elevated, red = critical/lost, blue = informational/interactive/selected, gray = secondary/disabled. Do not invent page-specific colors.
