@@ -1,0 +1,94 @@
+@startuml signal-loss-flow
+title Alert Evaluator — Signal Loss Detection Flow
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:Evaluator instance starts up;
+note right
+  Multiple instances can run for
+  redundancy, but only one should
+  scan and emit alerts at a time.
+  They compete for the active role.
+end note
+
+:Compete for the active scanner role\n(atomic claim in Redis);
+
+if (Won the claim?) then (no)
+  :Stand by as a backup\nand wait for the active\ninstance to go away;
+  stop
+endif
+
+note right
+  The active instance holds a short-lived
+  claim and keeps renewing it on a fixed
+  interval. If it crashes, the claim
+  expires and a backup takes over.
+end note
+
+repeat
+
+  :Wait SCAN_INTERVAL_MS;
+
+  :Renew the active claim;
+
+  if (Claim still ours?) then (no)
+    :Another instance took over.\nStop scanning;
+    stop
+  endif
+
+  :Check every known entity\n(read from Redis live state);
+  note right
+    MVP: full scan of entity:live:* keys.
+    Production: maintain a sorted set
+    by last_seen_ms and only scan
+    entities near the silence threshold.
+  end note
+
+  partition "For each entity" {
+
+    if (Entity is on the ground?) then (yes)
+      :Skip — ground entities\nlegitimately go quiet;
+    elseif (No position ever received?) then (yes)
+      :Skip — nothing to compare;
+    elseif (now - last_seen_ms\n< SIGNAL_LOSS_THRESHOLD_MS?) then (yes)
+      :Skip — entity is active;
+    elseif (alert-state:{entity_id} exists?) then (yes)
+      :Skip — episode already open\nfor this entity;
+    else (Silent beyond threshold\nand no open episode)
+      :Derive dark_since_ms\n= last_seen_ms at scan time;
+      :Build deterministic alert_id:\n{entity_id}:SIGNAL_LOSS:{dark_since_ms};
+      :Publish SIGNAL_LOSS alert\nto Kafka alerts topic;
+      note right
+        alert_id is deterministic.
+        If this message is delivered
+        twice, the API's idempotent
+        DB write absorbs the duplicate.
+      end note
+      :Write alert-state:{entity_id}\nto Redis as a scan-skip cache;
+      note right
+        Written after publish.
+        If the process crashes here,
+        the next scan re-publishes.
+        The deterministic alert_id
+        keeps the DB correct.
+      end note
+    endif
+
+  }
+
+repeat while (Still the active scanner?)
+
+stop
+
+@enduml
