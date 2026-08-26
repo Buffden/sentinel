@@ -180,6 +180,16 @@ A checkpoint is not complete because Claude wrote the code or tests pass.
 - When uncertain, inspect actual system state rather than guessing.
 - Every service from its first checkpoint must have structured logs and observable behavior; do not defer instrumentation to a later phase.
 
+### Dashboard Visual Language
+
+- Before any phase that introduces or changes operator-visible UI, create a low-fidelity mockup (SVG or PNG) consistent with `docs/ui/sentinel-dashboard-reference.png`, covering all behavior delivered by prior phases so the dashboard evolves as one product rather than disconnected screens.
+- Dark map-first operational interface: deep navy/graphite backgrounds, blue-gray borders, electric-blue interaction accents, compact typography, low-radius panels, high information density. Inspired by data-dense operational systems; do not copy proprietary UI.
+- Consistent shell: compact top nav, filter/navigation rail, central map workspace, contextual detail/alert panels, event timeline where the feature requires it. Extend existing patterns; do not redesign the layout per phase.
+- Semantic status colors: green = live/healthy, amber = warning/elevated, red = critical/lost, blue = informational/interactive/selected, gray = secondary/disabled. Do not invent page-specific colors.
+- Reuse shared design tokens for color, typography, spacing, borders, panels, controls, and map overlays. Avoid ad-hoc CSS values when a shared token or pattern exists.
+- No glassmorphism, decorative gradients, excessive rounding, consumer-app styling, or animation without operational meaning.
+- Implementation must match the approved mockup in layout, information hierarchy, major controls, and interaction patterns. If a significant change is unavoidable, update the design reference intentionally rather than diverging silently.
+
 ---
 
 ## Hard Constraints
