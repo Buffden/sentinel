@@ -4,5 +4,5 @@ Concept notes and debrief for the Alert Evaluator leader election implementation
 
 | File | What's inside |
 | --- | --- |
-| [leader-election-design.md](leader-election-design.md) | Why only one evaluator should scan at a time, the Redis lease approach, ownership-safe acquire/renew/release, Lua guard scripts, and failure modes |
-| [leader-election-debrief.md](leader-election-debrief.md) | Observed outputs from running the leader election and follower takeover experiments |
+| [leader-election.md](leader-election.md) | Design rationale, plain-language concept walkthrough, Lua scripts, failure modes, ASCII flow, code map, Redis lab, retention questions, and CP1 completion checklist |
+| [leader-election-debrief.md](leader-election-debrief.md) | Observed outputs from running the leader election and follower takeover experiments, including checkpoint completion debrief |

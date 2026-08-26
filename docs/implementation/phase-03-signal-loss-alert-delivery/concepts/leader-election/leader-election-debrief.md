@@ -184,6 +184,53 @@ docker exec sentinel-redis redis-cli DEL alert-evaluator:leader
 
 ---
 
+## Checkpoint Completion
+
+### Engineering debrief
+
+**Data flow:** on startup each instance attempts `SET alert-evaluator:leader {instanceId} PX 15000 NX`. The one that gets `OK` becomes leader and starts a scan loop. Every 5s it runs the Lua renewal script; if renewal returns 0 or throws, it aborts the current leader session via `AbortController` and reverts to follower polling. Followers poll every 5s. On graceful shutdown the leader runs the Lua release script so a follower can acquire immediately rather than waiting up to 15s for TTL expiry.
+
+**Main trade-off:** Redis-based leader election is simple and reuses existing infrastructure, but it is not linearizable. On a Redis Sentinel or Cluster primary failover, a brief window exists where two instances could both acquire the key. This is acceptable because the deterministic `alert_id` and idempotent DB write absorb any duplicate alert downstream. Leader election is an efficiency mechanism, not a correctness requirement.
+
+**Failure behaviour:** a crashed leader's key expires within `LEADER_LEASE_TTL_MS` (15s). A follower acquires within one additional `FOLLOWER_RETRY_INTERVAL_MS` (5s). Maximum gap with no active leader: 20s. A Redis connectivity loss during renewal is treated as lease loss (fail closed) so the instance stops scanning rather than continuing without confirmed ownership.
+
+### Manual inspection commands
+
+```bash
+# Is a leader currently elected?
+docker exec sentinel-redis redis-cli GET alert-evaluator:leader
+
+# How long until the key expires?
+docker exec sentinel-redis redis-cli PTTL alert-evaluator:leader
+
+# Simulate crash and watch TTL drain
+pkill -9 -f "src/evaluator.ts"
+watch -n1 'docker exec sentinel-redis redis-cli PTTL alert-evaluator:leader'
+
+# Force lease loss on a live process
+docker exec sentinel-redis redis-cli SET alert-evaluator:leader fake-instance PX 15000
+
+# Clean up between experiments
+docker exec sentinel-redis redis-cli DEL alert-evaluator:leader
+```
+
+### Knowledge-check questions
+
+1. Why does the renewal script use Lua instead of a plain `PEXPIRE` command?
+2. What is the maximum time the system can have no active leader after a crash, and which two constants determine it?
+3. Why is `AbortController` used per leader session rather than a shared boolean flag? What failure does it prevent?
+4. Why does a Redis connectivity error during renewal revert the instance to follower rather than letting it continue scanning?
+
+### Optional manual tweak
+
+Lower `FOLLOWER_RETRY_INTERVAL_MS` to `2000` in `evaluator.ts`, crash the leader with `pkill`, and observe that the follower acquires in under 5s. Then restore it to `5000`. This makes the relationship between the retry interval and takeover latency concrete.
+
+### Next checkpoint
+
+Signal-loss scan (CP2): replace the `runScan()` placeholder in `evaluator.ts` with the real scan — iterate all `entity:live:*` keys, compare `last_seen_ms` against `SIGNAL_LOSS_THRESHOLD_MS`, gate on `alert-state:{entity_id}`, write the episode state, and publish a deterministic `SIGNAL_LOSS` alert to the `alerts` Kafka topic.
+
+---
+
 ## Key observations
 
 | Concept | Observed |
