@@ -19,7 +19,7 @@ SELECT hypertable_name, column_name, time_interval
 FROM timescaledb_information.dimensions
 WHERE hypertable_name = 'position_history';
 
--- Retention policy (expect 30-day policy on position_history)
+-- Retention policy (expect 48-hour policy on position_history)
 SELECT * FROM timescaledb_information.jobs WHERE proc_name = 'policy_retention';
 
 -- All indexes on position_history

@@ -12,11 +12,12 @@ CREATE TABLE IF NOT EXISTS position_history (
 );
 
 -- Partition by observed_at only
--- chunk_time_interval: 1 day (canonical)
+-- chunk_time_interval: 1 hour — divides the 48-hour retention window into 48 clean chunks;
+-- each chunk is dropped atomically by the retention policy rather than via row-level DELETE
 SELECT create_hypertable(
     'position_history',
     'observed_at',
-    chunk_time_interval => INTERVAL '1 day',
+    chunk_time_interval => INTERVAL '1 hour',
     if_not_exists => TRUE
 );
 
@@ -34,10 +35,11 @@ CREATE INDEX IF NOT EXISTS position_history_entity_time_idx
 CREATE INDEX IF NOT EXISTS position_history_geocell_time_idx
     ON position_history (geo_cell, observed_at DESC);
 
--- 30-day automatic retention: drops entire time chunks, not row-by-row 
+-- 48-hour automatic retention: drops entire time chunks, not row-by-row.
+-- 48 hours covers all v1 use cases (Redis reconstruction, route deviation, investigation).
 SELECT add_retention_policy(
     'position_history',
-    INTERVAL '30 days',
+    INTERVAL '48 hours',
     if_not_exists => TRUE
 );
 COMMIT;
