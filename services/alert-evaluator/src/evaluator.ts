@@ -12,57 +12,54 @@ const instanceId = randomUUID();
 const redis = new Redis({ host: 'localhost', port: 6379 });
 const leader = new LeaderElection(redis, instanceId);
 
-let scanning = false;
-
 async function runScan(): Promise<void> {
   // Scan placeholder — signal-loss detection added in CP2.
   console.info({ instanceId }, 'leader scan tick');
 }
 
-async function startLeader(): Promise<void> {
-  scanning = true;
-  console.info({ instanceId }, 'acquired leader lease — starting scan loop');
+// Each time this instance becomes leader it gets a fresh AbortController.
+// When the lease is lost (or revoked), the controller is aborted, which
+// unblocks the sleeping loop immediately and stops it before the next tick.
+// This prevents the previous-session loop from waking up and running
+// alongside a newly started session.
+async function runLeaderSession(): Promise<void> {
+  const ac = new AbortController();
 
   leader.startRenewal(() => {
-    // Lease lost mid-run: stop the scan loop immediately.
-    scanning = false;
-    console.warn({ instanceId }, 'lease lost — reverting to follower');
-    startFollower();
+    console.warn({ instanceId }, 'lease lost — aborting leader session');
+    ac.abort();
   });
 
-  while (scanning) {
+  console.info({ instanceId }, 'acquired leader lease — starting scan loop');
+
+  while (!ac.signal.aborted) {
     await runScan();
-    await sleep(SCAN_INTERVAL_MS);
+    await sleep(SCAN_INTERVAL_MS, ac.signal);
   }
-}
 
-async function startFollower(): Promise<void> {
-  console.info({ instanceId }, 'running as follower — waiting for leader lease');
-
-  while (true) {
-    await sleep(FOLLOWER_RETRY_INTERVAL_MS);
-    const acquired = await leader.tryAcquire();
-    if (acquired) {
-      await startLeader();
-      return;
-    }
-  }
+  // Stop the renewal timer now that the loop has exited cleanly.
+  leader.stopRenewal();
 }
 
 async function main(): Promise<void> {
   console.info({ instanceId }, 'alert evaluator starting');
 
-  const acquired = await leader.tryAcquire();
-  if (acquired) {
-    await startLeader();
-  } else {
-    await startFollower();
+  // Single loop: try to acquire, run as leader, then fall back to polling.
+  // No separate startLeader / startFollower distinction needed — the main
+  // loop already serialises the two roles cleanly.
+  while (true) {
+    const acquired = await leader.tryAcquire();
+    if (acquired) {
+      await runLeaderSession();
+    } else {
+      console.info({ instanceId }, 'running as follower — waiting for leader lease');
+    }
+    await sleep(FOLLOWER_RETRY_INTERVAL_MS);
   }
 }
 
 async function shutdown(): Promise<void> {
   console.info({ instanceId }, 'shutting down');
-  scanning = false;
   leader.stopRenewal();
   await leader.release();
   await redis.quit();
@@ -76,6 +73,12 @@ main().catch((err) => {
   process.exit(1);
 });
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Resolves after `ms` milliseconds, or immediately if the signal is already
+// aborted or fires before the timer expires.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) { resolve(); return; }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
 }

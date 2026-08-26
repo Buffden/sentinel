@@ -58,9 +58,17 @@ export class LeaderElection {
   // Must only be called after tryAcquire() returns true.
   startRenewal(onLeaseLost: () => void): void {
     this.renewalTimer = setInterval(async () => {
-      const renewed = await this.renew();
-      if (!renewed) {
-        console.warn({ instanceId: this.instanceId }, 'leader lease lost — stopping renewal');
+      try {
+        const renewed = await this.renew();
+        if (!renewed) {
+          console.warn({ instanceId: this.instanceId }, 'leader lease lost — stopping renewal');
+          this.stopRenewal();
+          onLeaseLost();
+        }
+      } catch (err) {
+        // Redis error means we cannot confirm ownership. Fail closed: treat as lease loss.
+        // Continuing to scan without confirmed ownership would risk duplicate work.
+        console.error({ instanceId: this.instanceId, err }, 'renewal error — treating as lease loss');
         this.stopRenewal();
         onLeaseLost();
       }

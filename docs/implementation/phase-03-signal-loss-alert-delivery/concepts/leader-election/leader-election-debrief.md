@@ -105,7 +105,7 @@ Observed logs:
 | Check | Expected | Observed |
 | --- | --- | --- |
 | Follower acquires after leader crash | yes | PASS |
-| Takeover within LEADER_LEASE_TTL_MS (15s) of key expiry | yes | PASS — acquired ~15s after crash |
+| Takeover within LEADER_LEASE_TTL_MS + FOLLOWER_RETRY_INTERVAL_MS (15s + 5s = 20s max) | yes | PASS — acquired ~15s after crash (follower retry landed just after key expired) |
 | Scan tick appears on new leader | yes | PASS |
 | No shutdown log on crashed leader | yes | PASS — SIGKILL leaves no cleanup |
 
@@ -132,6 +132,58 @@ to 15s for TTL expiry. In practice this makes restarts and redeployments faster.
 
 ---
 
+## Experiment 5: forced lease loss and reacquisition by the same process
+
+This tests that a live instance correctly stops its scan loop when it loses ownership
+mid-run and does not start a second loop when it reacquires — the AbortController fix.
+
+Start a single evaluator and wait for a scan tick:
+
+```bash
+node_modules/.bin/tsx src/evaluator.ts
+# ... acquired leader lease — starting scan loop
+# ... leader scan tick
+```
+
+While the process is running, overwrite the key to simulate another instance stealing it:
+
+```bash
+docker exec sentinel-redis redis-cli SET alert-evaluator:leader fake-other-instance PX 15000
+```
+
+The renewal fires within 5s. Because the Lua script sees a different owner, it returns 0.
+The `onLeaseLost` callback fires, `ac.abort()` is called, and the scan loop exits cleanly:
+
+```
+{ instanceId: '...' } lease lost — aborting leader session
+```
+
+The main loop then falls back to follower polling. When the injected key expires (~15s),
+the instance reacquires:
+
+```
+{ instanceId: '...' } running as follower — waiting for leader lease
+{ instanceId: '...' } acquired leader lease — starting scan loop
+{ instanceId: '...' } leader scan tick
+```
+
+Key check: only one scan tick per interval throughout. No double-tick when the instance
+reacquires, confirming there is no lingering loop from the previous session.
+
+```bash
+# Delete the injected key early to speed up reacquisition
+docker exec sentinel-redis redis-cli DEL alert-evaluator:leader
+```
+
+| Check | Expected | Observed |
+| --- | --- | --- |
+| Scan loop stops within one renewal interval after forced loss | yes | PASS — stopped within 5s |
+| No scan tick between loss and reacquisition | yes | PASS |
+| Exactly one scan tick per interval after reacquisition | yes | PASS — single tick, no double-fire |
+| Process stays alive throughout (no crash) | yes | PASS |
+
+---
+
 ## Key observations
 
 | Concept | Observed |
@@ -141,5 +193,7 @@ to 15s for TTL expiry. In practice this makes restarts and redeployments faster.
 | Lua release guards ownership — foreign key not deleted | PASS |
 | `kill -9` on npm/tsx wrapper does not kill tsx child process | Confirmed — use `pkill -f` to simulate true crash |
 | Key expires ~12s after true crash (LEADER_LEASE_TTL_MS=15s, renewal at 5s intervals) | PASS |
-| Follower acquires within one TTL window after crash | PASS — ~15s total takeover |
+| Follower acquires within LEADER_LEASE_TTL_MS + FOLLOWER_RETRY_INTERVAL_MS (20s max) after crash | PASS — ~15s total takeover |
 | Graceful shutdown releases key immediately via Lua script | PASS |
+| Redis renewal error treated as lease loss (fail closed) | PASS — try/catch in startRenewal propagates to onLeaseLost |
+| AbortController prevents dual scan loops after reacquisition | PASS — old session aborts cleanly; new session starts fresh controller |
