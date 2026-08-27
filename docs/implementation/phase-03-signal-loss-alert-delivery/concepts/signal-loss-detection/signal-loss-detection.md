@@ -4,6 +4,8 @@ Plain language first, then technical depth, then the code. Use this to understan
 
 ---
 
+![Signal-Loss Detection Flow](../../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/signal-loss-flow.svg)
+
 ## What this checkpoint adds
 
 CP1 gave the Alert Evaluator leader election: one instance holds the lease, the rest stand by. The scan loop existed but `runScan()` was a stub that only printed a log line.

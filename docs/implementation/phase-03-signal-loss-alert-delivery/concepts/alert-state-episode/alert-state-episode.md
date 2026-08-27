@@ -6,7 +6,7 @@ CP2 proved one alert fires per dark period. CP3 verifies the full cycle: dark â†
 
 ## The four states
 
-See `episode-state-machine.excalidraw` for the full diagram.
+![Episode State Machine](../../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/alert-state-episode/episode-state-machine.svg)
 
 ```
 TRACKING  entity sending positions within threshold
