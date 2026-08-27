@@ -47,6 +47,9 @@ dashboard/node_modules/
 *.swo
 .DS_Store
 
+# Claude Code project memory
+.claude/
+
 # Logs
 *.log
 logs/
