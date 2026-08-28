@@ -168,10 +168,10 @@ Processing order per message:
 
 1. Parse and validate the alert payload.
 2. Idempotently persist to TimescaleDB `alerts` table using `INSERT ... ON CONFLICT (alert_id) DO NOTHING`. `alerts` is a plain PostgreSQL table, not a hypertable.
-3. Deliver the alert to all WebSocket clients currently connected to this API instance.
+3. Publish the alert lifecycle event to Redis `alert-events`. WebSocket clients receive it via the pub/sub subscription established on connect.
 4. Commit the Kafka offset.
 
-A crash between steps 3 and 4 causes redelivery. The DB insert is idempotent. The WebSocket delivery may happen twice. Dashboard must deduplicate by `alert_id`.
+A crash at any point before step 4 causes Kafka to redeliver. The DB insert is idempotent. The Redis publish and WebSocket delivery may happen twice — clients deduplicate by `alert_id`.
 
 **`GET /alerts`:**
 

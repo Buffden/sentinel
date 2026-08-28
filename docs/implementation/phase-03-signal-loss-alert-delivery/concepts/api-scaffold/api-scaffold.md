@@ -56,7 +56,7 @@ The Alert Evaluator publishes to Kafka. The API consumes from Kafka and writes t
 - The API can restart and replay from the last committed offset — recovering any alerts missed while it was down.
 - `ON CONFLICT (alert_id) DO NOTHING` makes the insert idempotent: replaying the same Kafka message never creates a duplicate row.
 
-Offset is committed only after the DB write succeeds. A crash between write and commit causes Kafka to redeliver — the idempotent insert absorbs it.
+The commit order is: DB write → Redis `alert-events` publish → Kafka offset commit. A crash at any point before the offset commit causes Kafka to redeliver — the idempotent insert absorbs the duplicate DB write, and the Redis publish and WebSocket delivery may happen twice but clients deduplicate by `alert_id`.
 
 ### 6. WebSocket auth — cookie on upgrade
 
@@ -78,9 +78,9 @@ WebSocket upgrades follow the same path: the browser sends the cookie on the upg
 
 ## Alert sink data flow
 
-The API consumer (group `api`) reads each message, parses it, inserts into TimescaleDB with `ON CONFLICT (alert_id) DO NOTHING`, publishes to connected WebSocket clients, then commits the offset.
+The API consumer (group `api`) reads each message, parses it, inserts into TimescaleDB with `ON CONFLICT (alert_id) DO NOTHING`, publishes the alert lifecycle event to Redis `alert-events`, then commits the offset. WebSocket clients receive the event via the `alert-events` pub/sub subscription established on connect.
 
-Crash between DB write and offset commit: Kafka redelivers. Second `INSERT` hits `ON CONFLICT DO NOTHING` — no duplicate row. WebSocket delivery may happen twice — clients deduplicate by `alert_id`.
+Crash between DB write and offset commit: Kafka redelivers. The second `INSERT` hits `ON CONFLICT DO NOTHING` — no duplicate row. The Redis publish and WebSocket delivery may happen twice — clients deduplicate by `alert_id`.
 
 ---
 
@@ -130,7 +130,7 @@ Crash between DB write and offset commit: Kafka redelivers. Second `INSERT` hits
 | Sentinel JWT sign | `jsonwebtoken.sign({ user_id, email }, JWT_SECRET, { expiresIn })` — `auth.ts` |
 | HttpOnly cookie | `res.cookie('sentinel_jwt', token, { httpOnly: true, secure: true, sameSite: 'strict' })` |
 | JWT middleware | `jsonwebtoken.verify(token, JWT_SECRET)` — `middleware/auth.ts` |
-| Alert sink consumer | Kafka consumer group `api`; `eachMessage` → INSERT → WS publish → commit |
+| Alert sink consumer | Kafka consumer group `api`; `eachMessage` → INSERT → Redis `alert-events` publish → commit |
 | Idempotent insert | `INSERT INTO alerts ... ON CONFLICT (alert_id) DO NOTHING` |
 | WS upgrade gate | Verify JWT from `req.cookies.sentinel_jwt` before `wss.handleUpgrade` |
 
