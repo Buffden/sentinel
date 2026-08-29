@@ -76,6 +76,14 @@ WebSocket upgrades follow the same path: the browser sends the cookie on the upg
 
 ---
 
+## Guarantee
+
+JWT validation is stateless. The API verifies the signature and expiry locally on every request using only `JWT_SECRET` — no Redis lookup, no TimescaleDB query, no network call. A token signed with the wrong secret or past its `exp` is rejected deterministically.
+
+This means there is no server-side session to invalidate. Logging out means deleting the cookie on the client. If the secret rotates, all outstanding cookies become invalid immediately — every active session is logged out with no warning. This is an accepted trade-off in v1.
+
+---
+
 ## Alert sink data flow
 
 The API consumer (group `api`) reads each message, parses it, inserts into TimescaleDB with `ON CONFLICT (alert_id) DO NOTHING`, publishes the alert lifecycle event to Redis `alert-events`, then commits the offset. WebSocket clients receive the event via the `alert-events` pub/sub subscription established on connect.
@@ -94,6 +102,9 @@ Crash between DB write and offset commit: Kafka redelivers. The second `INSERT` 
 | Expired JWT on WS upgrade | Upgrade rejected; no connection |
 | API crashes after DB write, before offset commit | Kafka redelivers; `ON CONFLICT DO NOTHING`; no duplicate row |
 | Google token verification fails | 401; user not logged in |
+| `JWT_SECRET` rotated while sessions are active | All outstanding cookies immediately invalid; every operator is logged out |
+| Google verification endpoint unreachable | `verifyIdToken()` throws; login fails; operator cannot authenticate until Google is reachable; no mitigation in v1 |
+| API server clock skew | Tokens appear expired before their actual `exp` or valid past it; server time must be NTP-synced |
 
 ---
 
@@ -113,11 +124,12 @@ Crash between DB write and offset commit: Kafka redelivers. The second `INSERT` 
 
 1. Complete Google OAuth in the browser. In DevTools, go to Application → Cookies and confirm `sentinel_jwt` is marked HttpOnly, Secure, and SameSite: Strict.
 2. Decode the JWT payload by copying the token from DevTools and splitting on `.` to base64-decode the middle segment. Confirm it contains `user_id`, `email`, `iat`, and `exp`, and that `exp` is in the future.
-3. Hit a protected endpoint without a cookie and confirm a 401 response.
-4. Hit with a garbage token value and confirm a 401 response.
-5. After login, hit `GET /alerts` with the real cookie and confirm a 200 with the alert array.
-6. Verify idempotent sink: query `SELECT COUNT(*), COUNT(DISTINCT alert_id) FROM alerts;` — both counts must be equal.
-7. Replay test: seek the `api` consumer group to offset 0 and restart the API. Row count must not increase.
+3. Query TimescaleDB and confirm your user row was upserted: `SELECT user_id, email, last_login_at FROM users;`
+4. Hit a protected endpoint without a cookie and confirm a 401 response.
+5. Hit with a garbage token value and confirm a 401 response.
+6. After login, hit `GET /alerts` with the real cookie and confirm a 200 with the alert array.
+7. Verify idempotent sink: query `SELECT COUNT(*), COUNT(DISTINCT alert_id) FROM alerts;` — both counts must be equal.
+8. Replay test: seek the `api` consumer group to offset 0 and restart the API. Row count must not increase.
 
 ---
 
