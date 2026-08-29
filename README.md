@@ -2,7 +2,7 @@
 
 A real-time geospatial entity-tracking and rule-based anomaly-correlation platform. Sentinel ingests ADS-B/AIS positional telemetry, maintains current and historical entity state, detects rule-based anomalies, correlates weak signals, and surfaces operator-visible alerts on a Next.js + Blueprint.js dashboard.
 
-Sentinel is a portfolio/learning project designed to demonstrate distributed-systems reasoning: streaming ingestion, replay/idempotency, polyglot persistence, leader election, geospatial indexing, stateful correlation, and observable failure behavior.
+Sentinel is built to production distributed-systems reasoning standards: streaming ingestion with replay safety, idempotent polyglot persistence, leader election, geospatial indexing, stateful multi-signal correlation, and observable failure behavior at every boundary.
 
 ---
 
@@ -44,7 +44,7 @@ Sentinel is a portfolio/learning project designed to demonstrate distributed-sys
 - AISHub — AIS aggregator; eligibility/access must be verified.
 - Synthetic load generator — deterministic anomaly injection for demos and tests.
 
-This is a non-commercial portfolio/learning project. Third-party source terms and attribution requirements must be respected; see `NOTICE`.
+Third-party source terms and attribution requirements must be respected; see `NOTICE`.
 
 ---
 
