@@ -12,7 +12,7 @@ link r1 to r2--><!--MD5=[c691c5bb4c5f5a6b26f39039d0e3c8dd]
 link r1 to cA--><path d="M263,345.2088 C263,396.0188 263,490.9688 263,490.9688 C263,490.9688 405.38,490.9688 405.38,490.9688 " fill="none" id="r1-&gt;cA" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="410.38,490.9688,401.38,486.9688,405.38,490.9688,401.38,494.9688,410.38,490.9688" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="91" x="377" y="403.1074">last consumed</text><text fill="#000000" font-family="monospace" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="91" x="377" y="417.0762">by this group</text><!--MD5=[7156777b4741e6490eecf74c4100525d]
 link r0 to cB--><path d="M207.33,162.0788 C207.33,204.6787 207.33,275.9688 207.33,275.9688 C207.33,275.9688 870.76,275.9688 870.76,275.9688 " fill="none" id="r0-&gt;cB" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="875.76,275.9688,866.76,271.9688,870.76,275.9688,866.76,279.9688,875.76,275.9688" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="91" x="346" y="204.1074">last consumed</text><text fill="#000000" font-family="monospace" font-size="12" lengthAdjust="spacingAndGlyphs" textLength="91" x="346" y="218.0762">by this group</text><!--MD5=[69316d4583fc1065ce2dec5568e9ebb4]
 link log to GMN15--><path d="M327.0865,313.9688 C327.254,313.9688 327.4239,313.9688 327.5962,313.9688 C333.11,313.9688 341.055,313.9688 350.78,313.9688 " fill="none" id="log-GMN15" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[161ab9a18899b14090dd35519bbab439]
-link groupA to GMN18--><path d="M375,443.7985 C375,443.4702 375,443.1443 375,442.821 C375,442.1744 375,441.5381 375,440.9128 C375,439.6622 375,438.4556 375,437.2988 C375,428.0438 375,421.9688 375,421.9688 C375,421.9688 782.75,421.9688 782.75,421.9688 C782.75,421.9688 782.75,464.2888 782.75,495.6988 " fill="none" id="groupA-GMN18" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[4aa634c0f0000221b4826714bdb63c71]
+link groupA to GMN18--><path d="M375,443.7985 C375,443.4702 375,443.1443 375,442.821 C375,442.1744 375,441.5381 375,440.9128 C375,439.6622 375,438.4556 375,437.2988 C375,428.0438 375,421.9688 375,421.9688 C375,421.9688 782.75,421.9688 782.75,421.9688 C782.75,421.9688 782.75,464.2888 782.75,495.6988 " fill="none" id="groupA-GMN18" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[c9905b0e494dc1ede21f6764f8ec7e5c]
 @startuml offset-model
 title Three Offset Concepts: Partition Log and Consumer Groups
 
@@ -74,7 +74,7 @@ PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
 (GPL source distribution)
 Java Runtime: OpenJDK Runtime Environment
 JVM: OpenJDK 64-Bit Server VM
-Java Version: 17.0.20+8
+Java Version: 17.0.20.1+1
 Operating System: Linux
 Default Encoding: UTF-8
 Language: en

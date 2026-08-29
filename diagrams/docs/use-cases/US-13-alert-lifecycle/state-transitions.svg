@@ -6,7 +6,7 @@ link ACKNOWLEDGED to RESOLVED--><path d="M232.13,349.6931 C195.1,377.3431 134.7,
 link NEW to SUPERSEDED--><path d="M285,194.1431 C291.84,200.8731 299.96,207.5331 308.61,211.9531 C477.26,298.0331 602.87,146.5131 727.61,288.9531 C766.59,333.4531 770.17,376.2531 732.61,421.9531 C688.89,475.1531 647.07,433.9031 580.61,451.9531 C576.45,453.0831 572.18,454.3331 567.89,455.6431 " fill="none" id="NEW-&gt;SUPERSEDED" style="stroke: #333333; stroke-width: 1.0;"/><polygon fill="#333333" points="562.86,457.2131,572.6423,458.3566,567.6339,455.7266,570.2639,450.7183,562.86,457.2131" style="stroke: #333333; stroke-width: 1.0;"/><text fill="#000000" font-family="sans-serif" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="178" x="825.11" y="321.52">system creates COMPOSITE</text><text fill="#000000" font-family="sans-serif" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="309" x="759.61" y="336.6528">and atomically supersedes active individual alert</text><!--MD5=[51df268dad6cdf18ffd99efb14f9eafe]
 link ACKNOWLEDGED to SUPERSEDED--><path d="M302.38,349.5231 C345.86,377.2431 417.09,422.6531 462.37,451.5231 " fill="none" id="ACKNOWLEDGED-&gt;SUPERSEDED" style="stroke: #333333; stroke-width: 1.0;"/><polygon fill="#333333" points="466.67,454.2631,461.2299,446.053,462.4535,451.576,456.9305,452.7995,466.67,454.2631" style="stroke: #333333; stroke-width: 1.0;"/><text fill="#000000" font-family="sans-serif" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="178" x="480.11" y="403.02">system creates COMPOSITE</text><text fill="#000000" font-family="sans-serif" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="309" x="414.61" y="418.1528">and atomically supersedes active individual alert</text><!--MD5=[248a3f07efcbea2bc54a53dd9915037e]
 link RESOLVED to *end--><path d="M107.24,501.1531 C158.51,523.4431 236.93,557.5231 268.13,571.0931 " fill="none" id="RESOLVED-&gt;*end" style="stroke: #333333; stroke-width: 1.0;"/><polygon fill="#333333" points="272.72,573.0831,266.0505,565.8362,268.1317,571.0963,262.8716,573.1775,272.72,573.0831" style="stroke: #333333; stroke-width: 1.0;"/><!--MD5=[3cf73a79a9979a67ffb691f0eb175210]
-link SUPERSEDED to *end--><path d="M448.92,504.5531 C397.7,526.7231 325.31,558.0431 295.39,570.9931 " fill="none" id="SUPERSEDED-&gt;*end" style="stroke: #333333; stroke-width: 1.0;"/><polygon fill="#333333" points="290.63,573.0531,300.4784,573.1475,295.2183,571.0663,297.2995,565.8062,290.63,573.0531" style="stroke: #333333; stroke-width: 1.0;"/><!--MD5=[d79f798e6062cbe20acbc8fa0316fbaf]
+link SUPERSEDED to *end--><path d="M448.92,504.5531 C397.7,526.7231 325.31,558.0431 295.39,570.9931 " fill="none" id="SUPERSEDED-&gt;*end" style="stroke: #333333; stroke-width: 1.0;"/><polygon fill="#333333" points="290.63,573.0531,300.4784,573.1475,295.2183,571.0663,297.2995,565.8062,290.63,573.0531" style="stroke: #333333; stroke-width: 1.0;"/><!--MD5=[b77329a4f9b683e0bfd81e6f1a7d3c9f]
 @startuml state-transitions
 title US-13: Alert Lifecycle State Machine
 
@@ -61,7 +61,7 @@ PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
 (GPL source distribution)
 Java Runtime: OpenJDK Runtime Environment
 JVM: OpenJDK 64-Bit Server VM
-Java Version: 17.0.20+8
+Java Version: 17.0.20.1+1
 Operating System: Linux
 Default Encoding: UTF-8
 Language: en

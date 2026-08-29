@@ -59,7 +59,7 @@ reverse link TSDB to API--><path d="M1156.04,761 C1156.04,761 2275.4,761 2275.4,
 link API to REDIS--><path d="M2284.2,762.32 C2284.2,762.32 2284.2,740 2284.2,740 C2284.2,740 753.51,740 753.51,740 " fill="none" id="API-REDIS" style="stroke: #F87171; stroke-width: 2.0;"/><polygon fill="#F87171" points="748.51,740,757.51,744,753.51,740,757.51,736,748.51,740" style="stroke: #F87171; stroke-width: 2.0;"/><polygon fill="#F87171" points="2284.2,767.32,2288.2,758.32,2284.2,762.32,2280.2,758.32,2284.2,767.32" style="stroke: #F87171; stroke-width: 2.0;"/><text fill="#CDD6F4" font-family="Helvetica" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="128" x="1114" y="619.5669">live state + pub/sub</text><!--MD5=[a845dd7c23ef2293f1c5cd38ad0533d1]
 reverse link NEO4J to API--><path d="M390.5,754.25 C390.5,754.25 390.5,697 390.5,697 C390.5,697 2288.6,697 2288.6,697 C2288.6,697 2288.6,738.77 2288.6,767.49 " fill="none" id="NEO4J&lt;-API" style="stroke: #4ADE80; stroke-width: 2.0;"/><polygon fill="#4ADE80" points="390.5,759.25,394.5,750.25,390.5,754.25,386.5,750.25,390.5,759.25" style="stroke: #4ADE80; stroke-width: 2.0;"/><text fill="#CDD6F4" font-family="Helvetica" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="142" x="965" y="619.5669">investigation evidence</text><!--MD5=[4f584e7bc21afe314de36c5cced96543]
 reverse link GOOGLE to API--><path d="M2520.42,539 C2520.42,539 2360,539 2360,539 C2360,539 2360,701.72 2360,767.19 " fill="none" id="GOOGLE&lt;-API" style="stroke: #A78BFA; stroke-width: 2.0;"/><polygon fill="#A78BFA" points="2525.42,539,2516.42,535,2520.42,539,2516.42,543,2525.42,539" style="stroke: #A78BFA; stroke-width: 2.0;"/><!--MD5=[078dca9bad9b9a9d7ee270d51e1f1ea9]
-link API to DASH--><path d="M2270.82,794 C2207.58,794 2129,794 2129,794 C2129,794 2129,1039.89 2129,1039.89 " fill="none" id="API-&gt;DASH" style="stroke: #94A3B8; stroke-width: 2.0;"/><polygon fill="#94A3B8" points="2129,1044.89,2133,1035.89,2129,1039.89,2125,1035.89,2129,1044.89" style="stroke: #94A3B8; stroke-width: 2.0;"/><!--MD5=[ea24f2a7206789cb314bfb0b22d7ccf2]
+link API to DASH--><path d="M2270.82,794 C2207.58,794 2129,794 2129,794 C2129,794 2129,1039.89 2129,1039.89 " fill="none" id="API-&gt;DASH" style="stroke: #94A3B8; stroke-width: 2.0;"/><polygon fill="#94A3B8" points="2129,1044.89,2133,1035.89,2129,1039.89,2125,1035.89,2129,1044.89" style="stroke: #94A3B8; stroke-width: 2.0;"/><!--MD5=[2b5497f939d29c0b987722397ccbeccd]
 @startuml Sentinel Architecture
 
 skinparam linetype ortho
@@ -216,7 +216,7 @@ PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
 (GPL source distribution)
 Java Runtime: OpenJDK Runtime Environment
 JVM: OpenJDK 64-Bit Server VM
-Java Version: 17.0.20+8
+Java Version: 17.0.20.1+1
 Operating System: Linux
 Default Encoding: UTF-8
 Language: en
