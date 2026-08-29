@@ -104,5 +104,5 @@ Service-specific commands and verification steps are added as each phase becomes
 
 <div align="center">
   <sub>Copyright &copy; 2026 Harshwardhan Patil &nbsp;&middot;&nbsp; All rights reserved</sub><br>
-  <sub>Not licensed for reuse, redistribution, or commercial use &nbsp;&middot;&nbsp; Available for personal review and portfolio evaluation only</sub>
+  <sub>Not licensed for reuse, redistribution, or commercial use &nbsp;&middot;&nbsp; Available for review and evaluation purposes only</sub>
 </div>
