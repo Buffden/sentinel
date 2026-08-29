@@ -8,11 +8,11 @@ REDIS="docker exec sentinel-redis redis-cli"
 
 # Create entity live hash (canonical field shape from DATA_MODEL)
 $REDIS HSET entity:live:test-entity \
-  lat 40.7128 \
-  lon -74.0060 \
-  entity_type aircraft \
-  last_seen_ms 1700000000000 \
-  live_geo_cell 8928308280fffff
+	lat 40.7128 \
+	lon -74.0060 \
+	entity_type aircraft \
+	last_seen_ms 1700000000000 \
+	live_geo_cell 8928308280fffff
 
 # Read all fields back
 $REDIS HGETALL entity:live:test-entity
