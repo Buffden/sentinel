@@ -1,0 +1,39 @@
+@startuml auth-flow
+
+title API Auth Flow: Google OAuth + Sentinel JWT
+
+participant Browser
+participant "API" as API
+participant "Google Auth" as Google
+database "TimescaleDB\n(users)" as DB
+
+== Login ==
+
+Browser -> API : POST /auth/google\n{ id_token: "<google id token>" }
+API -> Google : verifyIdToken(id_token)
+Google --> API : { sub, email }
+API -> DB : INSERT INTO users (google_sub, email)\nON CONFLICT (google_sub) DO UPDATE
+DB --> API : user_id
+API -> API : sign Sentinel JWT\n{ user_id, email, exp }
+API --> Browser : Set-Cookie: sentinel_jwt=...\nHttpOnly; Secure; SameSite=Strict
+
+== Authenticated REST Request ==
+
+Browser -> API : GET /alerts\nCookie: sentinel_jwt=...
+API -> API : verify JWT signature + expiry\nextract user_id
+API -> DB : SELECT * FROM alerts\nWHERE ...
+DB --> API : alert rows
+API --> Browser : 200 [ alert rows ]
+
+== Authenticated WebSocket Upgrade ==
+
+Browser -> API : HTTP Upgrade (WebSocket)\nCookie: sentinel_jwt=...
+API -> API : verify JWT signature + expiry
+alt token valid
+    API --> Browser : 101 Switching Protocols
+    API --> Browser : position updates / alert events (stream)
+else token missing or invalid
+    API --> Browser : 401 Unauthorized\n(upgrade rejected)
+end
+
+@enduml

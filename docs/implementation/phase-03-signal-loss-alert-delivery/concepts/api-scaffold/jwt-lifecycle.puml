@@ -1,0 +1,57 @@
+@startuml jwt-lifecycle
+
+title JWT Lifecycle — Google ID Token vs Sentinel JWT (CP4)
+
+participant Browser
+participant "Google\n(OAuth)" as Google
+participant API
+database "TimescaleDB\n(users)" as DB
+
+== Phase 1: Google ID Token (short-lived, one-time use) ==
+
+note over Browser, Google
+  Issued by Google after OAuth consent flow.
+  Proves: "this person authenticated with Google."
+  Signed with Google's private keys. Never stored by Sentinel.
+end note
+
+Browser -> API : POST /auth/google\n{ id_token: "<google jwt>" }
+API -> Google : verifyIdToken() — verify signature\nusing Google's public keys
+Google --> API : { sub, email } — identity confirmed
+API -> DB : upsert user, get user_id
+note right of API
+  Google ID token is discarded here.
+  It is never stored or forwarded.
+end note
+
+== Phase 2: Sentinel JWT (8-hour session token) ==
+
+note over Browser, API
+  Issued by the API after Google verification.
+  Proves: "this person has an active session in Sentinel."
+  Signed with JWT_SECRET (API-owned secret).
+  Valid for 8 hours. Stored in HttpOnly cookie.
+end note
+
+API -> API : sign JWT\n{ user_id, email, iat, exp: now+8h }\nusing JWT_SECRET
+API --> Browser : Set-Cookie: sentinel_jwt=...\nHttpOnly; Secure; SameSite=Strict
+
+== Phase 3: Sentinel JWT used on every request ==
+
+Browser -> API : GET /healthz-auth\nCookie: sentinel_jwt=...
+API -> API : jwt.verify(token, JWT_SECRET)\ncheck signature + exp\nextract user_id
+note right of API
+  No network call.
+  No Redis or DB lookup.
+  Stateless — local verify only.
+end note
+API --> Browser : 200 { ok: true, user_id }
+
+== Token expiry ==
+
+note over Browser, API
+  After 8 hours: jwt.verify() throws TokenExpiredError → 401.
+  If JWT_SECRET rotates: all active cookies become invalid immediately.
+end note
+
+@enduml

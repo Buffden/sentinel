@@ -1,0 +1,35 @@
+@startuml user-upsert
+
+title User Upsert — POST /auth/google
+
+start
+
+:Receive Google ID token;
+:verifyIdToken(id_token, audience: GOOGLE_CLIENT_ID);
+
+if (verification succeeds?) then (no)
+  :401 Google token verification failed;
+  stop
+endif
+
+:extract sub, email from payload;
+
+note right
+  Single SQL statement — Postgres decides.
+  No app-side existence check.
+end note
+
+:INSERT INTO users (user_id=uuid, google_sub, email,\nlast_login_at=now, created_at=now)\nON CONFLICT (google_sub) DO UPDATE\nSET email=EXCLUDED.email,\nlast_login_at=EXCLUDED.last_login_at\nRETURNING user_id;
+
+note right
+  First login: INSERT path, new UUID assigned.
+  Returning login: UPDATE path, existing user_id returned.
+end note
+
+:sign Sentinel JWT\n{ user_id, email, exp: now+8h };
+:Set-Cookie: sentinel_jwt=...\nHttpOnly; Secure; SameSite=Strict;
+:200 { ok: true };
+
+stop
+
+@enduml

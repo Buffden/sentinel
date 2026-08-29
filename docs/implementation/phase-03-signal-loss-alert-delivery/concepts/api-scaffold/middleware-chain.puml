@@ -1,0 +1,39 @@
+@startuml middleware-chain
+
+title Express Middleware Chain — CP4
+
+|Browser|
+|Express|
+
+|Browser|
+start
+:HTTP Request;
+
+|Express|
+:express.json()\nparse JSON body;
+:cookieParser()\nparse cookies;
+
+if (path == /healthz?) then (yes)
+  :200 { ok: true };
+  stop
+endif
+
+if (path starts with /auth?) then (yes)
+  :POST /auth/google\nverify Google ID token\nupsert user\nset sentinel_jwt cookie;
+  :200 { ok: true };
+  stop
+endif
+
+:requireAuth middleware\nread sentinel_jwt cookie;
+
+if (cookie present and signature valid and not expired?) then (no)
+  :401 { error: ... };
+  stop
+endif
+
+:attach user_id and email\nto res.locals;
+
+:GET /healthz-auth\n200 { ok: true, user_id };
+stop
+
+@enduml
