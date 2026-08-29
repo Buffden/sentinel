@@ -27,7 +27,7 @@ Out of scope: workspace scope, multi-instance fan-out, acknowledge/resolve lifec
 | CP3: Episode lifecycle | Full dark → alerted → resumed → dark again cycle; second alert with new alert_id verified | Done |
 | CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade | Done |
 | CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Done |
-| CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Not started |
+| CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Done |
 | CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | Not started |
 
 ---
