@@ -166,11 +166,11 @@ const redis = new Redis(REDIS_URL, {
 const LIVE_STATE_LUA = `
 local current = redis.call('HGET', KEYS[1], 'last_seen_ms')
 if current and tonumber(current) >= tonumber(ARGV[1]) then
-  return 0
+	return 0
 end
 local fields = {}
 for i = 3, #ARGV do
-  fields[#fields + 1] = ARGV[i]
+	fields[#fields + 1] = ARGV[i]
 end
 redis.call('HSET', KEYS[1], unpack(fields))
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
@@ -230,11 +230,11 @@ async function writeRawEvent(
 ): Promise<void> {
 	await pool.query(
 		`INSERT INTO raw_events (
-      entity_id, source, provider,
-      source_topic, source_partition, source_offset,
-      received_at, source_event_time, payload
-    ) VALUES ($1, $2, $3, $4, $5, $6::bigint, NOW(), $7, $8::jsonb)
-    ON CONFLICT (source_topic, source_partition, source_offset) DO NOTHING`,
+			entity_id, source, provider,
+			source_topic, source_partition, source_offset,
+			received_at, source_event_time, payload
+		) VALUES ($1, $2, $3, $4, $5, $6::bigint, NOW(), $7, $8::jsonb)
+		ON CONFLICT (source_topic, source_partition, source_offset) DO NOTHING`,
 		[entityId, source, provider, topic, partition, offset, sourceEventTime, payload],
 	);
 }
@@ -250,21 +250,21 @@ async function writePositionHistory(position: NormalizedPosition, historyGeoCell
 	const observedAt = new Date(position.timestamp_ms);
 	await pool.query(
 		`INSERT INTO position_history (
-      entity_id, entity_type, observed_at, timestamp_ms, geo_cell,
-      lat, lon, altitude_m, source, provider,
-      baro_altitude_m, geo_altitude_m, speed_mps, course_deg, heading_deg,
-      vertical_rate_mps, on_ground, last_contact_ms, navigation_status, rate_of_turn,
-      callsign, entity_subtype, provider_category, squawk, spi, position_source,
-      position_accuracy, destination, eta, draught_m
-    ) VALUES (
-      $1, $2, $3, $4, $30,
-      $5, $6, $7, $8, $9,
-      $10, $11, $12, $13, $14,
-      $15, $16, $17, $18, $19,
-      $20, $21, $22, $23, $24, $25,
-      $26, $27, $28, $29
-    )
-    ON CONFLICT (entity_id, observed_at) DO NOTHING`,
+			entity_id, entity_type, observed_at, timestamp_ms, geo_cell,
+			lat, lon, altitude_m, source, provider,
+			baro_altitude_m, geo_altitude_m, speed_mps, course_deg, heading_deg,
+			vertical_rate_mps, on_ground, last_contact_ms, navigation_status, rate_of_turn,
+			callsign, entity_subtype, provider_category, squawk, spi, position_source,
+			position_accuracy, destination, eta, draught_m
+		) VALUES (
+			$1, $2, $3, $4, $30,
+			$5, $6, $7, $8, $9,
+			$10, $11, $12, $13, $14,
+			$15, $16, $17, $18, $19,
+			$20, $21, $22, $23, $24, $25,
+			$26, $27, $28, $29
+		)
+		ON CONFLICT (entity_id, observed_at) DO NOTHING`,
 		[
 			position.entity_id, position.entity_type, observedAt, position.timestamp_ms,
 			position.lat, position.lon, position.altitude_m, position.source, position.provider,

@@ -17,63 +17,63 @@ const COOKIE_NAME = 'sentinel_jwt';
 const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 router.post('/google', async (req, res) => {
-  const body = req.body as { id_token?: string };
-  if (!body.id_token) {
-    res.status(400).json({ error: 'id_token is required' });
-    return;
-  }
+	const body = req.body as { id_token?: string };
+	if (!body.id_token) {
+		res.status(400).json({ error: 'id_token is required' });
+		return;
+	}
 
-  let googleSub: string;
-  let email: string;
-  try {
-    const ticket = await oauthClient.verifyIdToken({
-      idToken: body.id_token,
-      audience: GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
-    if (!payload?.sub || !payload.email) {
-      res.status(401).json({ error: 'Invalid Google token payload' });
-      return;
-    }
-    googleSub = payload.sub;
-    email = payload.email;
-  } catch (err) {
-    console.error(JSON.stringify({ level: 'warn', msg: 'Google token verification failed', err: String(err) }));
-    res.status(401).json({ error: 'Google token verification failed' });
-    return;
-  }
+	let googleSub: string;
+	let email: string;
+	try {
+		const ticket = await oauthClient.verifyIdToken({
+			idToken: body.id_token,
+			audience: GOOGLE_CLIENT_ID,
+		});
+		const payload = ticket.getPayload();
+		if (!payload?.sub || !payload.email) {
+			res.status(401).json({ error: 'Invalid Google token payload' });
+			return;
+		}
+		googleSub = payload.sub;
+		email = payload.email;
+	} catch (err) {
+		console.error(JSON.stringify({ level: 'warn', msg: 'Google token verification failed', err: String(err) }));
+		res.status(401).json({ error: 'Google token verification failed' });
+		return;
+	}
 
-  // Upsert: first login creates the row; subsequent logins update last_login_at.
-  // The new UUID is only used on insert — existing user_id is preserved on conflict.
-  const now = new Date();
-  let userId: string;
-  try {
-    const result = await pool.query<{ user_id: string }>(
-      `INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
-       VALUES ($1, $2, $3, $4, $4)
-       ON CONFLICT (google_sub)
-       DO UPDATE SET email = EXCLUDED.email, last_login_at = EXCLUDED.last_login_at
-       RETURNING user_id`,
-      [randomUUID(), googleSub, email, now],
-    );
-    userId = result.rows[0]!.user_id;
-  } catch (err) {
-    console.error(JSON.stringify({ level: 'error', msg: 'DB upsert failed', err: String(err) }));
-    res.status(500).json({ error: 'Internal server error' });
-    return;
-  }
+	// Upsert: first login creates the row; subsequent logins update last_login_at.
+	// The new UUID is only used on insert — existing user_id is preserved on conflict.
+	const now = new Date();
+	let userId: string;
+	try {
+		const result = await pool.query<{ user_id: string }>(
+			`INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
+			 VALUES ($1, $2, $3, $4, $4)
+			 ON CONFLICT (google_sub)
+			 DO UPDATE SET email = EXCLUDED.email, last_login_at = EXCLUDED.last_login_at
+			 RETURNING user_id`,
+			[randomUUID(), googleSub, email, now],
+		);
+		userId = result.rows[0]!.user_id;
+	} catch (err) {
+		console.error(JSON.stringify({ level: 'error', msg: 'DB upsert failed', err: String(err) }));
+		res.status(500).json({ error: 'Internal server error' });
+		return;
+	}
 
-  const token = jwt.sign({ user_id: userId, email }, jwtSecret, { expiresIn: JWT_EXPIRES_IN });
+	const token = jwt.sign({ user_id: userId, email }, jwtSecret, { expiresIn: JWT_EXPIRES_IN });
 
-  // secure: false in development (HTTP). Must be true behind HTTPS in production.
-  res.cookie(COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: process.env['NODE_ENV'] === 'production',
-    sameSite: 'strict',
-  });
+	// secure: false in development (HTTP). Must be true behind HTTPS in production.
+	res.cookie(COOKIE_NAME, token, {
+		httpOnly: true,
+		secure: process.env['NODE_ENV'] === 'production',
+		sameSite: 'strict',
+	});
 
-  console.log(JSON.stringify({ level: 'info', msg: 'operator authenticated', user_id: userId, email }));
-  res.json({ ok: true });
+	console.log(JSON.stringify({ level: 'info', msg: 'operator authenticated', user_id: userId, email }));
+	res.json({ ok: true });
 });
 
 export { router as authRouter };
