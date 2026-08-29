@@ -1,0 +1,73 @@
+@startuml websocket-serving-flow
+
+title WebSocket Serving — Upgrade, Subscribe, Live Feed, and Hydration (CP6)
+
+participant Browser
+participant "API\n(WS Server)" as API
+database "Redis\n(pub/sub)" as Redis
+database "Redis\n(entity:live:*)" as RedisLive
+database "TimescaleDB\n(alerts)" as DB
+
+== WebSocket upgrade ==
+
+Browser -> API : HTTP Upgrade\nCookie: sentinel_jwt=...
+API -> API : verify JWT from cookie\nextract user_id
+alt token invalid or missing
+  API --> Browser : 401 Unauthorized\n(upgrade rejected)
+else token valid
+  API --> Browser : 101 Switching Protocols
+end
+
+== Client declares viewport ==
+
+Browser -> API : { type: "subscribe",\n  bbox: [minLat, minLon, maxLat, maxLon] }
+API -> API : store bbox for this connection
+
+== Redis subscriber setup (on API startup) ==
+
+API -> Redis : SUBSCRIBE position-updates alert-events
+note right of API
+  Dedicated subscriber connection.
+  Cannot issue regular Redis commands
+  on a subscribed connection.
+end note
+
+== Live position update ==
+
+Redis -> API : PUBLISH position-updates\n{ entity_id, lat, lon, timestamp_ms, ... }
+API -> API : parse lat, lon\ncheck against each connection's bbox
+alt entity within client bbox
+  API --> Browser : WS frame\n{ entity_id, lat, lon, timestamp_ms, ... }
+else entity outside bbox
+  API -> API : skip — do not forward
+end
+
+== Live alert event ==
+
+Redis -> API : PUBLISH alert-events\n{ alert_id, alert_type, status, ... }
+note right of API
+  Alert events go to all connected clients.
+  No bbox filter — alerts are global.
+end note
+API --> Browser : WS frame\n{ alert_id, alert_type, status, ... }
+
+== Dashboard hydration — GET /entities/live ==
+
+Browser -> API : GET /entities/live?bbox=minLat,minLon,maxLat,maxLon\nCookie: sentinel_jwt=...
+API -> API : requireAuth: verify JWT
+API -> RedisLive : SCAN entity:live:*\nHGETALL each hash
+API -> API : filter by bbox\nfilter stale (last_seen_ms < now - 2x threshold)\ncap at 500\nparse floats, empty string → null
+API --> Browser : 200 [ entity snapshots ]
+
+== Reconnect recovery ==
+
+note over Browser, DB
+  On WebSocket disconnect, client re-runs full hydration:
+  1. GET /entities/live  — re-seeds map from Redis live state
+  2. GET /alerts         — re-seeds alert panel from TimescaleDB
+  3. Open new WebSocket  — send subscribe with current bbox
+  Messages missed during the gap are recovered from
+  Redis and TimescaleDB, not from pub/sub replay.
+end note
+
+@enduml
