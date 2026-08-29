@@ -12,15 +12,15 @@ docker exec sentinel-redpanda rpk topic describe adsb.raw
 
 # Produce the manual store verification synthetic record
 echo '{"checkpoint":5,"source":"manual-store-verification"}' | \
-  docker exec -i sentinel-redpanda rpk topic produce adsb.raw
+	docker exec -i sentinel-redpanda rpk topic produce adsb.raw
 
 # Consume at explicit offset 1 (one message only)
 docker exec sentinel-redpanda rpk topic consume adsb.raw \
-  --offset 1 --num 1
+	--offset 1 --num 1
 
 # Consume with named group from the start
 docker exec sentinel-redpanda rpk topic consume adsb.raw \
-  --group manual-store-verification-test --offset start --num 1
+	--group manual-store-verification-test --offset start --num 1
 
 # Inspect group committed offset and lag
 docker exec sentinel-redpanda rpk group describe manual-store-verification-test

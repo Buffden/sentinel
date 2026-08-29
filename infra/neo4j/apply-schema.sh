@@ -7,10 +7,10 @@ SCHEMA_FILE="$SCRIPT_DIR/schema.cypher"
 
 # Load .env from repo root
 if [ -f "$REPO_ROOT/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/.env"
-  set +a
+	set -a
+	# shellcheck disable=SC1091
+	source "$REPO_ROOT/.env"
+	set +a
 fi
 
 # NEO4J_AUTH format is username/password (set in .env and passed to docker-compose.yml).
@@ -32,19 +32,19 @@ MAX_RETRIES=20
 RETRY_INTERVAL=5
 echo "Waiting for Neo4j Bolt to accept connections..."
 for i in $(seq 1 $MAX_RETRIES); do
-  if docker exec "$CONTAINER" cypher-shell \
-       -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" \
-       "RETURN 1 AS ready" > /dev/null 2>&1; then
-    echo "Neo4j is ready."
-    echo ""
-    break
-  fi
-  if [ "$i" -eq "$MAX_RETRIES" ]; then
-    echo "Neo4j did not become ready after $((MAX_RETRIES * RETRY_INTERVAL))s. Aborting."
-    exit 1
-  fi
-  echo "  attempt $i/$MAX_RETRIES -- not ready, retrying in ${RETRY_INTERVAL}s..."
-  sleep "$RETRY_INTERVAL"
+	if docker exec "$CONTAINER" cypher-shell \
+			 -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" \
+			 "RETURN 1 AS ready" > /dev/null 2>&1; then
+		echo "Neo4j is ready."
+		echo ""
+		break
+	fi
+	if [ "$i" -eq "$MAX_RETRIES" ]; then
+		echo "Neo4j did not become ready after $((MAX_RETRIES * RETRY_INTERVAL))s. Aborting."
+		exit 1
+	fi
+	echo "  attempt $i/$MAX_RETRIES -- not ready, retrying in ${RETRY_INTERVAL}s..."
+	sleep "$RETRY_INTERVAL"
 done
 
 # Apply schema.
@@ -52,8 +52,8 @@ done
 # Errors in schema.cypher propagate as non-zero exit codes through docker exec.
 echo "--> applying schema.cypher"
 docker exec -i "$CONTAINER" cypher-shell \
-  -u "$NEO4J_USER" -p "$NEO4J_PASSWORD" \
-  < "$SCHEMA_FILE"
+	-u "$NEO4J_USER" -p "$NEO4J_PASSWORD" \
+	< "$SCHEMA_FILE"
 echo "    ok"
 echo ""
 echo "Neo4j schema applied."
