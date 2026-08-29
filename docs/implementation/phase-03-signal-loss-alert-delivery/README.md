@@ -25,10 +25,10 @@ Out of scope: workspace scope, multi-instance fan-out, acknowledge/resolve lifec
 | CP1: Leader election | Redis lease acquire/renew/release; follower standby; AbortController session isolation | Done |
 | CP2: Signal-loss detection | `runScan()` — entity filter chain, episode gate, deterministic alert_id, Kafka produce; Position Consumer recovery | Done |
 | CP3: Episode lifecycle | Full dark → alerted → resumed → dark again cycle; second alert with new alert_id verified | Done |
-| CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade; demo mode backend | Not started |
-| CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Not started |
+| CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade | Done |
+| CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Done |
 | CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Not started |
-| CP7: Dashboard | Live map; alert panel; login page; demo mode UI | Not started |
+| CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | Not started |
 
 ---
 
