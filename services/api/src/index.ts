@@ -1,7 +1,9 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { authRouter } from './routes/auth.js';
+import { alertsRouter } from './routes/alerts.js';
 import { requireAuth } from './middleware/auth.js';
+import { startAlertSink } from './sink/alertSink.js';
 
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 
@@ -28,7 +30,13 @@ app.get('/healthz-auth', (_req, res) => {
   res.json({ ok: true, user_id: res.locals['userId'] as string });
 });
 
-// Start
+app.use('/alerts', alertsRouter);
+
+// Start alert sink consumer.
+startAlertSink().catch((err: unknown) => {
+  console.error(JSON.stringify({ level: 'error', msg: 'alert sink failed to start', err: String(err) }));
+  process.exit(1);
+});
 
 app.listen(PORT, () => {
   console.log(JSON.stringify({ level: 'info', msg: 'API listening', port: PORT }));
