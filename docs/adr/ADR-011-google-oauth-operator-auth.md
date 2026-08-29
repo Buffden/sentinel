@@ -28,8 +28,8 @@ Use Google OAuth 2.0 for operator authentication. The flow is:
 4. The Express API verifies the token with Google's token info endpoint (or via the `google-auth-library` package)
 5. The API extracts the Google `sub` (stable user ID) and `email` from the verified token
 6. The API upserts a row in the `users` table on TimescaleDB: `(user_id, google_sub, email, last_login_at)`
-7. The API issues a short-lived JWT (signed with a server secret, 8-hour expiry) containing `user_id`
-8. All subsequent REST calls and the WebSocket connection carry this JWT in the `Authorization` header or as a query parameter
+7. The API issues a short-lived JWT (signed with a server secret, 8-hour expiry) containing `user_id` and returns it as an `HttpOnly; Secure; SameSite=Strict` cookie
+8. The browser sends the cookie automatically on every subsequent same-origin REST request and WebSocket upgrade — no client-side token management required
 
 The JWT is verified by Express middleware on every protected route and WebSocket upgrade.
 
@@ -43,7 +43,9 @@ The JWT is verified by Express middleware on every protected route and WebSocket
 
 **No new infrastructure.** A `users` table on the existing TimescaleDB instance stores only the Google `sub`, email, and last login timestamp. No dedicated auth database, no Redis session store, no external auth service.
 
-**JWT is stateless and fits the WebSocket model.** The WebSocket connection carries the JWT as a query parameter at upgrade time. The server validates it once at connection open and loads the operator's saved workspace from the `user_workspaces` table. No session lookup on every message.
+**JWT is stateless and fits the WebSocket model.** The browser sends the `HttpOnly` cookie on the WebSocket upgrade request automatically (same-origin). The server validates the JWT once at connection open and loads the operator's saved workspace from the `user_workspaces` table. No session lookup on every message.
+
+**HttpOnly cookie prevents XSS token theft.** A cookie marked `HttpOnly` is not accessible to JavaScript. An XSS payload injected into the dashboard page cannot read or exfiltrate the Sentinel JWT. `SameSite=Strict` prevents the cookie from being sent on cross-site requests, removing CSRF as a concern without needing a separate token.
 
 **Short-lived tokens limit blast radius.** An 8-hour expiry means a leaked token expires within the same working day. Refresh is handled by re-initiating the Google OAuth flow (silent re-auth if the Google session is still active).
 
@@ -82,7 +84,7 @@ The JWT is verified by Express middleware on every protected route and WebSocket
 
 - A `users` table is added to TimescaleDB: `(user_id UUID PK, google_sub TEXT UNIQUE, email TEXT, last_login_at TIMESTAMPTZ)`
 - A `user_workspaces` table is added to TimescaleDB - see ADR-012
-- `POST /auth/google` is the only unauthenticated endpoint (beyond the health check)
-- All other REST routes and the WebSocket upgrade require a valid JWT in the `Authorization: Bearer <token>` header
-- The Next.js dashboard handles the Google OAuth popup using `@react-oauth/google` and stores the Sentinel JWT in memory (not localStorage) for the session duration
+- `POST /auth/google` and `POST /auth/demo` are the only unauthenticated endpoints (beyond the health check)
+- All other REST routes and the WebSocket upgrade require a valid Sentinel JWT in the `sentinel_jwt` `HttpOnly` cookie; missing or invalid cookie returns 401
+- The Next.js dashboard handles the Google OAuth popup using `@react-oauth/google`; the Sentinel JWT is stored server-side in the cookie — the dashboard holds no token in memory or localStorage
 - The JWT secret is an environment variable - never committed to source

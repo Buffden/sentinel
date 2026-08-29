@@ -1,20 +1,34 @@
-# Phase 03 — Signal Loss + Alert Delivery Foundation
+# Phase 03: Signal Loss + Alert Delivery
 
-## Goal
-
-Build Sentinel's first complete operator-visible anomaly slice.
-
-```text
-entity:live:* → scheduled scan → Alert Evaluator → alerts Kafka topic
-  → API Kafka consumer → TimescaleDB alerts table
-  → GET /alerts + authenticated WebSocket
-  → Dashboard: live map + alert panel
-```
+Build Sentinel's first complete operator-visible anomaly slice: a dark entity triggers a signal-loss alert that flows from the Alert Evaluator through Kafka to the API, persists in TimescaleDB, and appears live in the browser without a page refresh.
 
 This phase establishes the serving path that all later alert types reuse.
 
-Out of scope: workspace scope, multi-instance fan-out, acknowledge/resolve lifecycle,
-route deviation, proximity, composite correlation.
+Out of scope: workspace scope, multi-instance fan-out, acknowledge/resolve lifecycle, route deviation, proximity, composite correlation.
+
+---
+
+## Services introduced
+
+| Service | Directory | Role |
+| --- | --- | --- |
+| Alert Evaluator | `services/alert-evaluator/` | Leader election; signal-loss scan; publish to `alerts` Kafka topic |
+| API | `services/api/` | Alert sink; auth; REST endpoints; WebSocket serving |
+| Dashboard | `services/dashboard/` | Live map; alert panel; Google OAuth login |
+
+---
+
+## Checkpoint progress
+
+| Checkpoint | Scope | Status |
+| --- | --- | --- |
+| CP1: Leader election | Redis lease acquire/renew/release; follower standby; AbortController session isolation | Done |
+| CP2: Signal-loss detection | `runScan()` — entity filter chain, episode gate, deterministic alert_id, Kafka produce; Position Consumer recovery | Done |
+| CP3: Episode lifecycle | Full dark → alerted → resumed → dark again cycle; second alert with new alert_id verified | Done |
+| CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade; demo mode backend | Not started |
+| CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Not started |
+| CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Not started |
+| CP7: Dashboard | Live map; alert panel; login page; demo mode UI | Not started |
 
 ---
 
@@ -33,15 +47,11 @@ Threshold is applied uniformly to all entity types in v1. Per-type thresholds ar
 
 ---
 
-## Signal-Loss Semantics
+## Signal-loss semantics
 
 `last_seen_ms` in `entity:live:{entity_id}` is set from `timestamp_ms` (source event time). It represents the last accepted position update for the entity, not the last transponder contact.
 
-Detection rule:
-
-```
-now_ms - last_seen_ms >= SIGNAL_LOSS_THRESHOLD_MS
-```
+Detection rule: `now_ms - last_seen_ms >= SIGNAL_LOSS_THRESHOLD_MS`.
 
 The Redis hash TTL (24 hours) is not the signal-loss detector. The TTL is a cleanup mechanism for entities that have permanently stopped transmitting. Signal loss is detected by the scan comparing `last_seen_ms` against the threshold.
 
@@ -49,7 +59,7 @@ On-ground entities (`on_ground = true`) are excluded from signal-loss detection 
 
 ---
 
-## Signal-Loss Episode State Machine
+## Signal-loss episode state machine
 
 ```
 TRACKING ──── silence >= threshold ───→ LOST
@@ -64,7 +74,7 @@ The `alert-state:{entity_id}` hash is the episode gate. If the key exists, the e
 
 ---
 
-## What to Build
+## What to build
 
 ### Alert Evaluator
 
@@ -107,13 +117,9 @@ This clears the episode gate so a future silence can produce a new alert. `recen
 
 ---
 
-### Canonical SIGNAL_LOSS Alert Contract
+### Canonical SIGNAL_LOSS alert contract
 
-Deterministic alert_id:
-
-```
-{entity_id}:SIGNAL_LOSS:{dark_since_ms}
-```
+Deterministic alert_id: `{entity_id}:SIGNAL_LOSS:{dark_since_ms}`
 
 Kafka payload published by the Alert Evaluator:
 
@@ -145,7 +151,7 @@ All `last_known_*` fields are read from `entity:live:{entity_id}` at scan time. 
 
 ---
 
-### API / Alert Sink
+### API / Alert sink
 
 **Auth:**
 
@@ -162,24 +168,22 @@ Processing order per message:
 
 1. Parse and validate the alert payload.
 2. Idempotently persist to TimescaleDB `alerts` table using `INSERT ... ON CONFLICT (alert_id) DO NOTHING`. `alerts` is a plain PostgreSQL table, not a hypertable.
-3. Deliver the alert to all WebSocket clients currently connected to this API instance.
+3. Publish the alert lifecycle event to Redis `alert-events`. WebSocket clients receive it via the pub/sub subscription established on connect.
 4. Commit the Kafka offset.
 
-A crash between steps 3 and 4 causes redelivery. The DB insert is idempotent. The WebSocket delivery may happen twice. Dashboard must deduplicate by `alert_id`.
+A crash at any point before step 4 causes Kafka to redeliver. The DB insert is idempotent. The Redis publish and WebSocket delivery may happen twice — clients deduplicate by `alert_id`.
 
 **`GET /alerts`:**
 
-Returns all `NEW` and `ACKNOWLEDGED` alerts from TimescaleDB, ordered by `detected_at DESC`. No pagination in v1. Filtered fields match the `alerts` table schema. Used for initial dashboard hydration and post-reconnect recovery.
+Returns all `NEW` and `ACKNOWLEDGED` alerts from TimescaleDB, ordered by `detected_at DESC`. No pagination in v1. Used for initial dashboard hydration and post-reconnect recovery.
 
 **`GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}`:**
-
-Precise definition:
 
 - bbox parameter order: `minLat, minLon, maxLat, maxLon` (south, west, north, east).
 - Scan all `entity:live:*` Redis keys. For each entity, parse `lat` and `lon`. Exclude the entity if either is missing or empty string.
 - Include only entities where `minLat <= lat <= maxLat` AND `minLon <= lon <= maxLon`.
-- Exclude entities where `last_seen_ms` is older than `now_ms - (2 * SIGNAL_LOSS_THRESHOLD_MS)`. Entities dark for more than twice the threshold are stale enough to exclude from the seed response.
-- Cap response at 500 entities to prevent overwhelming the client.
+- Exclude entities where `last_seen_ms` is older than `now_ms - (2 * SIGNAL_LOSS_THRESHOLD_MS)`.
+- Cap response at 500 entities.
 - Convert Redis hash empty strings to `null` in the response. Parse floats from Redis string values before returning.
 - Response is an array of entity snapshots matching the WebSocket position message shape plus `on_ground` and `entity_subtype`.
 
@@ -196,7 +200,7 @@ Precise definition:
 
 ---
 
-### Dashboard (closes the vertical slice)
+### Dashboard
 
 Built last, after the API is serving both position updates and alerts.
 
@@ -222,11 +226,42 @@ On WebSocket disconnect and reconnect, re-run the full hydration sequence (both 
 - Filter panel: airborne/ground toggle, entity subtype checkboxes, altitude range slider, callsign soft-search (dims non-matching markers).
 - Alert panel: live list of open alerts; new entries appear without page refresh; deduplicated by `alert_id`.
 
-For the full viewport culling options and filter design see `fe-dashboard-live-map/README.md` in the `docs/plan-and-vision` branch concepts folder.
+---
+
+## Important learning
+
+- Leader election with a Redis TTL lease: acquire, renew, release with Lua atomicity
+- Fail-closed behavior: stop scanning on any lease uncertainty
+- Episode identity: `dark_since_ms` as the natural anchor for deterministic alert IDs
+- Gate-first ordering: write Redis episode gate before Kafka produce
+- Signal-loss recovery: Position Consumer clears the gate on accepted resume
+- `recent-loss` written now for Phase 06 composite correlation
+- JWT auth: Google ID token verification vs Sentinel JWT issuance
+- HttpOnly cookie: why not localStorage
+- Idempotent Kafka sink: `ON CONFLICT (alert_id) DO NOTHING`; replay safety
+- WebSocket auth: cookie on upgrade request; same JWT middleware
 
 ---
 
-## Required Failure Experiments
+## Bootstrap sequence
+
+```bash
+make up          # start all containers
+make topics      # provision canonical Kafka topics
+bash infra/scripts/migrate.sh
+
+# Alert Evaluator
+cd services/alert-evaluator
+node_modules/.bin/tsx src/evaluator.ts
+
+# Position Consumer
+cd services/position-consumer
+FROM_BEGINNING=false node_modules/.bin/tsx src/consumer.ts
+```
+
+---
+
+## Required failure experiments
 
 - Kill the leader evaluator; follower acquires the lease within one TTL window and scanning resumes.
 - Repeated scans of a single dark entity emit exactly one alert per episode; `alert-state` key acts as the gate.
@@ -239,7 +274,7 @@ For the full viewport culling options and filter design see `fe-dashboard-live-m
 
 ---
 
-## Exit Criteria
+## Exit criteria
 
 | Criterion | |
 | --- | --- |
@@ -256,3 +291,12 @@ For the full viewport culling options and filter design see `fe-dashboard-live-m
 | All checks above verifiable via CLI tools, browser DevTools, and psql; no code reading required | |
 
 **Phase 03 exit: INCOMPLETE**
+
+---
+
+## Contents
+
+| Path | Description |
+| --- | --- |
+| [`concepts/`](concepts/README.md) | Concept notes and checkpoint debriefs, in reading order |
+| [`exit-verification.md`](exit-verification.md) | Final store inspection and exit criteria evaluation |
