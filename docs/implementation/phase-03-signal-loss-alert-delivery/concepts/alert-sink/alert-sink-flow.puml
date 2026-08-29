@@ -1,0 +1,48 @@
+@startuml alert-sink-flow
+
+title Alert Sink — Kafka Consume, Persist, Publish, Commit (CP5)
+
+participant "Alert Evaluator" as AE
+participant "Kafka\n(alerts topic)" as Kafka
+participant "API Consumer\n(group: api)" as API
+database "TimescaleDB\n(alerts)" as DB
+database "Redis\n(alert-events)" as Redis
+
+== Alert produced ==
+
+AE -> Kafka : PRODUCE alerts\n{ alert_id, entity_id, alert_type,\n  status: NEW, payload, detected_at_ms }
+
+== Alert consumed (eachMessage) ==
+
+API -> Kafka : poll (group: api)
+Kafka --> API : message at offset N
+
+API -> API : parse + validate JSON payload
+
+API -> DB : INSERT INTO alerts\n(...)\nON CONFLICT (alert_id) DO NOTHING
+DB --> API : INSERT 1 0 (new row)\nor INSERT 0 0 (duplicate — safe)
+
+API -> Redis : PUBLISH alert-events\n<alert JSON>
+Redis --> API : 1 (subscriber count)
+
+API -> Kafka : commitOffsets(offset N+1)
+
+note over API, Kafka
+  Commit is last. A crash before this point
+  causes Kafka to redeliver. The idempotent
+  INSERT absorbs the duplicate DB write.
+  Redis publish may repeat — clients deduplicate
+  by alert_id.
+end note
+
+== Dashboard hydration — GET /alerts ==
+
+participant Browser
+
+Browser -> API : GET /alerts\nCookie: sentinel_jwt=...
+API -> API : requireAuth: verify JWT
+API -> DB : SELECT * FROM alerts\nWHERE status IN ('NEW','ACKNOWLEDGED')\nORDER BY detected_at DESC
+DB --> API : alert rows
+API --> Browser : 200 [ alert rows ]
+
+@enduml
