@@ -4,9 +4,15 @@ title WebSocket Serving — Upgrade, Subscribe, Live Feed, and Hydration (CP6)
 
 participant Browser
 participant "API\n(WS Server)" as API
-database "Redis\n(pub/sub)" as Redis
-database "Redis\n(entity:live:*)" as RedisLive
+database "Redis\n(redisSub — subscriber only)" as Redis
+database "Redis\n(redis — commands only)" as RedisLive
 database "TimescaleDB\n(alerts)" as DB
+
+note over API, Redis
+  Two separate Redis connections required.
+  redisSub: SUBSCRIBE only — cannot issue commands.
+  redis: HGETALL, SCAN, etc — cannot SUBSCRIBE.
+end note
 
 == WebSocket upgrade ==
 
