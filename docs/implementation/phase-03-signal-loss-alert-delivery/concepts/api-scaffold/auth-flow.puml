@@ -1,39 +1,75 @@
 @startuml auth-flow
 
-title API Auth Flow: Google OAuth + Sentinel JWT
+title API Auth Flow: Google OAuth + Sentinel JWT + Demo Mode
 
 participant Browser
 participant "API" as API
 participant "Google Auth" as Google
 database "TimescaleDB\n(users)" as DB
 
-== Login ==
+== Operator Login (Google OAuth) ==
 
 Browser -> API : POST /auth/google\n{ id_token: "<google id token>" }
 API -> Google : verifyIdToken(id_token)
 Google --> API : { sub, email }
 API -> DB : INSERT INTO users (google_sub, email)\nON CONFLICT (google_sub) DO UPDATE
 DB --> API : user_id
-API -> API : sign Sentinel JWT\n{ user_id, email, exp }
+API -> API : sign Sentinel JWT\n{ user_id, email, role: "operator", exp: now+24h }
 API --> Browser : Set-Cookie: sentinel_jwt=...\nHttpOnly; Secure; SameSite=Strict
+
+== Demo Login ==
+
+Browser -> API : POST /auth/demo
+API -> API : IP rate limit check\n(1 token per IP per hour)
+alt rate limit exceeded
+    API --> Browser : 429 Too Many Requests
+else within limit
+    API -> API : concurrent demo WS cap check\n(10 active demo connections max)
+    API -> API : sign Sentinel JWT\n{ user_id: "demo", email: "demo",\n  role: "demo", exp: now+3min }
+    API --> Browser : Set-Cookie: sentinel_jwt=...\nHttpOnly; Secure; SameSite=Strict
+end
 
 == Authenticated REST Request ==
 
 Browser -> API : GET /alerts\nCookie: sentinel_jwt=...
-API -> API : verify JWT signature + expiry\nextract user_id
-API -> DB : SELECT * FROM alerts\nWHERE ...
-DB --> API : alert rows
-API --> Browser : 200 [ alert rows ]
+API -> API : requireAuth: verify JWT signature + expiry\nextract user_id, role
+alt operator or demo role
+    API -> DB : SELECT * FROM alerts WHERE ...
+    DB --> API : alert rows
+    API --> Browser : 200 [ alert rows ]
+else token missing or invalid
+    API --> Browser : 401 Unauthorized
+end
+
+note over API
+  requireOperator middleware rejects role: "demo".
+  Applied to restricted routes (Phase 07 workspace,
+  Phase 08 lifecycle, Phase 09 investigation).
+  Standard read endpoints (alerts, entities/live)
+  are accessible to both roles.
+end note
 
 == Authenticated WebSocket Upgrade ==
 
 Browser -> API : HTTP Upgrade (WebSocket)\nCookie: sentinel_jwt=...
-API -> API : verify JWT signature + expiry
+API -> API : verify JWT signature + expiry\nextract role, exp
 alt token valid
+    API -> API : store exp on socket object
     API --> Browser : 101 Switching Protocols
     API --> Browser : position updates / alert events (stream)
+    note over API, Browser
+      Demo sessions: server closes connection
+      with code 4401 / "demo session expired"
+      when wall-clock time reaches JWT exp.
+      Operator sessions: no server-side close.
+    end note
 else token missing or invalid
     API --> Browser : 401 Unauthorized\n(upgrade rejected)
 end
+
+== Demo Session Expiry (WebSocket) ==
+
+API -> Browser : close(4401, "demo session expired")
+Browser -> Browser : show "Demo session ended.\nSign in with Google for full access." banner
 
 @enduml
