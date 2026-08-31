@@ -30,31 +30,11 @@ Before implementing CP7c (the shell), a low-fidelity SVG mockup must be created,
 saved alongside this document, and approved by the developer. Implementation must
 match the approved mockup per the Workspace Visual Language rule in CLAUDE.md.
 
-Target CP7 layout (Dockview default — two-panel):
+Target CP7 visual reference (Dockview default — two-panel):
 
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ SENTINEL       Live Operations              ● LIVE    USER  │
-├─────────────────────────────────────────┬────────────────────┤
-│                                         │                    │
-│         MAP WIDGET                      │   ALERT WIDGET     │
-│         (MapLibre GL + deck.gl)         │                    │
-│                                    ┌────┤  SIGNAL LOSS       │
-│                                    │ L  │                    │
-│                                    │ A  │  SIGNAL LOSS       │
-│                                    │ Y  │                    │
-│                                    │ E  │                    │
-│                                    │ R  │                    │
-│                                    │ S  │                    │
-│                                    └────┤                    │
-├─────────────────────────────────────────┴────────────────────┤
-│ Connection status / entity count                             │
-└──────────────────────────────────────────────────────────────┘
-```
+![Sentinel dashboard reference](../../../../../ui/sentinel-dashboard-reference.png)
 
-The LAYERS overlay is the aviation layer toggle panel rendered inside the Map widget.
-Aviation filter controls (callsign, type, altitude, status) live inside the aviation
-layer configuration within that overlay — not as a separate fixed FilterRail sidebar.
+The CP7 layout is: TopNavigation fixed at the top, MapWidget occupying the majority of the workspace, AlertWidget docked to the right. The LAYERS overlay is rendered inside the Map widget. Aviation filter controls (callsign, type, altitude, status) live inside the aviation layer configuration within that overlay — not as a separate fixed FilterRail sidebar.
 
 ---
 
@@ -132,19 +112,7 @@ Do not let React components consume raw backend JSON directly. Every API respons
 
 Both `last_seen_ms` (REST) and `timestamp_ms` (WebSocket) map to a single `eventTimeMs` field in the frontend model. React never knows which field name the backend used.
 
-```text
-REST / WebSocket
-      ↓
-Runtime validation (optional Zod — see §14)
-      ↓
-DTO (matches wire format)
-      ↓
-Adapter function
-      ↓
-Frontend domain model
-      ↓
-React
-```
+See [`network-boundary-adapter.puml`](network-boundary-adapter.puml) for the full sequence: wire JSON → validator → adapter → domain model → React, including the malformed-frame discard path.
 
 ---
 
@@ -182,7 +150,7 @@ These two invariants are the most important frontend tests in CP7.
 | --- | --- |
 | Live entities | operations page via live-feed hook |
 | Alerts | operations page via live-feed hook |
-| Filter state | operations page, passed down to FilterRail |
+| Filter state | operations page, passed to MapWidget layer overlay |
 | Auth / session | AuthGuard; cookie managed by server |
 | Socket lifecycle | shared websocketClient |
 
@@ -192,17 +160,7 @@ Redux Toolkit / Zustand becomes justified only when selected-entity state must c
 
 ## 8. WebSocket separation
 
-Never open a WebSocket inside a component. The layers are:
-
-```text
-MapWorkspace / AlertPanel
-        ↓
-useLiveFeed()                  (features/live-feed)
-        ↓
-websocketClient.ts             (shared/realtime)
-        ↓
-WebSocket
-```
+Never open a WebSocket inside a component. The layers are: MapWidget/AlertWidget → `useLiveFeed()` (features/live-feed) → `websocketClient.ts` (shared/realtime) → WebSocket. See [`ws-separation-flow.puml`](ws-separation-flow.puml) for the full sequence including subscribe, reconnect, demo expiry, and cleanup.
 
 `websocketClient.ts` knows: connect, disconnect, send, message, close, error. It does not know what an aircraft is.
 
