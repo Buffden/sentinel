@@ -1,18 +1,18 @@
 'use client'
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef } from 'react'
 
 interface SplitLayoutProps {
 	left: React.ReactNode
 	right: React.ReactNode
+	leftPct: number
+	onLeftPctChange: (pct: number) => void
 }
 
 const MIN_LEFT_PCT = 25
 const MAX_LEFT_PCT = 75
-const INITIAL_LEFT_PCT = 65
 
-export default function SplitLayout({ left, right }: SplitLayoutProps) {
-	const [leftPct, setLeftPct] = useState(INITIAL_LEFT_PCT)
+export default function SplitLayout({ left, right, leftPct, onLeftPctChange }: SplitLayoutProps) {
 	const containerRef = useRef<HTMLDivElement>(null)
 	const dragging = useRef(false)
 
@@ -26,7 +26,7 @@ export default function SplitLayout({ left, right }: SplitLayoutProps) {
 		if (!dragging.current || !containerRef.current) return
 		const rect = containerRef.current.getBoundingClientRect()
 		const pct = ((e.clientX - rect.left) / rect.width) * 100
-		setLeftPct(Math.min(MAX_LEFT_PCT, Math.max(MIN_LEFT_PCT, pct)))
+		onLeftPctChange(Math.min(MAX_LEFT_PCT, Math.max(MIN_LEFT_PCT, pct)))
 	}, [])
 
 	const onMouseUp = useCallback(() => {
