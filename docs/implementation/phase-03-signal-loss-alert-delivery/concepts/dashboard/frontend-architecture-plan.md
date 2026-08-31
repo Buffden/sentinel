@@ -194,27 +194,11 @@ MapLibre GL requires its container to have an explicit height. Set the MapWidget
 
 ## 11. Component tree for CP7
 
-```text
-SentinelOperationsPage
-└── AppShell
-    ├── TopNavigation
-    │   ├── SentinelLogo
-    │   ├── OperationsNavigation
-    │   ├── ConnectionIndicator
-    │   └── SessionMenu
-    └── DockviewWorkspace
-        ├── MapWidget
-        │   ├── MapLibreMap
-        │   │   └── AviationDeckLayer  (deck.gl layer: aircraft positions)
-        │   └── LayerOverlay
-        │       └── AviationLayerControls
-        │           ├── CallsignSearch
-        │           ├── GroundStateFilter
-        │           ├── EntitySubtypeFilter
-        │           └── AltitudeFilter
-        └── AlertWidget
-            └── SignalLossAlertCard × N
-```
+![Sentinel dashboard reference](../../../../../ui/sentinel-dashboard-reference.png)
+
+`SentinelOperationsPage` renders `AppShell`, which holds `TopNavigation` (outside Dockview) and `DockviewWorkspace`. TopNavigation contains: SentinelLogo, OperationsNavigation, ConnectionIndicator, SessionMenu.
+
+DockviewWorkspace hosts two panels for CP7: `MapWidget` and `AlertWidget`. MapWidget contains `MapLibreMap` with an `AviationDeckLayer` (deck.gl layer for aircraft positions) and a `LayerOverlay` with `AviationLayerControls` (CallsignSearch, GroundStateFilter, EntitySubtypeFilter, AltitudeFilter). AlertWidget renders `SignalLossAlertCard` instances.
 
 Do not build yet: SelectedAircraftPanel, PositionHistory, InvestigationPanel,
 TimelinePlayback, Analytics, Settings, RouteDeviationAlertCard, ProximityAlertCard.
