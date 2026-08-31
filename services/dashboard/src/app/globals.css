@@ -1,0 +1,29 @@
+@import '../shared/styles/tokens.css';
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html,
+body,
+#__next {
+	height: 100%;
+	width: 100%;
+	background: var(--color-bg-app);
+	color: var(--color-text-primary);
+	font-family: var(--font-sans);
+	font-size: var(--font-size-base);
+}
+
+/* Show close button when hovering the panel */
+.panel-close-btn {
+	opacity: 0;
+}
+
+*:hover > .panel-close-btn {
+	opacity: 1;
+}
