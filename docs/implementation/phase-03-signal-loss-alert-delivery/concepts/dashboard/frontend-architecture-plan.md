@@ -26,25 +26,35 @@ Out of scope for CP7 (slots reserved in shell, implementations deferred):
 - Analytics, settings (future)
 - Historical timeline (future)
 
-Target CP7 layout:
+Before implementing CP7c (the shell), a low-fidelity SVG mockup must be created,
+saved alongside this document, and approved by the developer. Implementation must
+match the approved mockup per the Workspace Visual Language rule in CLAUDE.md.
+
+Target CP7 layout (Dockview default — two-panel):
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │ SENTINEL       Live Operations              ● LIVE    USER  │
-├──────────┬────────────────────────────────────┬──────────────┤
-│          │                                    │              │
-│ FILTERS  │                                    │   ALERTS     │
-│          │                                    │              │
-│ callsign │                                    │ SIGNAL LOSS  │
-│ type     │               MAP                  │              │
-│ altitude │                                    │ SIGNAL LOSS  │
-│ status   │                                    │              │
-│          │                                    │              │
-│          │                                    │              │
-├──────────┴────────────────────────────────────┴──────────────┤
+├─────────────────────────────────────────┬────────────────────┤
+│                                         │                    │
+│         MAP WIDGET                      │   ALERT WIDGET     │
+│         (MapLibre GL + deck.gl)         │                    │
+│                                    ┌────┤  SIGNAL LOSS       │
+│                                    │ L  │                    │
+│                                    │ A  │  SIGNAL LOSS       │
+│                                    │ Y  │                    │
+│                                    │ E  │                    │
+│                                    │ R  │                    │
+│                                    │ S  │                    │
+│                                    └────┤                    │
+├─────────────────────────────────────────┴────────────────────┤
 │ Connection status / entity count                             │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+The LAYERS overlay is the aviation layer toggle panel rendered inside the Map widget.
+Aviation filter controls (callsign, type, altitude, status) live inside the aviation
+layer configuration within that overlay — not as a separate fixed FilterRail sidebar.
 
 ---
 
@@ -63,12 +73,14 @@ services/dashboard/
 │   │   ├── operations/
 │   │   └── providers.tsx
 │   │
-│   ├── widgets/                    large screen regions
-│   │   ├── app-shell/
+│   ├── workspace/                  Dockview setup and default layout
+│   │   ├── registry.ts
+│   │   └── default-layout.ts
+│   │
+│   ├── widgets/                    Dockview widget implementations
 │   │   ├── top-navigation/
-│   │   ├── filter-rail/
-│   │   ├── map-workspace/
-│   │   └── alert-panel/
+│   │   ├── map-widget/             Map widget: MapLibre GL + deck.gl + layer overlay
+│   │   └── alert-widget/           Alert widget: signal-loss alert list
 │   │
 │   ├── features/                   user-facing behavior
 │   │   ├── authentication/
@@ -104,7 +116,7 @@ app → widgets → features → entities → shared
 
 **`app`** — routing and composition only. The operations page wires widgets together and owns top-level state. No WebSocket parsing, API calls, or filtering logic here.
 
-**`widgets`** — large screen regions (TopNavigation, FilterRail, MapWorkspace, AlertPanel). Compose features and entity components. Not generic — `MapWorkspace` is a Sentinel widget, not a reusable grid primitive.
+**`widgets`** — Dockview widget implementations (TopNavigation, MapWidget, AlertWidget). Each is an independently rendered Dockview panel. Not generic — `MapWidget` is a Sentinel widget, not a reusable grid primitive. The FilterRail does not exist as a fixed sidebar; aviation entity filter controls live inside the aviation layer configuration within the MapWidget's layer overlay.
 
 **`features`** — user-facing behavior: authentication, demo-session, entity-filtering, live-feed, connection-status. Distinction from entities: `AircraftMarker` is an entity UI; "filter aircraft by altitude" is a feature.
 
@@ -212,9 +224,13 @@ CSS Modules for component-specific styles. Global CSS variables for tokens. No T
 
 ## 10. Shell layout
 
-The shell uses a CSS Grid with two rows: a fixed-height top navigation bar and a flexible content row that fills the remaining viewport height. The content row is a three-column grid: fixed-width filter rail, flexible map workspace, fixed-width alert panel.
+The shell has two levels: the application shell and the Dockview workspace.
 
-The map column must use `minmax(0, 1fr)` — without the zero minimum, Leaflet overflow becomes unmanageable. MapWorkspace can later split into map + EventTimeline without changing the outer shell.
+The application shell is a CSS Grid with two rows: a fixed-height TopNavigation bar and a flexible Dockview workspace that fills the remaining viewport height. TopNavigation lives outside Dockview and persists regardless of workspace layout.
+
+The Dockview workspace hosts independently resizable, dockable widget panels. The CP7 default layout is: MapWidget occupying approximately 70% of the width, AlertWidget docked to the right. Operators may resize panels; layout persistence is deferred to a later phase.
+
+MapLibre GL requires its container to have an explicit height. Set the MapWidget Dockview panel container to `height: 100%`; MapLibre sizes correctly and does not require the overflow workarounds that Leaflet needed.
 
 ---
 
@@ -228,17 +244,18 @@ SentinelOperationsPage
     │   ├── OperationsNavigation
     │   ├── ConnectionIndicator
     │   └── SessionMenu
-    ├── FilterRail
-    │   ├── CallsignSearch
-    │   ├── GroundStateFilter
-    │   ├── EntitySubtypeFilter
-    │   └── AltitudeFilter
-    ├── MapWorkspace
-    │   ├── SentinelMap
-    │   └── AircraftMarker × N
-    │       └── AircraftTooltip
-    └── AlertPanel
-        └── SignalLossAlertCard × N
+    └── DockviewWorkspace
+        ├── MapWidget
+        │   ├── MapLibreMap
+        │   │   └── AviationDeckLayer  (deck.gl layer: aircraft positions)
+        │   └── LayerOverlay
+        │       └── AviationLayerControls
+        │           ├── CallsignSearch
+        │           ├── GroundStateFilter
+        │           ├── EntitySubtypeFilter
+        │           └── AltitudeFilter
+        └── AlertWidget
+            └── SignalLossAlertCard × N
 ```
 
 Do not build yet: SelectedAircraftPanel, PositionHistory, InvestigationPanel,
@@ -289,7 +306,7 @@ This is an implementation choice — weigh bundle size, parse overhead, and safe
 | --- | --- | --- |
 | CP7a | Demo API additions | CLI verification only (done) |
 | CP7b | Next.js bootstrap + quality tooling | lint / typecheck / build pass |
-| CP7c | Tokens + static dashboard shell | visually matches reference PNG |
+| CP7c | Tokens + Dockview workspace with default aviation layout | TopNavigation + MapWidget + AlertWidget visible; panels resizable; approved SVG mockup must exist before this step begins |
 | CP7d | Authentication + login page | 401 redirects; cookie auth works |
 | CP7e | REST map hydration | real Redis entities on map |
 | CP7f | Live position WebSocket | aircraft moves without page refresh |
