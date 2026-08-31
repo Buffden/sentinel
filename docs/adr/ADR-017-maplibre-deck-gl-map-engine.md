@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-08-31
 **Supersedes:** Map engine portion of ADR-016 (Next.js + Blueprint.js remain accepted)
+**Extended by:** ADR-019 (Map Rendering Architecture — separation of base map and data rendering)
 
 ---
 
@@ -74,3 +75,4 @@ react-leaflet is removed from the accepted stack.
 - Aviation is the first map layer implementation. Do not build generic multi-domain layer abstractions before the aviation layer exists and is proven working.
 - The map is a workspace widget (ADR-018), not the application shell. MapLibre initialises inside the Map widget component, not at the application root.
 - Tile provider is an implementation choice, not an architectural one. Select at dashboard implementation time.
+- How the Map widget separates basemap, terrain, and deck.gl layer concerns is defined in ADR-019.
