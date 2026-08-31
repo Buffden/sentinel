@@ -153,10 +153,24 @@ export default function MapWidget({ onToggleLayout }: MapWidgetProps) {
 		<>
 			{/* 2D / 3D projection toggle */}
 			<div style={{ display: 'flex', borderRadius: 3, overflow: 'hidden', border: '1px solid var(--color-border)' }}>
-				<button style={{ ...BTN, border: 'none', borderRadius: 0, ...(is3D ? {} : BTN_ACTIVE) }} onClick={() => !is3D || toggle3D()}>
+				<button
+					style={{ ...BTN, borderWidth: 0, borderRadius: 0, ...(is3D ? {} : BTN_ACTIVE) }}
+					onClick={() => !is3D || toggle3D()}
+				>
 					2D
 				</button>
-				<button style={{ ...BTN, border: 'none', borderLeft: '1px solid var(--color-border)', borderRadius: 0, ...(is3D ? BTN_ACTIVE : {}) }} onClick={() => is3D || toggle3D()}>
+				<button
+					style={{
+						...BTN,
+						borderWidth: 0,
+						borderLeftWidth: 1,
+						borderLeftStyle: 'solid',
+						borderLeftColor: 'var(--color-border)',
+						borderRadius: 0,
+						...(is3D ? BTN_ACTIVE : {}),
+					}}
+					onClick={() => is3D || toggle3D()}
+				>
 					3D
 				</button>
 			</div>
