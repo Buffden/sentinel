@@ -136,19 +136,37 @@ Three categories of decision arise during implementation:
 - **Implementation choice** — library configuration, pool sizes, partition counts, batch sizes, timeouts. Explain realistic options and trade-offs, recommend one, let the developer decide.
 - **Architectural discovery** — when a design assumption fails, stop before hiding the change in code. Show the evidence, identify affected contracts, present alternatives, update documentation with implementation.
 
-### Checkpoint Loop
+### Implementation Sequence
 
-```text
-understand → experiment → implement smallest behavior → run → inspect → break → debug/fix → verify invariant → debrief
-```
+Every checkpoint — regardless of subsystem (backend services, frontend, databases, Kafka, Redis, Neo4j, WebSockets, auth, infrastructure, migrations, CI/CD) — follows this order:
 
-A checkpoint must have: one clear goal, limited scope, observable behavior, manual verification, at least one failure-boundary check, and a clear exit criterion. Do not implement an entire phase in one autonomous pass.
+1. **Confirm scope.** Agree on the exact checkpoint and its goal before any code changes.
+2. **Read source-of-truth docs.** ADRs, architecture, data model, use cases, and the active phase plan.
+3. **Inspect existing state.** Read the existing implementation and current system state.
+4. **Explain before coding.** Mental model, ownership, data flow, guarantees, and important failure modes (see teach-back list above).
+5. **Identify the smallest observable behavior.** One clear goal; do not bundle adjacent work.
+6. **Experiment if the mechanism is unfamiliar.** Interact directly with the infrastructure before writing application code.
+7. **Implement only that behavior.** No opportunistic additions.
+8. **Run it.**
+9. **Inspect real state using native tools.** Do not infer behavior from logs alone.
+10. **Exercise at least one failure/replay/duplicate/out-of-order boundary.**
+11. **Fix and verify the invariant.**
+12. **Add or update automated tests** that encode the observed invariant, not just compilation.
+13. **Run quality gates:** lint, typecheck, tests, build/migrations as applicable.
+14. **Update affected documentation.**
+15. **Debrief and stop.**
 
-For every distributed boundary, reason about: duplicate delivery, out-of-order events, crash timing, partial success, dependency loss, restart/replay, and concurrent ownership. Classify each as handled now, protected by an invariant, intentionally deferred, or out of scope. Do not claim a guarantee that has not been demonstrated or encoded.
+### Permanent sequencing rules
 
-Prefer tests that demonstrate distributed-system invariants — replay safety, idempotency, monotonicity, lease exclusivity, episode identity — over tests that only verify compilation.
-
-Stop after the debrief. Do not automatically begin the next checkpoint.
+- Never begin the next checkpoint without explicit developer confirmation.
+- Never combine multiple checkpoints into one implementation pass unless explicitly approved.
+- Never implement later-phase behavior opportunistically.
+- Never create abstractions for future consumers before the current real consumer proves the need.
+- Never hide an architectural change inside an implementation choice.
+- If an accepted assumption fails during implementation, stop. Surface the evidence, identify the affected ADR/contract, and update design and documentation before coding.
+- Prefer one proven end-to-end behavior over several unfinished layers.
+- The developer must run/inspect meaningful commands and make at least one meaningful manual change where practical.
+- Tests passing alone do not make a checkpoint complete. Runtime behavior and the invariant must be observed in real system state.
 
 ### Developer Participation
 
