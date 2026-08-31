@@ -16,7 +16,7 @@ link p0 to cg_x1--><path d="M874.25,266.1328 C802.17,266.1328 700.5,266.1328 700
 link p1 to cg_x2--><path d="M1150.5,278.4728 C1150.5,278.4728 1150.5,395.1328 1150.5,395.1328 " fill="none" id="p1-&gt;cg_x2" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1150.5,400.1328,1154.5,391.1328,1150.5,395.1328,1146.5,391.1328,1150.5,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="208" x="1198.5" y="363.1997">read from committed offset</text><!--MD5=[3772bf9680659b00b633c7cf1fde799b]
 link p0 to cg_y--><path d="M944.5,278.4728 C944.5,278.4728 944.5,395.1328 944.5,395.1328 " fill="none" id="p0-&gt;cg_y" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="944.5,400.1328,948.5,391.1328,944.5,395.1328,940.5,391.1328,944.5,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><text fill="#000000" font-family="monospace" font-size="13" lengthAdjust="spacingAndGlyphs" textLength="144" x="951.5" y="363.1997">independent offset</text><!--MD5=[f2530b1387ce56b38d8b16b09b95780e]
 link p1 to cg_y--><path d="M1063,278.4728 C1063,278.4728 1063,395.1328 1063,395.1328 " fill="none" id="p1-&gt;cg_y" style="stroke: #555555; stroke-width: 1.0;"/><polygon fill="#555555" points="1063,400.1328,1067,391.1328,1063,395.1328,1059,391.1328,1063,400.1328" style="stroke: #555555; stroke-width: 1.0;"/><!--MD5=[fcc2df042c7ed64d76cd9ac28f82b2a5]
-link broker to GMN19--><path d="M818.3096,253.1328 C818.0307,253.1328 817.745,253.1328 817.4526,253.1328 C812.7745,253.1328 806.387,253.1328 798.5389,253.1328 C782.8426,253.1328 761.3037,253.1328 735.9117,253.1328 C685.1278,253.1328 618.9319,253.1328 553.2413,253.1328 C421.86,253.1328 292.5,253.1328 292.5,253.1328 C292.5,253.1328 292.5,344.3528 292.5,396.7428 " fill="none" id="broker-GMN19" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[e622ab409b47345134f3f9eb4b607ed0]
+link broker to GMN19--><path d="M818.3096,253.1328 C818.0307,253.1328 817.745,253.1328 817.4526,253.1328 C812.7745,253.1328 806.387,253.1328 798.5389,253.1328 C782.8426,253.1328 761.3037,253.1328 735.9117,253.1328 C685.1278,253.1328 618.9319,253.1328 553.2413,253.1328 C421.86,253.1328 292.5,253.1328 292.5,253.1328 C292.5,253.1328 292.5,344.3528 292.5,396.7428 " fill="none" id="broker-GMN19" style="stroke: #555555; stroke-width: 1.0; stroke-dasharray: 7.0,7.0;"/><!--MD5=[783a8b915b3bd9014c87d3ef784e4607]
 @startuml kafka-basics
 title Kafka Basics: Broker, Topic, Producer, Consumer
 
@@ -80,7 +80,7 @@ PlantUML version 1.2020.02(Sun Mar 01 10:22:07 UTC 2020)
 (GPL source distribution)
 Java Runtime: OpenJDK Runtime Environment
 JVM: OpenJDK 64-Bit Server VM
-Java Version: 17.0.20+8
+Java Version: 17.0.20.1+1
 Operating System: Linux
 Default Encoding: UTF-8
 Language: en

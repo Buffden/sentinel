@@ -84,21 +84,9 @@ Phase 10 standardizes/completes observability, load testing, and system-wide fai
 
 # Working Style
 
-Use this loop throughout the project:
+The authoritative implementation sequence is defined in `CLAUDE.md` under "Implementation Sequence" and "Permanent sequencing rules". Apply it to every checkpoint across all subsystems.
 
-**Understand → experiment → implement → run → inspect → break → fix → test → review → merge**
-
-For unfamiliar infrastructure or distributed-systems concepts:
-
-1. establish the mental model
-2. perform a small hands-on experiment
-3. implement the smallest useful behavior
-4. run it
-5. inspect real state
-6. deliberately test an important failure
-7. explain the trade-off
-8. verify developer understanding
-9. continue to the next checkpoint
+For unfamiliar infrastructure or distributed-systems concepts, always perform a small direct hands-on experiment before writing application code (sequence step 6).
 
 ---
 
@@ -148,7 +136,7 @@ Prefer a small end-to-end behavior over building every abstraction upfront. Avoi
 
 # Checkpoints
 
-Do not implement an entire phase in one pass. A checkpoint should have one clear goal, limited scope, observable behavior, tests, and a clear exit criterion. Stop and debrief after a checkpoint before automatically starting the next one.
+The authoritative 15-step implementation sequence in `CLAUDE.md` governs every checkpoint. A checkpoint has one clear goal and one observable behavior. The developer must confirm completion and approve the next checkpoint before it begins.
 
 ---
 
