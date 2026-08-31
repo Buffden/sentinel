@@ -58,19 +58,9 @@ Implementation choices such as Kafka partition count, batch size, pool sizing, t
 
 ## Work in Small Observable Checkpoints
 
-Prefer:
+The authoritative 15-step implementation sequence is defined in `CLAUDE.md` under "Implementation Sequence" and "Permanent sequencing rules". Apply it to every checkpoint in every subsystem.
 
-concept
-→ small experiment
-→ minimal implementation
-→ run it
-→ inspect state
-→ inject the important failure
-→ fix/verify
-→ test the invariant
-→ next checkpoint
-
-A checkpoint is not complete merely because code compiles. Infrastructure-heavy work should normally include implementation, a test, observable evidence, and an understood failure mode.
+A checkpoint is not complete because code compiles. Every checkpoint must include observable evidence in real system state, at least one exercised failure boundary, passing quality gates, and updated documentation before the developer confirms completion.
 
 ---
 

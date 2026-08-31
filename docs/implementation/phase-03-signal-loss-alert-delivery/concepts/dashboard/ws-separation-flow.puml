@@ -1,0 +1,85 @@
+@startuml ws-separation-flow
+title WebSocket Separation — Layer Ownership
+
+skinparam backgroundColor #0d1117
+skinparam sequenceArrowColor #3b82f6
+skinparam sequenceLifeLineBorderColor #3b82f6
+skinparam participantBorderColor #1e2d3d
+skinparam participantBackgroundColor #0d1117
+skinparam participantFontColor #f1f5f9
+skinparam noteBorderColor #1e2d3d
+skinparam noteBackgroundColor #0f1623
+skinparam noteFontColor #9ca3af
+
+participant "MapWorkspace\nAlertPanel" as UI
+participant "useLiveFeed()\nfeatures/live-feed" as Hook
+participant "websocketClient.ts\nshared/realtime" as Client
+participant "WebSocket\n(browser)" as WS
+participant "API WS Server" as API
+
+== Mount ==
+
+UI -> Hook : mount — pass bbox
+Hook -> Client : createWebSocketClient(WS_URL, handlers)
+Client -> WS : new WebSocket(url)
+WS -> API : HTTP upgrade + sentinel_jwt cookie
+API -> WS : 101 Switching Protocols
+
+== Subscribe ==
+
+Client -> Hook : onOpen callback
+Hook -> Client : sendSubscribe(ws, { type, bbox })
+Client -> WS : ws.send(JSON)
+WS -> API : subscribe message
+
+note over API
+  Server stores bbox per connection.
+  Filters position-updates to bbox.
+  Sends all alert-events (no bbox filter).
+end note
+
+== Live updates ==
+
+API -> WS : position-updates frame
+WS -> Client : onmessage event
+Client -> Hook : onMessage({ channel, data })
+Hook -> Hook : adaptPositionUpdate(data)
+Hook -> UI : setEntities — applyEntitySnapshot
+
+API -> WS : alert-events frame
+WS -> Client : onmessage event
+Client -> Hook : onMessage({ channel, data })
+Hook -> Hook : adaptAlertEvent(data)
+Hook -> UI : setAlerts — write by alert_id (dedup)
+
+== Unexpected close (reconnect) ==
+
+WS -> Client : onclose (code != 1000, != 4401)
+Client -> Hook : onClose(event)
+Hook -> Hook : setIsConnected(false)
+Hook -> Hook : setTimeout 3 s → setReconnectKey(k+1)
+Hook -> Hook : reconnectKey change re-runs all effects
+Hook -> Client : new createWebSocketClient(...)
+note right of Hook
+  REST re-hydration also fires:
+  GET /entities/live — reseed entities
+  GET /alerts — reseed alerts
+end note
+
+== Demo expiry (no reconnect) ==
+
+WS -> Client : onclose (code 4401)
+Client -> Hook : onClose(event)
+Hook -> Hook : setIsConnected(false)
+Hook -> Hook : setDemoExpired(true)
+Hook -> UI : demoExpired = true → render DemoExpiredBanner
+
+== Intentional cleanup ==
+
+UI -> Hook : component unmount
+Hook -> Client : ws.close(1000, 'component cleanup')
+Client -> WS : close(1000)
+WS -> Client : onclose (code 1000)
+Client -> Hook : onClose — code 1000 → return, no reconnect
+
+@enduml

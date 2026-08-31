@@ -177,9 +177,9 @@ If the process crashes after the DB write but before offset commit, replay is sa
 
 ### Dashboard
 
-**Runtime:** Next.js (CSR) + Blueprint.js + react-leaflet (ADR-016, supersedes ADR-009)
+**Runtime:** Next.js (CSR) + Blueprint.js (ADR-016); MapLibre GL + deck.gl map engine (ADR-017); Dockview workspace layout (ADR-018). Supersedes ADR-009.
 
-The dashboard communicates only with the API. It renders live positions, alert feed, workspace-scoped data, and investigation evidence. WebSocket clients must tolerate duplicate alert lifecycle events and converge by `alert_id` plus status/version semantics.
+The dashboard is a registry-driven dockable workspace. It communicates only with the API. Widgets render live positions, alert feed, multi-tenant workspace-scoped data, and investigation evidence. The map is a Dockview widget running MapLibre GL with deck.gl layers; aviation is the first layer implementation. WebSocket clients must tolerate duplicate alert lifecycle events and converge by `alert_id` plus status/version semantics.
 
 ---
 
@@ -300,7 +300,7 @@ API → Neo4j only for operator investigation/evidence reads.
 
 ## ADR Index
 
-See `docs/adr/ADR-001` through `ADR-015`. In particular:
+See `docs/adr/ADR-001` through `ADR-018`. In particular:
 
 - ADR-005 — Alert Evaluator leader election
 - ADR-006 — H3 geo-cell indexing strategy
@@ -308,3 +308,6 @@ See `docs/adr/ADR-001` through `ADR-015`. In particular:
 - ADR-010 — durable alert lifecycle store
 - ADR-014 — hybrid Alert Evaluator input model
 - ADR-015 — v1 deterministic reference routes
+- ADR-016 — Next.js + Blueprint.js dashboard (supersedes ADR-009)
+- ADR-017 — MapLibre GL + deck.gl map engine (supersedes react-leaflet portion of ADR-016)
+- ADR-018 — Dockview dockable workspace (supersedes fixed shell in ADR-016)
