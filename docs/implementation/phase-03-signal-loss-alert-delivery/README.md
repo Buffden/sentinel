@@ -4,7 +4,7 @@ Build Sentinel's first complete operator-visible anomaly slice: a dark entity tr
 
 This phase establishes the serving path that all later alert types reuse.
 
-Out of scope: workspace scope, multi-instance fan-out, acknowledge/resolve lifecycle, route deviation, proximity, composite correlation.
+Out of scope: multi-tenant workspace scoping (Phase 07), multi-instance fan-out, acknowledge/resolve lifecycle, route deviation, proximity, composite correlation.
 
 ---
 
@@ -222,9 +222,9 @@ On WebSocket disconnect and reconnect, re-run the full hydration sequence (both 
 **Components:**
 
 - Google OAuth login page; JWT stored in HttpOnly cookie by server.
-- react-leaflet map with moving flight markers: rotated arrow SVG using `course_deg`, tooltip with `callsign`, altitude, speed, course, last seen age.
-- Filter panel: airborne/ground toggle, entity subtype checkboxes, altitude range slider, callsign soft-search (dims non-matching markers).
-- Alert panel: live list of open alerts; new entries appear without page refresh; deduplicated by `alert_id`.
+- Map widget (MapLibre GL + deck.gl): moving flight markers as a deck.gl layer; rotated arrow using `course_deg`; tooltip with `callsign`, altitude, speed, course, last seen age. Layer overlay within the Map widget: searchable, collapsible, scrollable, per-layer enable/disable. Aviation is the first layer.
+- Aviation layer controls (within the Map widget layer overlay): airborne/ground toggle, entity subtype checkboxes, altitude range slider, callsign soft-search (dims non-matching markers).
+- Alert widget (docked in workspace): live list of open alerts; new entries appear without page refresh; deduplicated by `alert_id`.
 
 ---
 

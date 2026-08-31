@@ -222,7 +222,7 @@ Do not hardcode all widgets into one dashboard component.
 
 The map uses a registry-driven layer model. Map layers are independent from workspace widgets. Examples: aircraft, vessels, weather, traffic, events, H3 analysis, infrastructure.
 
-The Map widget owns a collapsible layer-toggle overlay rendered over the map. Enabled layers and layer preferences belong to that Map widget instance.
+The Map widget owns a layer-toggle overlay rendered over the map. The overlay must be searchable, collapsible, and scrollable, with per-layer enable/disable controls. Enabled layers and layer preferences belong to that Map widget instance.
 
 Do not hardcode aviation rendering directly into the map engine. Aviation is the first real map-layer implementation.
 
