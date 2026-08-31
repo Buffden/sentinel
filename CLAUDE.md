@@ -8,6 +8,16 @@ Claude is a pair engineer, not an autonomous implementation agent. Success means
 
 ---
 
+## Product North Star
+
+Sentinel is evolving toward a general-purpose real-time geospatial workspace for monitoring, exploration, analysis, and correlation of world-scale data.
+
+Aviation is the first deep vertical slice used to prove the platform architecture. Future domains may include maritime, weather, traffic, infrastructure, markets, news, public cameras, natural events, satellites, and other geographically meaningful datasets.
+
+Do not implement future domains early. Build reusable platform primitives through the current aviation vertical, then extend them when a real domain requires them.
+
+---
+
 ## Fixed Stack
 
 Do not change without an ADR.
@@ -20,7 +30,9 @@ Do not change without an ADR.
 | Live state / leases / pub-sub | Redis |
 | Backend runtime | Node.js / TypeScript |
 | API | Express + WebSocket |
-| Dashboard | Next.js (CSR) + Blueprint.js + react-leaflet |
+| Dashboard | Next.js (CSR) + React + Blueprint.js |
+| Map engine | MapLibre GL + deck.gl (ADR-017) |
+| Workspace layout | Dockview — dockable/resizable widget workspace (ADR-018) |
 | Auth | Google OAuth 2.0 + application JWT |
 | Deployment | Docker Compose to AWS |
 
@@ -180,15 +192,69 @@ A checkpoint is not complete because Claude wrote the code or tests pass.
 - When uncertain, inspect actual system state rather than guessing.
 - Every service from its first checkpoint must have structured logs and observable behavior; do not defer instrumentation to a later phase.
 
-### Dashboard Visual Language
+### Workspace Visual Language
 
-- Before any phase that introduces or changes operator-visible UI, create a low-fidelity SVG mockup first and save it with the relevant phase/concept documentation. Use PNG only when SVG is unsuitable. The mockup must follow `docs/ui/sentinel-dashboard-reference.png` and include all relevant operator-visible behavior delivered by prior phases so the dashboard evolves cumulatively as one product. Show the mockup to the developer and obtain approval before beginning frontend implementation.
-- Dark map-first operational interface: deep navy/graphite backgrounds, blue-gray borders, electric-blue interaction accents, compact typography, low-radius panels, high information density. Inspired by data-dense operational systems; do not copy proprietary UI.
-- Consistent shell: compact top nav, filter/navigation rail, central map workspace, contextual detail/alert panels, event timeline where the feature requires it. Extend existing patterns; do not redesign the layout per phase.
-- Semantic status colors: green = live/healthy, amber = warning/elevated, red = critical/lost, blue = informational/interactive/selected, gray = secondary/disabled. Do not invent page-specific colors.
-- Reuse shared design tokens for color, typography, spacing, borders, panels, controls, and map overlays. Avoid ad-hoc CSS values when a shared token or pattern exists.
+- Before any phase that introduces or changes operator-visible UI, create a low-fidelity SVG mockup first and save it with the relevant phase/concept documentation. Use PNG only when SVG is unsuitable. Show the mockup to the developer and obtain approval before beginning frontend implementation.
+- Dark, data-dense operational workspace. Map-first by default, but the map is a resizable Dockview widget, not the application shell.
+- Panels use consistent headers, borders, controls, spacing, and status semantics. Widgets may be docked, resized, tabbed, maximised, or closed. Map layer controls appear as an overlay within the Map widget.
+- Semantic status colors: green = live/healthy, amber = warning/elevated, red = critical/lost, blue = informational/interactive/selected, gray = secondary/disabled. Do not invent widget-specific colors.
+- Reuse shared design tokens for color, typography, spacing, borders, panels, and controls. Avoid ad-hoc CSS values when a shared token or pattern exists.
 - No glassmorphism, decorative gradients, excessive rounding, consumer-app styling, or animation without operational meaning.
-- Implementation must match the approved mockup in layout, information hierarchy, major controls, and interaction patterns. If a significant change is unavoidable, update the design reference intentionally rather than diverging silently.
+- Implementation must match the approved mockup. If a significant change is unavoidable, update the design reference intentionally rather than diverging silently.
+
+---
+
+## Frontend Architecture
+
+### Workspace model
+
+The operator UI is a customisable workspace, not a fixed dashboard. The workspace owns independent widget instances: world map, aviation alerts, entity details, and future domain widgets. Widgets may be resized, moved, docked, tabbed, maximised, closed, and restored. User workspace layouts may be persisted by the backend.
+
+The map is a workspace widget. It does not own the application shell.
+
+### Widget architecture
+
+Use a registry-driven widget model. A widget definition owns its stable type, component, title/icon metadata, sizing constraints, supported workspace actions, and configuration contract. Each rendered widget has its own instance identity so multiple instances of the same widget type can coexist.
+
+Do not hardcode all widgets into one dashboard component.
+
+### Map architecture
+
+The map uses a registry-driven layer model. Map layers are independent from workspace widgets. Examples: aircraft, vessels, weather, traffic, events, H3 analysis, infrastructure.
+
+The Map widget owns a collapsible layer-toggle overlay rendered over the map. Enabled layers and layer preferences belong to that Map widget instance.
+
+Do not hardcode aviation rendering directly into the map engine. Aviation is the first real map-layer implementation.
+
+### Frontend state boundaries
+
+Separate:
+
+1. Workspace state: widget layout, open widgets, selected global context, global time range.
+2. Widget state: widget-specific configuration, follow/lock of workspace context.
+3. Map state: viewport, enabled layers, layer filters, map-specific time/context.
+
+Domain data must remain separate from layout configuration. Persist configuration and preferences, not transient live data.
+
+### Frontend extensibility rule
+
+Build shared platform primitives only when the current vertical proves a real need.
+
+Prefer: workspace registry to domain widgets; map widget to layer registry to domain layers.
+
+Do not create speculative generic factories or abstractions for future domains. Aviation exercises the platform interfaces first; later domains reuse them.
+
+Current implementation scope is determined by the active phase. The long-term platform architecture must not be used as justification for implementing future-domain features early. During any phase, implement only the aviation functionality required by that phase, while placing it behind the permanent workspace/widget/map-layer boundaries where those boundaries are already justified.
+
+---
+
+## External Reference and Licensing Guardrail
+
+External open-source projects may be studied for architecture, UX patterns, technology choices, and implementation techniques.
+
+Do not copy AGPL or otherwise strongly-copyleft source code into Sentinel unless the developer explicitly approves the resulting licensing consequences. Prefer independently implementing concepts using the underlying third-party libraries under their own licenses.
+
+Do not copy third-party branding, logos, names, distinctive assets, or proprietary visual identity.
 
 ---
 
@@ -208,4 +274,4 @@ A checkpoint is not complete because Claude wrote the code or tests pass.
 
 ## CLAUDE.md Scope Rule
 
-This file contains only permanent behavioral and architectural guardrails. Do not add checkpoint-specific details, experiment logs, phase constants, bug notes, temporary commands, or future-phase design. Put those in phase docs, architecture docs, concept notes, or debriefs. If this file exceeds 230 lines, move informational detail out rather than letting permanent instructions compete for attention.
+This file contains only permanent behavioral and architectural guardrails. Do not add checkpoint-specific details, experiment logs, phase constants, bug notes, temporary commands, or future-phase design. Put those in phase docs, architecture docs, concept notes, or debriefs. If this file exceeds 400 lines, move informational detail out rather than letting permanent instructions compete for attention.
