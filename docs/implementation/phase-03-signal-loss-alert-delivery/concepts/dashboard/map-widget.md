@@ -62,8 +62,7 @@ The `useEffect` in `MapWidget` manages the lifecycle explicitly:
   `mapRef.current = null` while the load callback still has a reference to the map and
   tries to call `map.addControl()` on a destroyed instance.
 - A `ResizeObserver` on the map container calls `map.resize()` whenever the container
-  dimensions change. This handles SplitLayout divider drags and panel swaps without
-  reinitialising the map.
+  dimensions change. This handles Dockview sash drags without reinitialising the map.
 
 Cleanup order matters: `resizeObserver.disconnect()` first, then `map.remove()`, which
 internally removes all attached controls including the deck.gl overlay.
@@ -137,12 +136,9 @@ Clicking 2D restores mercator. The active button is highlighted with the informa
 design token. The `is3D` state lives in `MapWidget` because it is purely a map concern and
 nothing outside the widget needs to know about it.
 
-**Layout swap:** Clicking this button calls `onToggleLayout`, a prop passed from `page.tsx`.
-`page.tsx` tracks `swapped` (which panel is on which side) and `mapPct` (the map's percentage
-of the total width, always expressed as the map's share regardless of which side it is on).
-When swapped, the left panel receives `100 - mapPct` so the workspace gets its historic width
-and the map gets its historic width. Dragging the divider while swapped inverts the delta back
-to `mapPct` so the next swap restores the correct widths for both panels.
+**Layout swap:** Clicking this button calls `onToggleLayout`, injected into the widget by
+Dockview via the `params` field in `addPanel`. `Workspace.tsx` owns a `swappedRef` tracking
+which side the map is on. On each click it calls `mapPanel.api.moveTo({ group: widgetsPanel.group, position: 'right' | 'left' })`, which moves the map Dockview panel to the opposite side of the sash. Tab bar visibility is restored immediately after via `setTimeout(() => hideHeaders(api), 0)` because `moveTo` recreates the group header.
 
 **Fullscreen:** Uses the browser Fullscreen API on `outerRef`, which covers the entire widget
 including the header. Pressing Escape exits fullscreen via the browser's native behaviour.
@@ -155,8 +151,8 @@ The map widget spans the following files in the dashboard service:
 
 - `public/maplibre-gl-worker.mjs` — tile-parsing worker, static copy served at known URL
 - `public/maplibre-gl-shared.mjs` — shared utilities imported by the worker
-- `src/app/page.tsx` — client component that owns `swapped` and `mapPct` state
-- `src/shell/SplitLayout.tsx` — controlled split; accepts `leftPct` and `onLeftPctChange`
+- `src/app/page.tsx` — composes TopNav, Workspace, Footer; no layout state
+- `src/workspace/Workspace.tsx` — Dockview container; owns map/widgets split and swap logic
 - `src/widgets/map-widget/MapWidget.tsx` — lifecycle, controls, layout
 - `src/widgets/map-widget/mapStyle.ts` — provider URLs and env var override
 - `src/widgets/map-widget/types.ts` — `MapLayerDefinition` interface
@@ -172,5 +168,5 @@ The map widget spans the following files in the dashboard service:
 | Worker delivery | Static file in `public/` | Turbopack cannot bundle MapLibre's dynamic worker URL; static serving is the simplest correct fix |
 | Projection API | `map.setProjection` with globe or mercator type | MapLibre GL v6 native; no additional packages needed |
 | Attribution | Custom React overlay | Shortens legal text without removing required attribution |
-| Width tracking | `mapPct` in page.tsx (map's share, always) | Ensures toggling layout preserves both panels' widths without coordinate transformation on every drag event |
+| Layout swap | `panel.api.moveTo()` in Workspace.tsx | Dockview handles sash width state; `moveTo` repositions the panel group without reinitialising map or widgets |
 | Canvas context | `antialias: true`, `powerPreference: 'high-performance'` | MSAA sharpens vector tile edges; GPU hint improves tile render throughput |
