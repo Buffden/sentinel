@@ -1,7 +1,7 @@
 @startuml ws-separation-flow
 title WebSocket Separation — Layer Ownership
 
-skinparam backgroundColor #0d1117
+skinparam backgroundColor #eaedf1
 skinparam sequenceArrowColor #3b82f6
 skinparam sequenceLifeLineBorderColor #3b82f6
 skinparam participantBorderColor #1e2d3d

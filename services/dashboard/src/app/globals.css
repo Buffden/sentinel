@@ -1,0 +1,63 @@
+@import '../shared/styles/tokens.css';
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+}
+
+html,
+body,
+#__next {
+	height: 100%;
+	width: 100%;
+	background: var(--color-bg-app);
+	color: var(--color-text-primary);
+	font-family: var(--font-sans);
+	font-size: var(--font-size-base);
+}
+
+/* Show close button when hovering the panel */
+.panel-close-btn {
+	opacity: 0;
+}
+
+*:hover > .panel-close-btn {
+	opacity: 1;
+}
+
+/* Dockview: style sash (resize handles) and panel background to match design tokens.
+   Tab bars are hidden via panel.group.header.hidden = true in buildDefaultLayout,
+   which sets display:none directly on the element. The height variable below is
+   kept as a CSS-level fallback. */
+.dockview-theme-dark {
+	--dv-group-view-background-color: var(--color-bg-panel);
+	--dv-separator-border: var(--color-border);
+	--dv-sash-color: var(--color-border);
+	--dv-active-sash-color: var(--color-status-info);
+	--dv-tabs-and-actions-container-height: 0px;
+}
+
+/* Expand the sash hit area for mouse/trackpad users.
+   Dockview only widens the hit area for touch (pointer:coarse) by default,
+   leaving a 4px grab zone on desktop — nearly impossible to find.
+   This gives ±6px on each side of the visible sash line. */
+.sentinel-workspace .dv-split-view-container .dv-sash-container > .dv-sash:not(.dv-disabled)::before {
+	content: '';
+	position: absolute;
+	background: transparent;
+}
+.sentinel-workspace .dv-split-view-container.dv-horizontal .dv-sash-container > .dv-sash:not(.dv-disabled)::before {
+	top: 0;
+	bottom: 0;
+	left: -6px;
+	right: -6px;
+}
+.sentinel-workspace .dv-split-view-container.dv-vertical .dv-sash-container > .dv-sash:not(.dv-disabled)::before {
+	left: 0;
+	right: 0;
+	top: -6px;
+	bottom: -6px;
+}
