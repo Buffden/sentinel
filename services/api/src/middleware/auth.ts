@@ -8,6 +8,9 @@ const secret: string = JWT_SECRET;
 export interface SentinelJwtPayload {
 	user_id: string;
 	email: string;
+	role: 'operator' | 'demo';
+	// Standard JWT claim: seconds since epoch. Present on all tokens we issue.
+	exp?: number;
 }
 
 // Attaches user_id and email to the request after verifying the sentinel_jwt cookie.
