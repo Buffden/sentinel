@@ -44,12 +44,14 @@ Same JWT secret, same `jsonwebtoken.verify()` middleware. The `role: 'demo'` cla
 
 Two layers:
 
-| Layer | Limit | Scope |
+| Layer | Limit | Implementation |
 |---|---|---|
-| `POST /auth/demo` | 1 token per IP per hour | `express-rate-limit`, keyed by IP |
-| Demo WebSocket connections | 10 concurrent max | In-memory counter in WS upgrade handler |
+| `POST /auth/demo` | 1 token per IP per hour | In-memory `Map<string, number>` in `routes/auth.ts` |
+| Demo WebSocket connections | 10 concurrent max | Module-level counter in `shared/demoSessions.ts` |
 
 The per-IP hourly limit prevents bulk token farming. The concurrent WS cap prevents a single demo deployment from being overwhelmed.
+
+**Known limitation:** the in-memory IP rate limit is single-instance only. It resets on process restart and does not coordinate across multiple API instances. Moving this to a Redis `INCR`/`EXPIRE` key is deferred to a later phase when multi-instance fan-out is addressed (Phase 08).
 
 ---
 

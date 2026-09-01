@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import 'dockview-react/dist/styles/dockview.css'
 import './globals.css'
+import Providers from './Providers'
 
 export const metadata: Metadata = {
 	title: 'Sentinel',
@@ -17,7 +18,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 					href="https://fonts.googleapis.com/icon?family=Material+Icons"
 				/>
 			</head>
-			<body suppressHydrationWarning>{children}</body>
+			<body suppressHydrationWarning>
+				<Providers>{children}</Providers>
+			</body>
 		</html>
 	)
 }
