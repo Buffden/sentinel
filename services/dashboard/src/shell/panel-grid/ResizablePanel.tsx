@@ -26,7 +26,6 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 	const rowDrag = useRef({ active: false, startY: 0, startSpan: 1 })
 	const colDrag = useRef({ active: false, startX: 0, startSpan: 1 })
 
-	// Row
 	const onRowMouseDown = useCallback((e: React.MouseEvent) => {
 		e.preventDefault()
 		rowDrag.current = { active: true, startY: e.clientY, startSpan: rowSpan }
@@ -48,7 +47,6 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 		document.addEventListener('mouseup', onUp)
 	}, [rowSpan])
 
-	// Column
 	const onColMouseDown = useCallback((e: React.MouseEvent) => {
 		e.preventDefault()
 		colDrag.current = { active: true, startX: e.clientX, startSpan: colSpan }
@@ -81,19 +79,19 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 				overflow: 'hidden',
 				display: 'flex',
 				flexDirection: 'column',
-				minWidth: 0,
+				minWidth: 240,
 				minHeight: 0,
 			}}
 		>
-			{/* Widget content */}
 			<div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
 				{children}
 			</div>
 
-			{/* Close button */}
 			{onClose && (
 				<button
 					onClick={onClose}
+					className="panel-close-btn"
+					aria-label="Close widget"
 					style={{
 						position: 'absolute',
 						top: 10,
@@ -106,12 +104,9 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 						fontSize: 12,
 						lineHeight: 1,
 						padding: '2px 4px',
-						transition: 'opacity 0.15s, color 0.15s',
 					}}
 					onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--color-status-critical)' }}
 					onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--color-text-muted)' }}
-					className="panel-close-btn"
-					aria-label="Close widget"
 				>
 					✕
 				</button>
@@ -134,7 +129,6 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 					justifyContent: 'center',
 					paddingBottom: 2,
 					background: 'linear-gradient(to top, rgba(59,130,246,0.12), transparent)',
-					transition: 'background 0.15s',
 				}}
 				onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'linear-gradient(to top, rgba(59,130,246,0.45), transparent)' }}
 				onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'linear-gradient(to top, rgba(59,130,246,0.12), transparent)' }}
@@ -159,14 +153,12 @@ export default function ResizablePanel({ children, defaultRowSpan = 2, defaultCo
 					justifyContent: 'flex-end',
 					paddingRight: 2,
 					background: 'linear-gradient(to left, rgba(59,130,246,0.12), transparent)',
-					transition: 'background 0.15s',
 				}}
 				onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'linear-gradient(to left, rgba(59,130,246,0.45), transparent)' }}
 				onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'linear-gradient(to left, rgba(59,130,246,0.12), transparent)' }}
 			>
 				<span style={{ color: 'var(--color-text-muted)', fontSize: 10, letterSpacing: 2, lineHeight: 1, writingMode: 'vertical-rl' }}>⋯</span>
 			</div>
-
 		</div>
 	)
 }

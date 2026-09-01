@@ -37,6 +37,7 @@ export default function AddWidgetCard({ onClick }: AddWidgetCardProps) {
 				letterSpacing: '0.08em',
 				textTransform: 'uppercase',
 				padding: 0,
+				minWidth: 240,
 				minHeight: 0,
 				transition: 'color 0.15s',
 			}}

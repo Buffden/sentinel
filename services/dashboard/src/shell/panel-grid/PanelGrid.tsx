@@ -7,7 +7,7 @@ export default function PanelGrid({ children }: PanelGridProps) {
 		<div
 			style={{
 				display: 'grid',
-				gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+				gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
 				gridAutoRows: '160px',
 				gap: 5,
 				padding: 4,
