@@ -5,6 +5,7 @@ import { parseCookie } from 'cookie';
 import jwt from 'jsonwebtoken';
 import { Redis } from 'ioredis';
 import type { SentinelJwtPayload } from '../middleware/auth.js';
+import { incrementDemoCount, decrementDemoCount } from '../shared/demoSessions.js';
 
 const JWT_SECRET = process.env['JWT_SECRET'];
 if (!JWT_SECRET) throw new Error('JWT_SECRET env var is required');
@@ -109,11 +110,26 @@ export function attachWebSocketServer(server: Server): void {
 
 	wss.on('connection', (ws: WebSocket, _req: IncomingMessage, payload: SentinelJwtPayload) => {
 		connectionBBox.set(ws, null);
+
+		// Demo session: track active count and schedule close at JWT expiry.
+		let demoExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+		if (payload.role === 'demo' && payload.exp !== undefined) {
+			incrementDemoCount();
+			const msUntilExpiry = payload.exp * 1000 - Date.now();
+			// Guard against already-expired tokens — they would have been rejected at upgrade,
+			// but a negative delay would fire immediately and confuse the operator.
+			const delay = Math.max(msUntilExpiry, 0);
+			demoExpiryTimer = setTimeout(() => {
+				ws.close(4401, 'demo session expired');
+			}, delay);
+		}
+
 		console.log(
 			JSON.stringify({
 				level: 'info',
 				msg: 'ws client connected',
 				user_id: payload.user_id,
+				role: payload.role,
 				total: connectionBBox.size,
 			}),
 		);
@@ -141,11 +157,16 @@ export function attachWebSocketServer(server: Server): void {
 
 		ws.on('close', () => {
 			connectionBBox.delete(ws);
+			if (payload.role === 'demo') {
+				decrementDemoCount();
+				if (demoExpiryTimer !== null) clearTimeout(demoExpiryTimer);
+			}
 			console.log(
 				JSON.stringify({
 					level: 'info',
 					msg: 'ws client disconnected',
 					user_id: payload.user_id,
+					role: payload.role,
 					total: connectionBBox.size,
 				}),
 			);
