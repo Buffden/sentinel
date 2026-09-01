@@ -91,14 +91,19 @@ services/dashboard/
   src/
     app/                          routing and composition only
       layout.tsx
-      page.tsx                    owns split state (swapped, mapPct)
+      page.tsx                    composes TopNav, Workspace, Footer
 
     shell/                        layout primitives
-      SplitLayout.tsx             resizable left/right split (controlled)
       Footer.tsx
+      panel-grid/
+        PanelGrid.tsx             CSS grid container for widgets
+        ResizablePanel.tsx        per-widget drag handles (row and column span)
+        AddWidgetCard.tsx         dashed-border toggle card
+        AddWidgetModal.tsx        widget visibility modal
 
-    workspace/                    widget registry and default layout
-      Workspace.tsx
+    workspace/                    Dockview workspace and widget panel
+      Workspace.tsx               Dockview container: map panel left, widget panel right
+      WidgetPanel.tsx             PanelGrid + ResizablePanel widget grid
 
     widgets/
       top-nav/

@@ -28,7 +28,7 @@ Out of scope: multi-tenant workspace scoping (Phase 07), multi-instance fan-out,
 | CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade | Done |
 | CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Done |
 | CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Done |
-| CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | In progress — CP7c done (MapLibre GL + deck.gl map widget: CARTO dark basemap, aviation ScatterplotLayer, 2D/3D toggle, layout swap, fullscreen, worker URL fix for Turbopack) |
+| CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | In progress — CP7c done (Dockview workspace: map/widget split with sash resize; WidgetPanel with ResizablePanel grid; MapLibre GL + deck.gl map widget; luma.gl dynamic import fix; layout swap toggle) |
 
 ---
 
