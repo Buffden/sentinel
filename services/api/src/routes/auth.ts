@@ -32,6 +32,7 @@ router.post('/google', async (req, res) => {
 
 	let googleSub: string;
 	let email: string;
+	let name: string;
 	try {
 		const ticket = await oauthClient.verifyIdToken({
 			idToken: body.id_token,
@@ -44,6 +45,7 @@ router.post('/google', async (req, res) => {
 		}
 		googleSub = payload.sub;
 		email = payload.email;
+		name = payload.name ?? payload.email;
 	} catch (err) {
 		console.error(
 			JSON.stringify({ level: 'warn', msg: 'Google token verification failed', err: String(err) }),
@@ -72,7 +74,7 @@ router.post('/google', async (req, res) => {
 		return;
 	}
 
-	const token = jwt.sign({ user_id: userId, email, role: 'operator' }, jwtSecret, {
+	const token = jwt.sign({ user_id: userId, email, name, role: 'operator' }, jwtSecret, {
 		expiresIn: JWT_EXPIRES_IN,
 	});
 
@@ -117,6 +119,61 @@ router.post('/demo', (req, res) => {
 	});
 
 	console.log(JSON.stringify({ level: 'info', msg: 'demo session issued', ip }));
+	res.json({ ok: true });
+});
+
+router.get('/me', (req, res) => {
+	const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+	if (!token) {
+		res.status(401).json({ error: 'Not authenticated' });
+		return;
+	}
+	try {
+		const payload = jwt.verify(token, jwtSecret) as {
+			user_id?: string;
+			email?: string;
+			name?: string;
+			role?: string;
+		};
+		res.json({
+			user_id: payload.user_id,
+			email: payload.email,
+			name: payload.name,
+			role: payload.role,
+		});
+	} catch {
+		res.status(401).json({ error: 'Invalid or expired token' });
+	}
+});
+
+router.post('/logout', (req, res) => {
+	const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+
+	if (token) {
+		try {
+			const payload = jwt.verify(token, jwtSecret) as {
+				user_id?: string;
+				email?: string;
+				role?: string;
+			};
+			console.log(
+				JSON.stringify({
+					level: 'info',
+					msg: 'logout',
+					role: payload.role ?? 'unknown',
+					user_id: payload.user_id ?? 'unknown',
+				}),
+			);
+		} catch {
+			// Token expired or invalid — still clear the cookie.
+		}
+	}
+
+	res.clearCookie(COOKIE_NAME, {
+		httpOnly: true,
+		secure: process.env['NODE_ENV'] === 'production',
+		sameSite: 'strict',
+	});
 	res.json({ ok: true });
 });
 
