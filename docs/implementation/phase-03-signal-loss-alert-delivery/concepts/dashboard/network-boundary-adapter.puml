@@ -1,0 +1,60 @@
+@startuml network-boundary-adapter
+title Network Boundary — Adapter Strategy
+
+skinparam backgroundColor #eaedf1
+skinparam sequenceArrowColor #3b82f6
+skinparam sequenceLifeLineBorderColor #3b82f6
+skinparam participantBorderColor #1e2d3d
+skinparam participantBackgroundColor #0d1117
+skinparam participantFontColor #f1f5f9
+skinparam noteBorderColor #1e2d3d
+skinparam noteBackgroundColor #0f1623
+skinparam noteFontColor #9ca3af
+
+participant "API\n(REST)" as REST
+participant "API\n(WebSocket)" as WS
+participant "Validator\n(optional Zod)" as VAL
+participant "Adapter\nfunction" as ADAPT
+participant "Frontend\ndomain model" as MODEL
+participant "React\nstate" as REACT
+
+== REST hydration (GET /entities/live, GET /alerts) ==
+
+REST -> VAL : wire JSON (DTO)
+VAL -> VAL : parse against schema\ndiscard + log on failure
+VAL -> ADAPT : validated DTO
+ADAPT -> ADAPT : map field names\nnormalise nulls\nderive computed fields
+ADAPT -> MODEL : TrackedEntity | Alert
+MODEL -> REACT : setEntities / setAlerts
+
+note over ADAPT
+  last_seen_ms (REST) and timestamp_ms (WS)
+  both map to eventTimeMs in the domain model.
+  React never sees wire field names.
+end note
+
+== WebSocket live update ==
+
+WS -> VAL : wire frame (DTO)
+VAL -> VAL : parse against schema\ndiscard + log on failure
+VAL -> ADAPT : validated DTO
+ADAPT -> MODEL : TrackedEntity | Alert
+MODEL -> REACT : applyEntitySnapshot / write by alert_id
+
+note over REACT
+  applyEntitySnapshot: accept only if
+  eventTimeMs > stored (monotonicity guard).
+  write by alert_id: idempotent dedup.
+end note
+
+== Malformed frame (discard path) ==
+
+WS -> VAL : malformed / unexpected JSON
+VAL -> VAL : validation fails — log warning with raw frame
+note right of VAL
+  Frame is dropped.
+  React state is never touched.
+  Malformed data cannot reach the UI.
+end note
+
+@enduml

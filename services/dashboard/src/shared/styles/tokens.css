@@ -1,0 +1,40 @@
+:root {
+	/* Background */
+	--color-bg-app: #0a0a0a;
+	--color-bg-panel: #111111;
+	--color-bg-elevated: #1a1a1a;
+
+	/* Borders */
+	--color-border: #2a2a2a;
+	--color-border-subtle: #1e1e1e;
+	--color-border-focus: #3b82f6;
+
+	/* Text */
+	--color-text-primary: #e0e0e0;
+	--color-text-secondary: #a0a0a0;
+	--color-text-muted: #606060;
+
+	/* Status */
+	--color-status-live: #22c55e;
+	--color-status-warning: #f59e0b;
+	--color-status-critical: #ef4444;
+	--color-status-info: #3b82f6;
+
+	/* Spacing (4px base) */
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--space-6: 24px;
+
+	/* Fixed dimensions */
+	--topnav-height: 48px;
+	--panel-border-radius: 4px;
+
+	/* Typography */
+	--font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+	--font-sans: ui-sans-serif, system-ui, sans-serif;
+	--font-size-xs: 11px;
+	--font-size-sm: 12px;
+	--font-size-base: 13px;
+}
