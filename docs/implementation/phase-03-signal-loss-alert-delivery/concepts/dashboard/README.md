@@ -12,8 +12,8 @@ Study for layout and visual patterns only. Do not copy source code.
 | This file | Visual target, shell structure, layer responsibilities, state ownership, checkpoint order |
 | [`map-widget.md`](map-widget.md) | MapLibre GL + deck.gl integration, worker URL fix, layer boundary, header controls |
 | [`filters.md`](filters.md) | CP7g floating FilterPanel, the layer-toggle-overlay deviation, the applyPositionUpdate merge fix, two drag-bounds bugs |
-| [`cp7i-shared-websocket.md`](cp7i-shared-websocket.md) | CP7i live alert feed, the shared/reference-counted WebSocket singleton, REST vs WS alert wire-shape differences |
-| [`cp7j-frontend-testing.md`](cp7j-frontend-testing.md) | CP7j — why Vitest, the tsconfig-alias gotcha, position staleness + alert dedup proven with tests |
+| [`shared-websocket.md`](shared-websocket.md) | CP7i live alert feed, the shared/reference-counted WebSocket singleton, REST vs WS alert wire-shape differences |
+| [`frontend-testing.md`](frontend-testing.md) | CP7j — why Vitest, the tsconfig-alias gotcha, position staleness + alert dedup proven with tests |
 | [`network-boundary-adapter.puml`](network-boundary-adapter.puml) | Wire JSON → adapter → domain model → React sequence |
 | [`ws-separation-flow.puml`](ws-separation-flow.puml) | WebSocket lifecycle: connect, subscribe, reconnect, demo expiry, cleanup |
 
