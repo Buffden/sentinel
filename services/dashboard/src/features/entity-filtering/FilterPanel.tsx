@@ -6,6 +6,7 @@
 // Drag position and collapsed state are local UI state, not persisted.
 
 import { useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import {
 	type AviationFilters,
 	type AviationStatusFilter,
@@ -21,18 +22,75 @@ interface FilterPanelProps {
 
 const PANEL_WIDTH = 212
 
+interface DragState {
+	startX: number
+	startY: number
+	originX: number
+	originY: number
+	// Container and panel bounds captured once at drag start (not re-measured
+	// on every mousemove) so the panel can never be dragged fully or partially
+	// out of the map widget's visible area.
+	maxX: number
+	maxY: number
+}
+
 export default function FilterPanel({ filters, onFiltersChange, shownCount, totalCount }: FilterPanelProps) {
 	const [collapsed, setCollapsed] = useState(false)
 	const [position, setPosition] = useState({ x: 16, y: 16 })
-	const dragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null)
+	const panelRef = useRef<HTMLDivElement>(null)
+	const dragRef = useRef<DragState | null>(null)
+
+	// Measures the panel's own current size (expanded or collapsed) against
+	// its container and returns how far the panel may sit from the
+	// container's top-left edge without any part of it overflowing.
+	function measureMaxOffset(): { maxX: number; maxY: number } | null {
+		const panel = panelRef.current
+		const container = panel?.parentElement
+		if (!panel || !container) return null
+		const containerRect = container.getBoundingClientRect()
+		return {
+			maxX: Math.max(0, containerRect.width - panel.offsetWidth),
+			maxY: Math.max(0, containerRect.height - panel.offsetHeight),
+		}
+	}
+
+	// Collapsing only shrinks the panel, which can't overflow — but expanding
+	// grows it back, and if the panel was previously dragged near an edge
+	// while collapsed, the larger expanded body can push past the container
+	// boundary. flushSync forces the collapsed-state DOM update to commit
+	// synchronously so panelRef already reflects the new size by the time we
+	// measure and clamp — done here in the event handler, not an effect,
+	// since an effect can't call setState synchronously without risking
+	// cascading renders (react-hooks/set-state-in-effect).
+	function toggleCollapsed() {
+		flushSync(() => setCollapsed((c) => !c))
+		const bounds = measureMaxOffset()
+		if (!bounds) return
+		setPosition((prev) => ({
+			x: clamp(prev.x, 0, bounds.maxX),
+			y: clamp(prev.y, 0, bounds.maxY),
+		}))
+	}
 
 	function onHeaderMouseDown(e: React.MouseEvent) {
-		dragRef.current = { startX: e.clientX, startY: e.clientY, originX: position.x, originY: position.y }
+		const bounds = measureMaxOffset()
+		if (!bounds) return
+
+		dragRef.current = {
+			startX: e.clientX,
+			startY: e.clientY,
+			originX: position.x,
+			originY: position.y,
+			maxX: bounds.maxX,
+			maxY: bounds.maxY,
+		}
 
 		function onMouseMove(ev: MouseEvent) {
 			if (!dragRef.current) return
-			const { startX, startY, originX, originY } = dragRef.current
-			setPosition({ x: originX + (ev.clientX - startX), y: originY + (ev.clientY - startY) })
+			const { startX, startY, originX, originY, maxX, maxY } = dragRef.current
+			const nextX = clamp(originX + (ev.clientX - startX), 0, maxX)
+			const nextY = clamp(originY + (ev.clientY - startY), 0, maxY)
+			setPosition({ x: nextX, y: nextY })
 		}
 		function onMouseUp() {
 			dragRef.current = null
@@ -45,6 +103,7 @@ export default function FilterPanel({ filters, onFiltersChange, shownCount, tota
 
 	return (
 		<div
+			ref={panelRef}
 			style={{
 				position: 'absolute',
 				left: position.x,
@@ -85,7 +144,7 @@ export default function FilterPanel({ filters, onFiltersChange, shownCount, tota
 					AVIATION FILTERS
 				</span>
 				<button
-					onClick={() => setCollapsed((c) => !c)}
+					onClick={toggleCollapsed}
 					title={collapsed ? 'Expand' : 'Collapse'}
 					style={{
 						display: 'flex',
@@ -213,6 +272,10 @@ function DragHandleIcon() {
 			<circle cx="7" cy="12" r="1.4" />
 		</svg>
 	)
+}
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.min(Math.max(value, min), max)
 }
 
 function ChevronIcon({ direction }: { direction: 'up' | 'down' }) {
