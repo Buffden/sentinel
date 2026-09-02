@@ -1,13 +1,10 @@
 import { Kafka } from 'kafkajs';
 import { pool } from '../db.js';
 import { redis } from '../redis.js';
+import { config } from '../config.js';
 
-const KAFKA_BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
-const ALERTS_TOPIC = 'alerts';
-const GROUP_ID = 'api';
-
-const kafka = new Kafka({ brokers: KAFKA_BROKERS });
-const consumer = kafka.consumer({ groupId: GROUP_ID });
+const kafka = new Kafka({ brokers: config.KAFKA_BROKERS });
+const consumer = kafka.consumer({ groupId: config.API_GROUP_ID });
 
 interface AlertMessage {
 	alert_id: string;
@@ -22,8 +19,16 @@ interface AlertMessage {
 
 export async function startAlertSink(): Promise<void> {
 	await consumer.connect();
-	await consumer.subscribe({ topic: ALERTS_TOPIC, fromBeginning: false });
-	console.log(JSON.stringify({ level: 'info', msg: 'alert sink consumer started', brokers: KAFKA_BROKERS, topic: ALERTS_TOPIC, group: GROUP_ID }));
+	await consumer.subscribe({ topic: config.ALERTS_TOPIC, fromBeginning: false });
+	console.log(
+		JSON.stringify({
+			level: 'info',
+			msg: 'alert sink consumer started',
+			brokers: config.KAFKA_BROKERS,
+			topic: config.ALERTS_TOPIC,
+			group: config.API_GROUP_ID,
+		}),
+	);
 
 	await consumer.run({
 		autoCommit: false,
@@ -35,9 +40,13 @@ export async function startAlertSink(): Promise<void> {
 			try {
 				alert = JSON.parse(raw) as AlertMessage;
 			} catch (err) {
-				console.error(JSON.stringify({ level: 'error', msg: 'alert parse failed', err: String(err), raw }));
+				console.error(
+					JSON.stringify({ level: 'error', msg: 'alert parse failed', err: String(err), raw }),
+				);
 				// Commit and skip — malformed messages cannot be fixed by retry.
-				await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
+				await consumer.commitOffsets([
+					{ topic, partition, offset: String(Number(message.offset) + 1) },
+				]);
 				return;
 			}
 
@@ -51,8 +60,17 @@ export async function startAlertSink(): Promise<void> {
 				typeof alert.detected_at_ms !== 'number' ||
 				!isFinite(alert.detected_at_ms)
 			) {
-				console.error(JSON.stringify({ level: 'error', msg: 'alert validation failed — skipping', alert_id: alert.alert_id, raw }));
-				await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
+				console.error(
+					JSON.stringify({
+						level: 'error',
+						msg: 'alert validation failed — skipping',
+						alert_id: alert.alert_id,
+						raw,
+					}),
+				);
+				await consumer.commitOffsets([
+					{ topic, partition, offset: String(Number(message.offset) + 1) },
+				]);
 				return;
 			}
 
@@ -75,12 +93,21 @@ export async function startAlertSink(): Promise<void> {
 			);
 
 			// Step 2: publish to alert-events for WebSocket fan-out (CP6).
-			await redis.publish('alert-events', raw);
+			await redis.publish(config.ALERT_EVENTS_CHANNEL, raw);
 
 			// Step 3: commit offset — last, so a crash before here causes safe redeliver.
-			await consumer.commitOffsets([{ topic, partition, offset: String(Number(message.offset) + 1) }]);
+			await consumer.commitOffsets([
+				{ topic, partition, offset: String(Number(message.offset) + 1) },
+			]);
 
-			console.log(JSON.stringify({ level: 'info', msg: 'alert sinked', alert_id: alert.alert_id, alert_type: alert.alert_type }));
+			console.log(
+				JSON.stringify({
+					level: 'info',
+					msg: 'alert sinked',
+					alert_id: alert.alert_id,
+					alert_type: alert.alert_type,
+				}),
+			);
 		},
 	});
 }

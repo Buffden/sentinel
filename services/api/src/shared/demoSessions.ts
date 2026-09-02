@@ -2,8 +2,7 @@
 // Imported by both routes/auth.ts (cap check at token issue time)
 // and ws/wsServer.ts (increment/decrement on connect/close).
 // Module-level state is safe here: one Node process, one wsServer instance.
-
-export const MAX_DEMO_CONNECTIONS = 10;
+// MAX_DEMO_CONNECTIONS is owned by config.ts.
 
 let activeCount = 0;
 

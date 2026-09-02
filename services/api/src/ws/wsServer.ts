@@ -6,12 +6,7 @@ import jwt from 'jsonwebtoken';
 import { Redis } from 'ioredis';
 import type { SentinelJwtPayload } from '../middleware/auth.js';
 import { incrementDemoCount, decrementDemoCount } from '../shared/demoSessions.js';
-
-const JWT_SECRET = process.env['JWT_SECRET'];
-if (!JWT_SECRET) throw new Error('JWT_SECRET env var is required');
-const jwtSecret: string = JWT_SECRET;
-
-const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
+import { config } from '../config.js';
 
 interface BBox {
 	minLat: number;
@@ -34,7 +29,7 @@ function verifyToken(req: IncomingMessage): SentinelJwtPayload | null {
 	const token = cookies['sentinel_jwt'];
 	if (!token) return null;
 	try {
-		return jwt.verify(token, jwtSecret) as unknown as SentinelJwtPayload;
+		return jwt.verify(token, config.JWT_SECRET) as unknown as SentinelJwtPayload;
 	} catch {
 		return null;
 	}
@@ -48,9 +43,9 @@ export function attachWebSocketServer(server: Server): void {
 	const wss = new WebSocketServer({ noServer: true });
 
 	// Dedicated subscriber connection — cannot issue commands on a subscribed connection.
-	const redisSub = new Redis(REDIS_URL);
+	const redisSub = new Redis(config.REDIS_URL);
 
-	redisSub.subscribe('position-updates', 'alert-events', (err) => {
+	redisSub.subscribe(config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL, (err) => {
 		if (err) {
 			console.error(
 				JSON.stringify({ level: 'error', msg: 'redis subscribe failed', err: String(err) }),
@@ -60,14 +55,14 @@ export function attachWebSocketServer(server: Server): void {
 				JSON.stringify({
 					level: 'info',
 					msg: 'ws redis subscriber ready',
-					channels: ['position-updates', 'alert-events'],
+					channels: [config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL],
 				}),
 			);
 		}
 	});
 
 	redisSub.on('message', (channel, message) => {
-		if (channel === 'position-updates') {
+		if (channel === config.POSITION_UPDATES_CHANNEL) {
 			let parsed: { lat?: unknown; lon?: unknown } = {};
 			try {
 				parsed = JSON.parse(message) as { lat?: unknown; lon?: unknown };
@@ -83,13 +78,15 @@ export function attachWebSocketServer(server: Server): void {
 			for (const [ws, bbox] of connectionBBox) {
 				if (ws.readyState !== WebSocket.OPEN) continue;
 				if (bbox && !isWithinBBox(bbox, lat, lon)) continue;
-				ws.send(JSON.stringify({ channel: 'position-updates', data: parsed }));
+				ws.send(JSON.stringify({ channel: config.POSITION_UPDATES_CHANNEL, data: parsed }));
 			}
-		} else if (channel === 'alert-events') {
+		} else if (channel === config.ALERT_EVENTS_CHANNEL) {
 			// Alert events go to all connected clients — no bbox filter.
 			for (const [ws] of connectionBBox) {
 				if (ws.readyState !== WebSocket.OPEN) continue;
-				ws.send(JSON.stringify({ channel: 'alert-events', data: JSON.parse(message) }));
+				ws.send(
+					JSON.stringify({ channel: config.ALERT_EVENTS_CHANNEL, data: JSON.parse(message) }),
+				);
 			}
 		}
 	});

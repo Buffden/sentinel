@@ -1,13 +1,8 @@
 import { Router } from 'express';
 import { redis } from '../redis.js';
+import { config } from '../config.js';
 
 const router = Router();
-
-// Entities unseen beyond 2x the signal-loss threshold are excluded — they are either
-// permanently gone or will trigger a SIGNAL_LOSS alert on the next evaluator scan.
-const SIGNAL_LOSS_THRESHOLD_MS = 300_000;
-const STALE_CUTOFF_MULTIPLIER = 2;
-const MAX_ENTITIES = 500;
 
 function parseFloat_(val: string | undefined): number | null {
 	if (!val || val === '') return null;
@@ -34,17 +29,23 @@ router.get('/', async (req, res) => {
 	const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
 
 	const nowMs = Date.now();
-	const staleCutoffMs = nowMs - SIGNAL_LOSS_THRESHOLD_MS * STALE_CUTOFF_MULTIPLIER;
+	const staleCutoffMs = nowMs - config.LIVE_ENTITY_STALE_AFTER_MS;
 
 	const entities: unknown[] = [];
 	let cursor = '0';
 
 	do {
-		const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'entity:live:*', 'COUNT', 100);
+		const [nextCursor, keys] = await redis.scan(
+			cursor,
+			'MATCH',
+			'entity:live:*',
+			'COUNT',
+			config.REDIS_SCAN_COUNT,
+		);
 		cursor = nextCursor;
 
 		for (const key of keys) {
-			if (entities.length >= MAX_ENTITIES) break;
+			if (entities.length >= config.LIVE_ENTITIES_MAX) break;
 
 			const hash = await redis.hgetall(key);
 			if (!hash) continue;
@@ -75,7 +76,7 @@ router.get('/', async (req, res) => {
 					hash['on_ground'] === 'true' ? true : hash['on_ground'] === 'false' ? false : null,
 			});
 		}
-	} while (cursor !== '0' && entities.length < MAX_ENTITIES);
+	} while (cursor !== '0' && entities.length < config.LIVE_ENTITIES_MAX);
 
 	res.json(entities);
 });
