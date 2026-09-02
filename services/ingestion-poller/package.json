@@ -6,7 +6,8 @@
 	"scripts": {
 		"produce": "tsx src/produce.ts",
 		"poll": "tsx src/poller.ts",
-		"test": "vitest run"
+		"test": "vitest run",
+		"test:coverage": "vitest run --coverage"
 	},
 	"dependencies": {
 		"kafkajs": "^2.2.4"
@@ -15,6 +16,7 @@
 		"@types/node": "^22.0.0",
 		"tsx": "^4.19.0",
 		"typescript": "^5.6.0",
-		"vitest": "^4.1.11"
+		"vitest": "^4.1.11",
+		"@vitest/coverage-v8": "^4.1.11"
 	}
 }

@@ -16,5 +16,15 @@ export default defineConfig({
 			PG_URL: 'postgresql://sentinel:sentinel-dev@localhost:5433/sentinel',
 			REDIS_URL: 'redis://localhost:6379',
 		},
+		// No enforced threshold: coverage here ranges from ~18% (alertSink.ts's
+		// Kafka consumer loop, deliberately out of scope — see its test file)
+		// to ~98% (routes). A single global number would be either toothless
+		// or immediately failing depending on which file it's measured against.
+		// Reporting only, for visibility — a threshold is a decision to make
+		// once there's an agreed per-file baseline, not a number to guess at.
+		coverage: {
+			provider: 'v8',
+			reporter: ['text', 'html'],
+		},
 	},
 });
