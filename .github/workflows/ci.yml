@@ -55,6 +55,34 @@ jobs:
     defaults:
       run:
         working-directory: services/api
+    # alertSink's idempotent-persist integration test asserts on a real
+    # Postgres primary-key conflict and a real Redis pub/sub publish — see
+    # alertSink.integration.test.ts. Ports here (5433/6379) must match what
+    # vitest.config.ts hardcodes: vitest's `test.env` overrides shell-provided
+    # env vars, so a job-level env override would be silently ignored.
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.15.3-pg16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel-dev
+          POSTGRES_DB: sentinel
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
 
@@ -67,6 +95,13 @@ jobs:
           path: ~/.npm
           key: npm-api-${{ runner.os }}-${{ hashFiles('services/api/package.json') }}
           restore-keys: npm-api-${{ runner.os }}-
+
+      - name: Apply database migrations
+        run: |
+          for f in ../../infra/migrations/[0-9]*.sql; do
+            echo "--> $f"
+            PGPASSWORD=sentinel-dev psql -h localhost -p 5433 -U sentinel -d sentinel -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps
