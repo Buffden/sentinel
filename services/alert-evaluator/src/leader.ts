@@ -1,16 +1,5 @@
 import type { Redis } from 'ioredis';
 
-// How long the leader key lives in Redis without renewal.
-// Must be longer than one scan cycle so a slow scan does not
-// cause the key to expire mid-run and trigger a false takeover.
-const LEADER_LEASE_TTL_MS = 15_000;
-
-// How often the leader renews the lease. Must be well under
-// LEADER_LEASE_TTL_MS so a slow renewal does not cause expiry.
-const LEADER_RENEWAL_INTERVAL_MS = 5_000;
-
-const LEADER_KEY = 'alert-evaluator:leader';
-
 // Lua script for safe renewal: only extend the TTL if this
 // instance still owns the key. A different owner must not be
 // evicted by a stale renew call.
@@ -39,16 +28,19 @@ export class LeaderElection {
 	constructor(
 		private readonly redis: Redis,
 		private readonly instanceId: string,
+		private readonly leaderKey: string,
+		private readonly leaseTtlMs: number,
+		private readonly renewalIntervalMs: number,
 	) {}
 
 	// Attempt to acquire the leader lease.
 	// Returns true if this instance is now the leader.
 	async tryAcquire(): Promise<boolean> {
 		const result = await this.redis.set(
-			LEADER_KEY,
+			this.leaderKey,
 			this.instanceId,
 			'PX',
-			LEADER_LEASE_TTL_MS,
+			this.leaseTtlMs,
 			'NX',
 		);
 		return result === 'OK';
@@ -68,11 +60,14 @@ export class LeaderElection {
 			} catch (err) {
 				// Redis error means we cannot confirm ownership. Fail closed: treat as lease loss.
 				// Continuing to scan without confirmed ownership would risk duplicate work.
-				console.error({ instanceId: this.instanceId, err }, 'renewal error — treating as lease loss');
+				console.error(
+					{ instanceId: this.instanceId, err },
+					'renewal error — treating as lease loss',
+				);
 				this.stopRenewal();
 				onLeaseLost();
 			}
-		}, LEADER_RENEWAL_INTERVAL_MS);
+		}, this.renewalIntervalMs);
 	}
 
 	stopRenewal(): void {
@@ -88,15 +83,15 @@ export class LeaderElection {
 		const result = await this.redis.eval(
 			RENEW_SCRIPT,
 			1,
-			LEADER_KEY,
+			this.leaderKey,
 			this.instanceId,
-			String(LEADER_LEASE_TTL_MS),
+			String(this.leaseTtlMs),
 		);
 		return result === 1;
 	}
 
 	// Release the lease only if this instance owns it.
 	async release(): Promise<void> {
-		await this.redis.eval(RELEASE_SCRIPT, 1, LEADER_KEY, this.instanceId);
+		await this.redis.eval(RELEASE_SCRIPT, 1, this.leaderKey, this.instanceId);
 	}
 }

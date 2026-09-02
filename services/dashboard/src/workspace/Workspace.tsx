@@ -19,7 +19,11 @@ function hideHeaders(api: DockviewApi) {
 	if (w) w.group.header.hidden = true
 }
 
-export default function Workspace() {
+interface WorkspaceProps {
+	onDemoExpired?: () => void
+}
+
+export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 	const apiRef = useRef<DockviewApi | null>(null)
 	const swappedRef = useRef(false)
 
@@ -44,7 +48,7 @@ export default function Workspace() {
 			id: 'map',
 			component: 'map-widget',
 			title: 'Global Map',
-			params: { onToggleLayout: handleToggleLayout },
+			params: { onToggleLayout: handleToggleLayout, onDemoExpired },
 			minimumWidth: 420,
 		})
 		const widgets = api.addPanel({

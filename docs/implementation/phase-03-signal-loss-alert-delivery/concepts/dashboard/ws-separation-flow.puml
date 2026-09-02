@@ -1,5 +1,5 @@
 @startuml ws-separation-flow
-title WebSocket Separation — Layer Ownership
+title WebSocket Separation — Layer Ownership (CP7f actual)
 
 skinparam backgroundColor #eaedf1
 skinparam sequenceArrowColor #3b82f6
@@ -11,25 +11,37 @@ skinparam noteBorderColor #1e2d3d
 skinparam noteBackgroundColor #0f1623
 skinparam noteFontColor #9ca3af
 
-participant "MapWorkspace\nAlertPanel" as UI
+participant "MapWidget" as UI
 participant "useLiveFeed()\nfeatures/live-feed" as Hook
-participant "websocketClient.ts\nshared/realtime" as Client
+participant "openWebSocket()\nshared/realtime" as Client
 participant "WebSocket\n(browser)" as WS
 participant "API WS Server" as API
 
 == Mount ==
 
-UI -> Hook : mount — pass bbox
-Hook -> Client : createWebSocketClient(WS_URL, handlers)
+UI -> Hook : useLiveFeed({ onPositionUpdate, onDemoExpired })
+note over Hook
+  Hook opens WS immediately on mount.
+  subscribe(bbox) is returned to MapWidget
+  and called imperatively after map loads.
+end note
+Hook -> Client : openWebSocket(WS_URL, { onOpen, onMessage, onClose })
 Client -> WS : new WebSocket(url)
 WS -> API : HTTP upgrade + sentinel_jwt cookie
 API -> WS : 101 Switching Protocols
+Client -> Hook : onOpen callback — sets sendRef.current
 
-== Subscribe ==
+== REST hydration + subscribe ==
 
-Client -> Hook : onOpen callback
-Hook -> Client : sendSubscribe(ws, { type, bbox })
-Client -> WS : ws.send(JSON)
+note over UI
+  map.on('load') fires.
+  MapWidget fetches GET /entities/live?bbox=...
+  and seeds entities Map from the REST response.
+  Then calls subscribe(viewBbox).
+end note
+UI -> Hook : subscribe([minLat, minLon, maxLat, maxLon])
+Hook -> Client : sendRef.current(JSON)
+Client -> WS : ws.send({ type: "subscribe", bbox })
 WS -> API : subscribe message
 
 note over API
@@ -38,48 +50,61 @@ note over API
   Sends all alert-events (no bbox filter).
 end note
 
-== Live updates ==
+== Live position updates ==
 
-API -> WS : position-updates frame
+API -> WS : { channel: "position-updates", data: { entity_id, timestamp_ms, lat, lon, ... } }
 WS -> Client : onmessage event
-Client -> Hook : onMessage({ channel, data })
-Hook -> Hook : adaptPositionUpdate(data)
-Hook -> UI : setEntities — applyEntitySnapshot
-
-API -> WS : alert-events frame
-WS -> Client : onmessage event
-Client -> Hook : onMessage({ channel, data })
-Hook -> Hook : adaptAlertEvent(data)
-Hook -> UI : setAlerts — write by alert_id (dedup)
+Client -> Hook : onMessage(raw string)
+Hook -> Hook : JSON.parse — parsePositionFrame(data)
+note right of Hook
+  Validates entity_id, lat, lon, timestamp_ms.
+  Returns null on malformed frame — React state
+  is never touched.
+  timestamp_ms maps to eventTimeMs.
+  entity_subtype and on_ground are null
+  (not present in WS update wire format).
+end note
+Hook -> UI : onPositionUpdate(entity)
+UI -> UI : setEntities(applyPositionUpdate(prev, entity))
+note right of UI
+  applyPositionUpdate discards the frame if
+  incoming.eventTimeMs <= stored.eventTimeMs
+  (monotonicity guard against stale frames).
+end note
 
 == Unexpected close (reconnect) ==
 
-WS -> Client : onclose (code != 1000, != 4401)
-Client -> Hook : onClose(event)
-Hook -> Hook : setIsConnected(false)
-Hook -> Hook : setTimeout 3 s → setReconnectKey(k+1)
-Hook -> Hook : reconnectKey change re-runs all effects
-Hook -> Client : new createWebSocketClient(...)
+WS -> Client : onclose (code != 4401)
+Client -> Hook : onClose(code)
+Hook -> Hook : sendRef.current = null
+Hook -> Hook : setTimeout 5 s
+Hook -> Client : openWebSocket(...) — new connection
 note right of Hook
-  REST re-hydration also fires:
-  GET /entities/live — reseed entities
-  GET /alerts — reseed alerts
+  Closure variable 'stopped' guards against
+  reconnect after unmount.
+  No REST re-hydration on reconnect in CP7f —
+  WS updates resume and fill the entity map.
 end note
 
 == Demo expiry (no reconnect) ==
 
 WS -> Client : onclose (code 4401)
-Client -> Hook : onClose(event)
-Hook -> Hook : setIsConnected(false)
-Hook -> Hook : setDemoExpired(true)
-Hook -> UI : demoExpired = true → render DemoExpiredBanner
+Client -> Hook : onClose(4401)
+Hook -> Hook : sendRef.current = null
+Hook -> UI : onDemoExpired()
+UI -> UI : setDemoExpired(true) — render DemoExpiredBanner
+note right of UI
+  onDemoExpired is threaded from DashboardPage
+  via Workspace props to MapWidget params
+  to useLiveFeed option.
+end note
 
-== Intentional cleanup ==
+== Unmount cleanup ==
 
-UI -> Hook : component unmount
-Hook -> Client : ws.close(1000, 'component cleanup')
-Client -> WS : close(1000)
-WS -> Client : onclose (code 1000)
-Client -> Hook : onClose — code 1000 → return, no reconnect
+UI -> Hook : component unmount (useEffect cleanup)
+Hook -> Hook : stopped = true
+Hook -> Hook : clearTimeout(reconnectTimer)
+Hook -> Client : activeClose() — ws.close()
+Client -> WS : close()
 
 @enduml

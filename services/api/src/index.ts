@@ -7,8 +7,7 @@ import { entitiesLiveRouter } from './routes/entitiesLive.js';
 import { requireAuth } from './middleware/auth.js';
 import { startAlertSink } from './sink/alertSink.js';
 import { attachWebSocketServer } from './ws/wsServer.js';
-
-const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
+import { config } from './config.js';
 
 const app = express();
 app.use(express.json());
@@ -46,6 +45,6 @@ startAlertSink().catch((err: unknown) => {
 	process.exit(1);
 });
 
-server.listen(PORT, () => {
-	console.log(JSON.stringify({ level: 'info', msg: 'API listening', port: PORT }));
+server.listen(config.PORT, () => {
+	console.log(JSON.stringify({ level: 'info', msg: 'API listening', port: config.PORT }));
 });

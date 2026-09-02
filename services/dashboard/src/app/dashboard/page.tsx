@@ -65,7 +65,7 @@ export default function DashboardPage() {
 		>
 			{demoExpired && <DemoExpiredBanner onDismiss={() => setDemoExpired(false)} />}
 			<TopNav right={<NavUserIcons />} />
-			<Workspace />
+			<Workspace onDemoExpired={() => setDemoExpired(true)} />
 			<Footer />
 		</div>
 	)

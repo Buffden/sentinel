@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!--
+    Top-down aircraft silhouette. Nose points UP (north) so deck.gl
+    can rotate it by course_deg without a correction offset.
+    White fill on transparent background — deck.gl IconLayer mask:true
+    tints this with getColor and uses alpha for transparency.
+  -->
+  <path fill="white" d="
+    M 32 4
+    L 36 22
+    L 58 34
+    L 55 38
+    L 35 28
+    L 34 52
+    L 40 56
+    L 38 60
+    L 32 58
+    L 26 60
+    L 24 56
+    L 30 52
+    L 29 28
+    L 9 38
+    L 6 34
+    L 28 22
+    Z
+  "/>
+</svg>

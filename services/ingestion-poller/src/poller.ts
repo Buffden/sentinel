@@ -24,30 +24,16 @@
 //   consumption. Defaults cover UK + Western Europe.
 
 import { Kafka, Partitioners } from 'kafkajs';
-
-// ---- Configuration ---------------------------------------------------------
-
-const BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
-const TOPIC = 'adsb.raw';
-
-// Poll interval in milliseconds. OpenSky recommends >= 10 s for anonymous use.
-const POLL_INTERVAL_MS = Number(process.env['POLL_INTERVAL_MS'] ?? 10_000);
-
-// Bounding box for OpenSky query. Defaults to UK + Western Europe.
-const LAMIN = Number(process.env['OPENSKY_LAMIN'] ?? 49.0);
-const LOMIN = Number(process.env['OPENSKY_LOMIN'] ?? -8.0);
-const LAMAX = Number(process.env['OPENSKY_LAMAX'] ?? 61.0);
-const LOMAX = Number(process.env['OPENSKY_LOMAX'] ?? 10.0);
+import { config } from './config.js';
 
 // extended=1 instructs OpenSky to include the category field (index 17 in the
 // state vector). Without it, entity_subtype and provider_category are always
 // null in the canonical schema. Must appear before the bounding-box params.
 const OPENSKY_URL =
 	`https://opensky-network.org/api/states/all` +
-	`?extended=1&lamin=${LAMIN}&lomin=${LOMIN}&lamax=${LAMAX}&lomax=${LOMAX}`;
-
-// Fetch timeout leaves headroom inside the poll interval.
-const FETCH_TIMEOUT_MS = 8_000;
+	`?extended=1` +
+	`&lamin=${config.OPENSKY_LAMIN}&lomin=${config.OPENSKY_LOMIN}` +
+	`&lamax=${config.OPENSKY_LAMAX}&lomax=${config.OPENSKY_LOMAX}`;
 
 // ---- Types -----------------------------------------------------------------
 
@@ -60,31 +46,31 @@ const FETCH_TIMEOUT_MS = 8_000;
 // delivery and is useful for operational monitoring.
 interface AdsbRawEvent {
 	icao24: string;
-	callsign: string | null;       // preserved verbatim; Position Consumer normalises
+	callsign: string | null; // preserved verbatim; Position Consumer normalises
 	origin_country: string;
-	time_position: number | null;  // Unix seconds; source event time for this position
-	last_contact: number;          // Unix seconds; last transponder message received
+	time_position: number | null; // Unix seconds; source event time for this position
+	last_contact: number; // Unix seconds; last transponder message received
 	lon: number | null;
 	lat: number | null;
-	baro_altitude: number | null;  // metres above mean sea level (barometric)
+	baro_altitude: number | null; // metres above mean sea level (barometric)
 	on_ground: boolean;
-	velocity: number | null;       // m/s ground speed
-	true_track: number | null;     // degrees clockwise from north
-	vertical_rate: number | null;  // m/s; positive = climbing
-	sensors: number[] | null;      // receiver IDs that contributed to this state vector
-	geo_altitude: number | null;   // metres; GNSS altitude; may differ from baro
+	velocity: number | null; // m/s ground speed
+	true_track: number | null; // degrees clockwise from north
+	vertical_rate: number | null; // m/s; positive = climbing
+	sensors: number[] | null; // receiver IDs that contributed to this state vector
+	geo_altitude: number | null; // metres; GNSS altitude; may differ from baro
 	squawk: string | null;
 	spi: boolean;
-	position_source: number;       // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
-	category: number | null;       // ADS-B emitter category; index 17; only with extended=1
-	fetched_at_ms: number;         // processing time of this poll cycle; NOT source event time
+	position_source: number; // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
+	category: number | null; // ADS-B emitter category; index 17; only with extended=1
+	fetched_at_ms: number; // processing time of this poll cycle; NOT source event time
 }
 
 // ---- Kafka setup -----------------------------------------------------------
 
 const kafka = new Kafka({
 	clientId: 'ingestion-poller',
-	brokers: BROKERS,
+	brokers: config.KAFKA_BROKERS,
 	logLevel: 0,
 });
 
@@ -152,7 +138,7 @@ async function fetchStateVectors(): Promise<AdsbRawEvent[]> {
 
 	const response = await fetch(OPENSKY_URL, {
 		headers: { Accept: 'application/json' },
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		signal: AbortSignal.timeout(config.FETCH_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {
@@ -197,16 +183,24 @@ async function pollOnce(): Promise<void> {
 		value: JSON.stringify(event),
 	}));
 
-	const results = await producer.send({ topic: TOPIC, messages });
+	// When POLLER_BATCH_MAX_MESSAGES is 0 (no cap), batchSize covers the full array
+	// and exactly one producer.send() is issued — identical to previous behavior.
+	// A positive value chunks the array, useful for larger polling regions.
+	const batchSize =
+		config.POLLER_BATCH_MAX_MESSAGES === 0 ? messages.length : config.POLLER_BATCH_MAX_MESSAGES;
 
-	// With one partition, results has exactly one RecordMetadata entry.
-	// Log the base offset so you can verify the batch with:
+	let firstOffset = 'unknown';
+	for (let i = 0; i < messages.length; i += batchSize) {
+		const chunk = messages.slice(i, i + batchSize);
+		const results = await producer.send({ topic: config.TOPIC, messages: chunk });
+		if (i === 0) firstOffset = results[0]?.baseOffset ?? 'unknown';
+	}
+
+	// Log the base offset of the first batch so you can verify with:
 	//   docker exec sentinel-redpanda rpk topic consume adsb.raw --offset <N> --num 1
-	const firstOffset = results[0]?.baseOffset ?? 'unknown';
-
 	log('info', 'poll cycle complete', {
 		state_vectors: events.length,
-		topic: TOPIC,
+		topic: config.TOPIC,
 		first_offset: firstOffset,
 	});
 }
@@ -226,19 +220,22 @@ function scheduleNextPoll(): void {
 				});
 			})
 			.finally(() => scheduleNextPoll());
-	}, POLL_INTERVAL_MS);
+	}, config.POLL_INTERVAL_MS);
 }
 
 // ---- Entry point -----------------------------------------------------------
 
 async function run(): Promise<void> {
-	log('info', 'producer connecting', { brokers: BROKERS });
+	log('info', 'producer connecting', { brokers: config.KAFKA_BROKERS });
 	await producer.connect();
 	log('info', 'producer connected');
 
 	log('info', 'poller starting', {
 		url: OPENSKY_URL,
-		poll_interval_ms: POLL_INTERVAL_MS,
+		poll_interval_ms: config.POLL_INTERVAL_MS,
+		fetch_timeout_ms: config.FETCH_TIMEOUT_MS,
+		batch_max_messages:
+			config.POLLER_BATCH_MAX_MESSAGES === 0 ? 'unlimited' : config.POLLER_BATCH_MAX_MESSAGES,
 	});
 
 	// Run the first poll immediately so you see output without waiting a full
