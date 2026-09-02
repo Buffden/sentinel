@@ -1,7 +1,9 @@
 import pg from 'pg';
+import { config } from './config.js';
 
 const { Pool } = pg;
 
 export const pool = new Pool({
-	connectionString: process.env['PG_URL'] ?? 'postgres://sentinel:sentinel@localhost:5432/sentinel',
+	connectionString: config.PG_URL,
+	max: config.PG_POOL_MAX,
 });

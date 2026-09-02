@@ -2,28 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { Kafka, Partitioners } from 'kafkajs';
 import { Redis } from 'ioredis';
 import { LeaderElection } from './leader.js';
-
-// ---- Configuration ---------------------------------------------------------
-
-const BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
-const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
-const ALERTS_TOPIC = 'alerts';
-
-// How often the leader scans all entity:live:* keys.
-const SCAN_INTERVAL_MS = 30_000;
-
-// Silence duration before an entity is declared lost.
-// Applied uniformly to all entity types in v1.
-const SIGNAL_LOSS_THRESHOLD_MS = 300_000; // 5 minutes
-
-// How long before a follower retries acquiring the leader lease.
-const FOLLOWER_RETRY_INTERVAL_MS = 5_000;
+import { config } from './config.js';
 
 // ---- Kafka setup -----------------------------------------------------------
 
 const kafka = new Kafka({
 	clientId: 'alert-evaluator',
-	brokers: BROKERS,
+	brokers: config.KAFKA_BROKERS,
 	logLevel: 0,
 });
 
@@ -34,8 +19,14 @@ const producer = kafka.producer({
 // ---- Redis setup -----------------------------------------------------------
 
 const instanceId = randomUUID();
-const redis = new Redis(REDIS_URL);
-const leader = new LeaderElection(redis, instanceId);
+const redis = new Redis(config.REDIS_URL);
+const leader = new LeaderElection(
+	redis,
+	instanceId,
+	config.LEADER_KEY,
+	config.LEADER_LEASE_TTL_MS,
+	config.LEADER_RENEWAL_INTERVAL_MS,
+);
 
 // ---- Signal-loss scan ------------------------------------------------------
 
@@ -64,7 +55,13 @@ async function runScan(): Promise<void> {
 	let alerted = 0;
 
 	do {
-		const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'entity:live:*', 'COUNT', 100);
+		const [nextCursor, keys] = await redis.scan(
+			cursor,
+			'MATCH',
+			'entity:live:*',
+			'COUNT',
+			config.REDIS_SCAN_COUNT,
+		);
 		cursor = nextCursor;
 
 		for (const key of keys) {
@@ -85,7 +82,7 @@ async function runScan(): Promise<void> {
 			if (!lastSeenMsStr || lastSeenMsStr === '') continue;
 
 			const lastSeenMs = Number(lastSeenMsStr);
-			if (nowMs - lastSeenMs < SIGNAL_LOSS_THRESHOLD_MS) continue;
+			if (nowMs - lastSeenMs < config.SIGNAL_LOSS_THRESHOLD_MS) continue;
 
 			// Episode gate: if alert-state exists, this dark period is already alerted.
 			const gateExists = await redis.exists(`alert-state:${entityId}`);
@@ -101,9 +98,12 @@ async function runScan(): Promise<void> {
 			// composite_issued = '0' is consumed by Phase 06 (composite correlation).
 			await redis.hset(
 				`alert-state:${entityId}`,
-				'dark_since_ms', String(darkSinceMs),
-				'signal_loss_alert_id', alertId,
-				'composite_issued', '0',
+				'dark_since_ms',
+				String(darkSinceMs),
+				'signal_loss_alert_id',
+				alertId,
+				'composite_issued',
+				'0',
 			);
 
 			// All last_known_* fields are read from the live hash at scan time.
@@ -134,7 +134,7 @@ async function runScan(): Promise<void> {
 			// Keyed by entity_id so all alerts for the same entity land on the same
 			// partition, preserving order for downstream consumers.
 			await producer.send({
-				topic: ALERTS_TOPIC,
+				topic: config.ALERTS_TOPIC,
 				messages: [{ key: entityId, value: JSON.stringify(alert) }],
 			});
 
@@ -165,7 +165,7 @@ async function runLeaderSession(): Promise<void> {
 
 	while (!ac.signal.aborted) {
 		await runScan();
-		await sleep(SCAN_INTERVAL_MS, ac.signal);
+		await sleep(config.SCAN_INTERVAL_MS, ac.signal);
 	}
 
 	// Stop the renewal timer now that the loop has exited cleanly.
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
 		} else {
 			console.info({ instanceId }, 'running as follower — waiting for leader lease');
 		}
-		await sleep(FOLLOWER_RETRY_INTERVAL_MS);
+		await sleep(config.FOLLOWER_RETRY_INTERVAL_MS);
 	}
 }
 
@@ -200,8 +200,12 @@ async function shutdown(): Promise<void> {
 	await redis.quit();
 }
 
-process.on('SIGINT', () => { shutdown().then(() => process.exit(0)); });
-process.on('SIGTERM', () => { shutdown().then(() => process.exit(0)); });
+process.on('SIGINT', () => {
+	shutdown().then(() => process.exit(0));
+});
+process.on('SIGTERM', () => {
+	shutdown().then(() => process.exit(0));
+});
 
 main().catch((err) => {
 	console.error({ err }, 'fatal error');
@@ -212,8 +216,18 @@ main().catch((err) => {
 // aborted or fires before the timer expires.
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise<void>((resolve) => {
-		if (signal?.aborted) { resolve(); return; }
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
 		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+		signal?.addEventListener(
+			'abort',
+			() => {
+				clearTimeout(timer);
+				resolve();
+			},
+			{ once: true },
+		);
 	});
 }

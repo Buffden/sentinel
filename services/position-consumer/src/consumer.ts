@@ -85,52 +85,23 @@ import pg from 'pg';
 import { Redis } from 'ioredis';
 import { latLngToCell } from 'h3-js';
 import { normalizeAdsbRaw, type NormalizedPosition } from './normalize.js';
+import { config } from './config.js';
 
 const { Pool } = pg;
-
-// ---- Configuration ---------------------------------------------------------
-
-const BROKERS = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
-const SOURCE_TOPIC = 'adsb.raw';
-const DLQ_TOPIC = 'adsb.dlq';
-const NORMALIZED_TOPIC = 'position.normalized';
-const POSITION_UPDATES_CHANNEL = 'position-updates';
-const GROUP_ID = 'position-consumer';
-const PG_URL = process.env['PG_URL'] ?? 'postgresql://sentinel:sentinel-dev@localhost:5433/sentinel';
-const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
-
-// TTL applied to entity:live:{entity_id} on every accepted write.
-// 24h — deliberately longer than signal-loss detection timing so a recently
-// lost entity's last known position remains readable by the Alert Evaluator.
-const LIVE_STATE_TTL_SECONDS = 86400;
-
-// H3 resolution for position_history.geo_cell.
-// Resolution 5: ~252 km² per cell. Indexes spatial rows inside time chunks.
-// A regional historical query translates bounding-box bounds into a set of
-// cells at this resolution, then uses WHERE geo_cell IN (...) AND observed_at BETWEEN.
-const HISTORY_H3_RESOLUTION = 5;
-
-// H3 resolution for Redis geo-cell:{cell_id} sorted sets.
-// Resolution 7: ~5 km² per cell. Keeps proximity candidate sets small.
-// The Correlation Worker queries the incoming entity's cell plus gridDisk(cell, k)
-// to find nearby entities, then runs exact distance on the reduced set.
-const LIVE_H3_RESOLUTION = 7;
 
 // Stable identifier for this consumer instance, used in DLQ records so
 // operators can trace which consumer instance rejected a message.
 const CONSUMER_ID = `${hostname()}-${process.pid}`;
 
-const FROM_BEGINNING = (process.env['FROM_BEGINNING'] ?? 'true') === 'true';
-
 // ---- Kafka setup -----------------------------------------------------------
 
 const kafka = new Kafka({
 	clientId: 'position-consumer',
-	brokers: BROKERS,
+	brokers: config.KAFKA_BROKERS,
 	logLevel: 0,
 });
 
-const consumer = kafka.consumer({ groupId: GROUP_ID });
+const consumer = kafka.consumer({ groupId: config.GROUP_ID });
 
 // Producer for publishing DLQ records.
 // LegacyPartitioner for consistent kafkajs v2 behaviour.
@@ -140,11 +111,11 @@ const producer = kafka.producer({
 
 // ---- Database setup --------------------------------------------------------
 
-const pool = new Pool({ connectionString: PG_URL });
+const pool = new Pool({ connectionString: config.PG_URL, max: config.PG_POOL_MAX });
 
 // ---- Redis setup -----------------------------------------------------------
 
-const redis = new Redis(REDIS_URL, {
+const redis = new Redis(config.REDIS_URL, {
 	// Disable ioredis auto-reconnect logging noise on clean shutdown.
 	lazyConnect: false,
 	enableReadyCheck: true,
@@ -179,13 +150,16 @@ return 1
 
 // ---- H3 geo-cell computation -----------------------------------------------
 
-function computeH3Cells(lat: number, lon: number): {
+function computeH3Cells(
+	lat: number,
+	lon: number,
+): {
 	history_geo_cell: string;
 	live_geo_cell: string;
 } {
 	return {
-		history_geo_cell: latLngToCell(lat, lon, HISTORY_H3_RESOLUTION),
-		live_geo_cell: latLngToCell(lat, lon, LIVE_H3_RESOLUTION),
+		history_geo_cell: latLngToCell(lat, lon, config.HISTORY_H3_RESOLUTION),
+		live_geo_cell: latLngToCell(lat, lon, config.LIVE_H3_RESOLUTION),
 	};
 }
 
@@ -246,7 +220,10 @@ async function writeRawEvent(
 // history_geo_cell is H3 at HISTORY_H3_RESOLUTION; stored as $30 to avoid
 // renumbering the existing $1-$29 parameters.
 // ON CONFLICT (entity_id, observed_at) DO NOTHING: replay-safe idempotency.
-async function writePositionHistory(position: NormalizedPosition, historyGeoCell: string): Promise<void> {
+async function writePositionHistory(
+	position: NormalizedPosition,
+	historyGeoCell: string,
+): Promise<void> {
 	const observedAt = new Date(position.timestamp_ms);
 	await pool.query(
 		`INSERT INTO position_history (
@@ -266,12 +243,35 @@ async function writePositionHistory(position: NormalizedPosition, historyGeoCell
 		)
 		ON CONFLICT (entity_id, observed_at) DO NOTHING`,
 		[
-			position.entity_id, position.entity_type, observedAt, position.timestamp_ms,
-			position.lat, position.lon, position.altitude_m, position.source, position.provider,
-			position.baro_altitude_m, position.geo_altitude_m, position.speed_mps, position.course_deg, position.heading_deg,
-			position.vertical_rate_mps, position.on_ground, position.last_contact_ms, position.navigation_status, position.rate_of_turn,
-			position.callsign, position.entity_subtype, position.provider_category, position.squawk, position.spi, position.position_source,
-			position.position_accuracy, position.destination, position.eta, position.draught_m,
+			position.entity_id,
+			position.entity_type,
+			observedAt,
+			position.timestamp_ms,
+			position.lat,
+			position.lon,
+			position.altitude_m,
+			position.source,
+			position.provider,
+			position.baro_altitude_m,
+			position.geo_altitude_m,
+			position.speed_mps,
+			position.course_deg,
+			position.heading_deg,
+			position.vertical_rate_mps,
+			position.on_ground,
+			position.last_contact_ms,
+			position.navigation_status,
+			position.rate_of_turn,
+			position.callsign,
+			position.entity_subtype,
+			position.provider_category,
+			position.squawk,
+			position.spi,
+			position.position_source,
+			position.position_accuracy,
+			position.destination,
+			position.eta,
+			position.draught_m,
 			historyGeoCell,
 		],
 	);
@@ -288,26 +288,44 @@ async function writePositionHistory(position: NormalizedPosition, historyGeoCell
 // All fields are written as strings — Redis stores everything as strings
 // regardless of the declared type. null values are stored as '' so HGET
 // always returns a string rather than nil.
-async function updateLiveState(position: NormalizedPosition, liveGeoCell: string): Promise<boolean> {
+async function updateLiveState(
+	position: NormalizedPosition,
+	liveGeoCell: string,
+): Promise<boolean> {
 	const key = `entity:live:${position.entity_id}`;
 
 	// Flatten all fields into the ARGV[3..] pairs expected by the Lua script.
 	const fields = [
-		'last_seen_ms', String(position.timestamp_ms),
-		'entity_type', position.entity_type,
-		'lat', String(position.lat),
-		'lon', String(position.lon),
-		'altitude_m', position.altitude_m != null ? String(position.altitude_m) : '',
-		'speed_mps', position.speed_mps != null ? String(position.speed_mps) : '',
-		'course_deg', position.course_deg != null ? String(position.course_deg) : '',
-		'heading_deg', position.heading_deg != null ? String(position.heading_deg) : '',
-		'vertical_rate_mps', position.vertical_rate_mps != null ? String(position.vertical_rate_mps) : '',
-		'on_ground', position.on_ground != null ? String(position.on_ground) : '',
-		'navigation_status', position.navigation_status ?? '',
-		'callsign', position.callsign ?? '',
-		'entity_subtype', position.entity_subtype ?? '',
-		'provider', position.provider ?? '',
-		'live_geo_cell', liveGeoCell,
+		'last_seen_ms',
+		String(position.timestamp_ms),
+		'entity_type',
+		position.entity_type,
+		'lat',
+		String(position.lat),
+		'lon',
+		String(position.lon),
+		'altitude_m',
+		position.altitude_m != null ? String(position.altitude_m) : '',
+		'speed_mps',
+		position.speed_mps != null ? String(position.speed_mps) : '',
+		'course_deg',
+		position.course_deg != null ? String(position.course_deg) : '',
+		'heading_deg',
+		position.heading_deg != null ? String(position.heading_deg) : '',
+		'vertical_rate_mps',
+		position.vertical_rate_mps != null ? String(position.vertical_rate_mps) : '',
+		'on_ground',
+		position.on_ground != null ? String(position.on_ground) : '',
+		'navigation_status',
+		position.navigation_status ?? '',
+		'callsign',
+		position.callsign ?? '',
+		'entity_subtype',
+		position.entity_subtype ?? '',
+		'provider',
+		position.provider ?? '',
+		'live_geo_cell',
+		liveGeoCell,
 	];
 
 	const result = await redis.eval(
@@ -315,7 +333,7 @@ async function updateLiveState(position: NormalizedPosition, liveGeoCell: string
 		1,
 		key,
 		String(position.timestamp_ms),
-		String(LIVE_STATE_TTL_SECONDS),
+		String(config.LIVE_STATE_TTL_SECONDS),
 		...fields,
 	);
 
@@ -404,7 +422,7 @@ async function publishNormalized(
 	};
 
 	await producer.send({
-		topic: NORMALIZED_TOPIC,
+		topic: config.NORMALIZED_TOPIC,
 		messages: [{ key: position.entity_id, value: JSON.stringify(payload) }],
 	});
 }
@@ -438,7 +456,7 @@ async function publishPositionUpdate(
 	});
 
 	try {
-		await redis.publish(POSITION_UPDATES_CHANNEL, payload);
+		await redis.publish(config.POSITION_UPDATES_CHANNEL, payload);
 	} catch (err) {
 		log('error', 'position-updates pub/sub publish failed', {
 			entity_id: position.entity_id,
@@ -461,7 +479,7 @@ interface DlqEvent {
 
 async function publishToDlq(event: DlqEvent): Promise<void> {
 	await producer.send({
-		topic: DLQ_TOPIC,
+		topic: config.DLQ_TOPIC,
 		messages: [{ value: JSON.stringify(event) }],
 	});
 }
@@ -489,7 +507,9 @@ async function handleMessage(
 				result.entity_id,
 				source,
 				null, // provider not determinable without full normalization
-				topic, partition, offset,
+				topic,
+				partition,
+				offset,
 				null, // source_event_time unknown: time_position was null
 			);
 			log('warn', 'skipping record with no position', {
@@ -512,7 +532,9 @@ async function handleMessage(
 			null, // entity_id unknown for both error kinds
 			source,
 			null,
-			topic, partition, offset,
+			topic,
+			partition,
+			offset,
 			null,
 		);
 
@@ -533,7 +555,7 @@ async function handleMessage(
 				source_topic: topic,
 				source_partition: partition,
 				source_offset: offset,
-				dlq_topic: DLQ_TOPIC,
+				dlq_topic: config.DLQ_TOPIC,
 			});
 		} catch (err) {
 			// DLQ publish failed. Log and rethrow — the offset must NOT be
@@ -563,7 +585,9 @@ async function handleMessage(
 		position.entity_id,
 		source,
 		position.provider,
-		topic, partition, offset,
+		topic,
+		partition,
+		offset,
 		new Date(position.timestamp_ms),
 	);
 
@@ -606,9 +630,12 @@ async function handleMessage(
 		if (alertState && alertState['dark_since_ms']) {
 			await redis.hset(
 				`recent-loss:${position.entity_id}`,
-				'dark_since_ms', alertState['dark_since_ms'],
-				'resumed_at_ms', String(position.timestamp_ms),
-				'signal_loss_alert_id', alertState['signal_loss_alert_id'] ?? '',
+				'dark_since_ms',
+				alertState['dark_since_ms'],
+				'resumed_at_ms',
+				String(position.timestamp_ms),
+				'signal_loss_alert_id',
+				alertState['signal_loss_alert_id'] ?? '',
 			);
 			await redis.del(alertStateKey);
 			log('info', 'signal loss episode cleared', {
@@ -656,13 +683,16 @@ async function handleMessage(
 
 async function run(): Promise<void> {
 	log('info', 'consumer starting', {
-		brokers: BROKERS,
-		group: GROUP_ID,
-		source_topic: SOURCE_TOPIC,
-		dlq_topic: DLQ_TOPIC,
+		brokers: config.KAFKA_BROKERS,
+		group: config.GROUP_ID,
+		source_topic: config.SOURCE_TOPIC,
+		dlq_topic: config.DLQ_TOPIC,
 		consumer_id: CONSUMER_ID,
-		from_beginning: FROM_BEGINNING,
-		features: 'raw-events,position-history,redis-live-state,h3-geo-cell,normalized-publish,position-updates',
+		from_beginning: config.FROM_BEGINNING,
+		live_state_ttl_seconds: config.LIVE_STATE_TTL_SECONDS,
+		pg_pool_max: config.PG_POOL_MAX,
+		features:
+			'raw-events,position-history,redis-live-state,h3-geo-cell,normalized-publish,position-updates',
 	});
 
 	await producer.connect();
@@ -671,7 +701,7 @@ async function run(): Promise<void> {
 	await consumer.connect();
 	log('info', 'consumer connected');
 
-	await consumer.subscribe({ topic: SOURCE_TOPIC, fromBeginning: FROM_BEGINNING });
+	await consumer.subscribe({ topic: config.SOURCE_TOPIC, fromBeginning: config.FROM_BEGINNING });
 	log('info', 'consumer subscribed', { topic: SOURCE_TOPIC });
 
 	await consumer.run({

@@ -3,25 +3,16 @@ import { OAuth2Client } from 'google-auth-library';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
 import { pool } from '../db.js';
-import { getDemoCount, MAX_DEMO_CONNECTIONS } from '../shared/demoSessions.js';
+import { getDemoCount } from '../shared/demoSessions.js';
+import { config } from '../config.js';
 
 const router = Router();
 
-const GOOGLE_CLIENT_ID = (process.env['GOOGLE_CLIENT_ID'] ?? '').trim();
-const JWT_SECRET = process.env['JWT_SECRET'];
-if (!JWT_SECRET) throw new Error('JWT_SECRET env var is required');
-const jwtSecret: string = JWT_SECRET;
-// 8-hour expiry: leaked token expires within the same working day.
-const JWT_EXPIRES_IN = '8h';
-const COOKIE_NAME = 'sentinel_jwt';
+const oauthClient = new OAuth2Client(config.GOOGLE_CLIENT_ID);
 
-const oauthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
-
-// In-memory IP rate limit for POST /auth/demo: 1 token per IP per hour.
+// In-memory IP rate limit for POST /auth/demo: 1 token per IP per DEMO_RATE_LIMIT_WINDOW_MS.
 // Key: IP string. Value: timestamp (ms) of last token issued.
 const demoRateLimit = new Map<string, number>();
-const DEMO_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const DEMO_JWT_EXPIRES_IN = '3m';
 
 router.post('/google', async (req, res) => {
 	const body = req.body as { id_token?: string };
@@ -36,7 +27,7 @@ router.post('/google', async (req, res) => {
 	try {
 		const ticket = await oauthClient.verifyIdToken({
 			idToken: body.id_token,
-			audience: GOOGLE_CLIENT_ID,
+			audience: config.GOOGLE_CLIENT_ID,
 		});
 		const payload = ticket.getPayload();
 		if (!payload?.sub || !payload.email) {
@@ -74,12 +65,12 @@ router.post('/google', async (req, res) => {
 		return;
 	}
 
-	const token = jwt.sign({ user_id: userId, email, name, role: 'operator' }, jwtSecret, {
-		expiresIn: JWT_EXPIRES_IN,
+	const token = jwt.sign({ user_id: userId, email, name, role: 'operator' }, config.JWT_SECRET, {
+		expiresIn: config.JWT_EXPIRES_IN,
 	});
 
 	// secure: false in development (HTTP). Must be true behind HTTPS in production.
-	res.cookie(COOKIE_NAME, token, {
+	res.cookie(config.COOKIE_NAME, token, {
 		httpOnly: true,
 		secure: process.env['NODE_ENV'] === 'production',
 		sameSite: 'strict',
@@ -96,23 +87,23 @@ router.post('/demo', (req, res) => {
 	const now = Date.now();
 
 	const lastIssued = demoRateLimit.get(ip);
-	if (lastIssued !== undefined && now - lastIssued < DEMO_RATE_LIMIT_WINDOW_MS) {
+	if (lastIssued !== undefined && now - lastIssued < config.DEMO_RATE_LIMIT_WINDOW_MS) {
 		res.status(429).json({ error: 'Rate limit exceeded. Try again in an hour.' });
 		return;
 	}
 
-	if (getDemoCount() >= MAX_DEMO_CONNECTIONS) {
+	if (getDemoCount() >= config.MAX_DEMO_CONNECTIONS) {
 		res.status(429).json({ error: 'Demo capacity reached. Try again later.' });
 		return;
 	}
 
 	demoRateLimit.set(ip, now);
 
-	const token = jwt.sign({ user_id: 'demo', email: 'demo', role: 'demo' }, jwtSecret, {
-		expiresIn: DEMO_JWT_EXPIRES_IN,
+	const token = jwt.sign({ user_id: 'demo', email: 'demo', role: 'demo' }, config.JWT_SECRET, {
+		expiresIn: config.DEMO_JWT_EXPIRES_IN,
 	});
 
-	res.cookie(COOKIE_NAME, token, {
+	res.cookie(config.COOKIE_NAME, token, {
 		httpOnly: true,
 		secure: process.env['NODE_ENV'] === 'production',
 		sameSite: 'strict',
@@ -123,13 +114,13 @@ router.post('/demo', (req, res) => {
 });
 
 router.get('/me', (req, res) => {
-	const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+	const token = req.cookies?.[config.COOKIE_NAME] as string | undefined;
 	if (!token) {
 		res.status(401).json({ error: 'Not authenticated' });
 		return;
 	}
 	try {
-		const payload = jwt.verify(token, jwtSecret) as {
+		const payload = jwt.verify(token, config.JWT_SECRET) as {
 			user_id?: string;
 			email?: string;
 			name?: string;
@@ -147,11 +138,11 @@ router.get('/me', (req, res) => {
 });
 
 router.post('/logout', (req, res) => {
-	const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+	const token = req.cookies?.[config.COOKIE_NAME] as string | undefined;
 
 	if (token) {
 		try {
-			const payload = jwt.verify(token, jwtSecret) as {
+			const payload = jwt.verify(token, config.JWT_SECRET) as {
 				user_id?: string;
 				email?: string;
 				role?: string;
@@ -169,7 +160,7 @@ router.post('/logout', (req, res) => {
 		}
 	}
 
-	res.clearCookie(COOKIE_NAME, {
+	res.clearCookie(config.COOKIE_NAME, {
 		httpOnly: true,
 		secure: process.env['NODE_ENV'] === 'production',
 		sameSite: 'strict',

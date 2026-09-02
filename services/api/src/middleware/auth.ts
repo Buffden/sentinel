@@ -1,9 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-
-const JWT_SECRET = process.env['JWT_SECRET'];
-if (!JWT_SECRET) throw new Error('JWT_SECRET env var is required');
-const secret: string = JWT_SECRET;
+import { config } from '../config.js';
 
 export interface SentinelJwtPayload {
 	user_id: string;
@@ -23,7 +20,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 		return;
 	}
 	try {
-		const payload = jwt.verify(token, secret) as unknown as SentinelJwtPayload;
+		const payload = jwt.verify(token, config.JWT_SECRET) as unknown as SentinelJwtPayload;
 		res.locals['userId'] = payload.user_id;
 		res.locals['userEmail'] = payload.email;
 		next();
