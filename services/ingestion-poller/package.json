@@ -5,7 +5,8 @@
 	"type": "module",
 	"scripts": {
 		"produce": "tsx src/produce.ts",
-		"poll": "tsx src/poller.ts"
+		"poll": "tsx src/poller.ts",
+		"test": "vitest run"
 	},
 	"dependencies": {
 		"kafkajs": "^2.2.4"
@@ -13,6 +14,7 @@
 	"devDependencies": {
 		"@types/node": "^22.0.0",
 		"tsx": "^4.19.0",
-		"typescript": "^5.6.0"
+		"typescript": "^5.6.0",
+		"vitest": "^4.1.11"
 	}
 }
