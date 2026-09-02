@@ -23,6 +23,7 @@
 //   LAMAX/LOMAX scope the bounding box to reduce response size and credit
 //   consumption. Defaults cover UK + Western Europe.
 
+import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import { config } from './config.js';
 
@@ -44,7 +45,7 @@ const OPENSKY_URL =
 // timestamp that captures when this poll cycle ran (processing time, not source
 // event time). It documents the lag between OpenSky's update interval and Kafka
 // delivery and is useful for operational monitoring.
-interface AdsbRawEvent {
+export interface AdsbRawEvent {
 	icao24: string;
 	callsign: string | null; // preserved verbatim; Position Consumer normalises
 	origin_country: string;
@@ -105,7 +106,7 @@ function log(
 // OpenSky returns state vectors as positional arrays. Index positions are fixed
 // by the API contract and documented here to make the mapping auditable.
 // Index 12 is the sensors array (receiver IDs) — not needed downstream, skipped.
-function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEvent {
+export function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEvent {
 	return {
 		icao24: state[0] as string,
 		// callsign preserved verbatim — no trimming or mutation here.
@@ -258,19 +259,23 @@ async function shutdown(signal: string): Promise<void> {
 	process.exit(0);
 }
 
-process.on('SIGINT', () => {
-	shutdown('SIGINT').catch(() => process.exit(1));
-});
-process.on('SIGTERM', () => {
-	shutdown('SIGTERM').catch(() => process.exit(1));
-});
-
-run().catch((err: unknown) => {
-	log('error', 'poller failed', {
-		error: {
-			name: err instanceof Error ? err.name : 'UnknownError',
-			message: err instanceof Error ? err.message : String(err),
-		},
+// Only run the service when this file is executed directly (`npm run poll`),
+// not when imported — e.g. by a unit test importing mapStateVector below.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+	process.on('SIGINT', () => {
+		shutdown('SIGINT').catch(() => process.exit(1));
 	});
-	process.exit(1);
-});
+	process.on('SIGTERM', () => {
+		shutdown('SIGTERM').catch(() => process.exit(1));
+	});
+
+	run().catch((err: unknown) => {
+		log('error', 'poller failed', {
+			error: {
+				name: err instanceof Error ? err.name : 'UnknownError',
+				message: err instanceof Error ? err.message : String(err),
+			},
+		});
+		process.exit(1);
+	});
+}

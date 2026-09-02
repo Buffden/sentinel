@@ -80,6 +80,7 @@
 //   duplicates.
 
 import { hostname } from 'os';
+import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import pg from 'pg';
 import { Redis } from 'ioredis';
@@ -111,11 +112,11 @@ const producer = kafka.producer({
 
 // ---- Database setup --------------------------------------------------------
 
-const pool = new Pool({ connectionString: config.PG_URL, max: config.PG_POOL_MAX });
+export const pool = new Pool({ connectionString: config.PG_URL, max: config.PG_POOL_MAX });
 
 // ---- Redis setup -----------------------------------------------------------
 
-const redis = new Redis(config.REDIS_URL, {
+export const redis = new Redis(config.REDIS_URL, {
 	// Disable ioredis auto-reconnect logging noise on clean shutdown.
 	lazyConnect: false,
 	enableReadyCheck: true,
@@ -192,7 +193,7 @@ function log(
 //
 // source_offset is passed as a string and cast via ::bigint to avoid JS
 // number precision loss on large offset values.
-async function writeRawEvent(
+export async function writeRawEvent(
 	payload: string,
 	entityId: string | null,
 	source: string,
@@ -220,7 +221,7 @@ async function writeRawEvent(
 // history_geo_cell is H3 at HISTORY_H3_RESOLUTION; stored as $30 to avoid
 // renumbering the existing $1-$29 parameters.
 // ON CONFLICT (entity_id, observed_at) DO NOTHING: replay-safe idempotency.
-async function writePositionHistory(
+export async function writePositionHistory(
 	position: NormalizedPosition,
 	historyGeoCell: string,
 ): Promise<void> {
@@ -288,7 +289,7 @@ async function writePositionHistory(
 // All fields are written as strings — Redis stores everything as strings
 // regardless of the declared type. null values are stored as '' so HGET
 // always returns a string rather than nil.
-async function updateLiveState(
+export async function updateLiveState(
 	position: NormalizedPosition,
 	liveGeoCell: string,
 ): Promise<boolean> {
@@ -356,7 +357,7 @@ async function updateLiveState(
 // the entity is absent from both sorted sets is acceptable: the Correlation
 // Worker's freshness score lower bound treats transiently missing candidates
 // as not-yet-seen rather than as an error.
-async function updateGeoCell(
+export async function updateGeoCell(
 	entityId: string,
 	newCell: string,
 	lastSeenMs: number,
@@ -739,19 +740,24 @@ async function shutdown(signal: string): Promise<void> {
 	process.exit(0);
 }
 
-process.on('SIGINT', () => {
-	shutdown('SIGINT').catch(() => process.exit(1));
-});
-process.on('SIGTERM', () => {
-	shutdown('SIGTERM').catch(() => process.exit(1));
-});
-
-run().catch((err: unknown) => {
-	log('error', 'consumer failed', {
-		error: {
-			name: err instanceof Error ? err.name : 'UnknownError',
-			message: err instanceof Error ? err.message : String(err),
-		},
+// Only run the service when this file is executed directly (`npm run consumer`),
+// not when imported — e.g. by an integration test importing the write functions
+// below against a real Postgres/Redis.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+	process.on('SIGINT', () => {
+		shutdown('SIGINT').catch(() => process.exit(1));
 	});
-	process.exit(1);
-});
+	process.on('SIGTERM', () => {
+		shutdown('SIGTERM').catch(() => process.exit(1));
+	});
+
+	run().catch((err: unknown) => {
+		log('error', 'consumer failed', {
+			error: {
+				name: err instanceof Error ? err.name : 'UnknownError',
+				message: err instanceof Error ? err.message : String(err),
+			},
+		});
+		process.exit(1);
+	});
+}

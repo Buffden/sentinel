@@ -25,6 +25,9 @@ htmlcov/
 .coverage
 coverage.xml
 
+# Vitest coverage output (api, position-consumer, alert-evaluator, ingestion-poller)
+coverage/
+
 # Node / npm (ingestion poller, load-generator)
 node_modules/
 npm-debug.log*

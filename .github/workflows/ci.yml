@@ -50,11 +50,39 @@ jobs:
           NEXT_PUBLIC_WS_URL: ws://localhost:3000
 
   check-api:
-    name: "API: typecheck"
+    name: "API: typecheck / test"
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: services/api
+    # alertSink's idempotent-persist integration test asserts on a real
+    # Postgres primary-key conflict and a real Redis pub/sub publish — see
+    # alertSink.integration.test.ts. Ports here (5433/6379) must match what
+    # vitest.config.ts hardcodes: vitest's `test.env` overrides shell-provided
+    # env vars, so a job-level env override would be silently ignored.
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.15.3-pg16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel-dev
+          POSTGRES_DB: sentinel
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
 
@@ -68,18 +96,57 @@ jobs:
           key: npm-api-${{ runner.os }}-${{ hashFiles('services/api/package.json') }}
           restore-keys: npm-api-${{ runner.os }}-
 
+      - name: Apply database migrations
+        run: |
+          for f in ../../infra/migrations/[0-9]*.sql; do
+            echo "--> $f"
+            PGPASSWORD=sentinel-dev psql -h localhost -p 5433 -U sentinel -d sentinel -v ON_ERROR_STOP=1 -f "$f"
+          done
+
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Test (with coverage)
+        run: npm run test:coverage
+
   check-position-consumer:
-    name: "Position Consumer: typecheck"
+    name: "Position Consumer: typecheck / test"
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: services/position-consumer
+    # The idempotency/monotonicity integration tests assert on real Postgres
+    # unique-constraint and Redis Lua-script behavior, not mocks — see
+    # consumer.integration.test.ts. That needs real service containers.
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.15.3-pg16
+        env:
+          POSTGRES_USER: sentinel
+          POSTGRES_PASSWORD: sentinel-dev
+          POSTGRES_DB: sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinel -d sentinel"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PG_URL: postgresql://sentinel:sentinel-dev@localhost:5432/sentinel
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v5
 
@@ -93,18 +160,44 @@ jobs:
           key: npm-position-consumer-${{ runner.os }}-${{ hashFiles('services/position-consumer/package.json') }}
           restore-keys: npm-position-consumer-${{ runner.os }}-
 
+      - name: Apply database migrations
+        run: |
+          for f in ../../infra/migrations/[0-9]*.sql; do
+            echo "--> $f"
+            PGPASSWORD=sentinel-dev psql -h localhost -p 5432 -U sentinel -d sentinel -v ON_ERROR_STOP=1 -f "$f"
+          done
+
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Test (with coverage)
+        run: npm run test:coverage
+
   check-alert-evaluator:
-    name: "Alert Evaluator: typecheck"
+    name: "Alert Evaluator: typecheck / test"
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: services/alert-evaluator
+    # The SIGNAL_LOSS episode-idempotency integration tests assert on a real
+    # Redis EXISTS/HSET gate and a real message landing on the `alerts` Kafka
+    # topic — see evaluator.integration.test.ts. That needs real services.
+    services:
+      redis:
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379
+      KAFKA_BROKERS: localhost:9092
     steps:
       - uses: actions/checkout@v5
 
@@ -118,14 +211,46 @@ jobs:
           key: npm-alert-evaluator-${{ runner.os }}-${{ hashFiles('services/alert-evaluator/package.json') }}
           restore-keys: npm-alert-evaluator-${{ runner.os }}-
 
+      # Redpanda's official image needs explicit start args (dev-container mode,
+      # listener config) that GitHub Actions' `services:` block cannot pass —
+      # it only supports image/env/ports/options, not a command override.
+      # Started manually here, mirroring docker-compose.yml's redpanda service
+      # (internal-network listener dropped: nothing in CI needs to reach it via
+      # a redpanda: hostname, only localhost).
+      - name: Start Redpanda and provision the alerts topic
+        run: |
+          docker run -d --name redpanda \
+            -p 9092:9092 -p 9644:9644 \
+            docker.redpanda.com/redpandadata/redpanda:v24.1.2 \
+            redpanda start --mode dev-container --smp 1 --memory 512M \
+            --reserve-memory 0M --overprovisioned --node-id 0 --check=false \
+            --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+            --advertise-kafka-addr PLAINTEXT://localhost:9092 \
+            --rpc-addr 0.0.0.0:33145 --advertise-rpc-addr localhost:33145
+
+          echo "Waiting for Redpanda..."
+          for i in $(seq 1 20); do
+            docker exec redpanda rpk cluster info > /dev/null 2>&1 && break
+            if [ "$i" -eq 20 ]; then
+              echo "Redpanda did not become ready in time"
+              exit 1
+            fi
+            sleep 3
+          done
+
+          docker exec redpanda rpk topic create alerts --partitions 1 --replicas 1
+
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Test (with coverage)
+        run: npm run test:coverage
+
   check-ingestion-poller:
-    name: "Ingestion Poller: typecheck"
+    name: "Ingestion Poller: typecheck / test"
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -144,10 +269,13 @@ jobs:
           restore-keys: npm-ingestion-poller-${{ runner.os }}-
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Typecheck
         run: npx tsc --noEmit
+
+      - name: Test (with coverage)
+        run: npm run test:coverage
 
   # All service jobs must pass for this job to succeed.
   # Add "CI pass" as the required status check in branch protection settings.
