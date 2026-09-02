@@ -15,6 +15,7 @@ Study for layout and visual patterns only. Do not copy source code.
 | [`shared-websocket.md`](shared-websocket.md) | CP7i live alert feed, the shared/reference-counted WebSocket singleton, REST vs WS alert wire-shape differences |
 | [`frontend-testing.md`](frontend-testing.md) | CP7j — why Vitest, the tsconfig-alias gotcha, position staleness + alert dedup proven with tests |
 | [`reconnect-reconciliation.md`](reconnect-reconciliation.md) | CP7k — the onReconnect signal, the MapWidget ref-cycle fix, two strict lint rules hit, proven against a real killed-API disconnect |
+| [`demo-expiry-verification.md`](demo-expiry-verification.md) | CP7l — no code needed, verified with a short-lived crafted JWT instead of waiting 3 real minutes |
 | [`network-boundary-adapter.puml`](network-boundary-adapter.puml) | Wire JSON → adapter → domain model → React sequence |
 | [`ws-separation-flow.puml`](ws-separation-flow.puml) | WebSocket lifecycle: connect, subscribe, reconnect, demo expiry, cleanup |
 
