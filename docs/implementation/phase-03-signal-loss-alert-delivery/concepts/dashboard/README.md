@@ -308,18 +308,18 @@ These exist as reserved slots in the shell. Implementations wait for their respe
 
 ## Checkpoint order
 
-| Step | Deliverable | Exit proof |
-| --- | --- | --- |
-| CP7a | Demo API additions | CLI verification only |
-| CP7b | Next.js bootstrap + quality tooling | lint / typecheck / build pass |
-| CP7c | Tokens + workspace shell + map widget (MapLibre GL + deck.gl) | Tiles render, aircraft dots visible, panels resizable |
-| CP7d | Authentication + login page | 401 redirects; cookie auth works |
-| CP7e | REST map hydration | real Redis entities on map |
-| CP7f | Live position WebSocket | aircraft moves without page refresh |
-| CP7g | Filters — floating `FilterPanel` inside the Map widget; see [`filters.md`](filters.md) | filters do not corrupt underlying entity state |
-| CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear |
-| CP7i | Live alert WebSocket feed | new alert appears without page refresh |
-| CP7j | Dedupe + stale guards | duplicate / stale simulation passes |
-| CP7k | Reconnect reconciliation | disconnect → reconnect → hydrated |
-| CP7l | Demo expiry UX | WS close 4401 shows banner; redirect works |
-| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel |
+| Step | Deliverable | Exit proof | Status |
+| --- | --- | --- | --- |
+| CP7a | Demo API additions | CLI verification only | Done |
+| CP7b | Next.js bootstrap + quality tooling | lint / typecheck / build pass | Done |
+| CP7c | Tokens + workspace shell + map widget (MapLibre GL + deck.gl) | Tiles render, aircraft dots visible, panels resizable | Done |
+| CP7d | Authentication + login page | 401 redirects; cookie auth works | Done |
+| CP7e | REST map hydration | real Redis entities on map | Done |
+| CP7f | Live position WebSocket | aircraft moves without page refresh | Done |
+| CP7g | Filters — floating `FilterPanel` inside the Map widget | filters do not corrupt underlying entity state | Done — [`filters.md`](filters.md) |
+| CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear | Done |
+| CP7i | Live alert WebSocket feed | new alert appears without page refresh | Done — [`shared-websocket.md`](shared-websocket.md) |
+| CP7j | Dedupe + stale guards | duplicate / stale simulation passes | Done — [`frontend-testing.md`](frontend-testing.md) |
+| CP7k | Reconnect reconciliation | disconnect → reconnect → hydrated | Done — [`reconnect-reconciliation.md`](reconnect-reconciliation.md) |
+| CP7l | Demo expiry UX | WS close 4401 shows banner; redirect works | Done — [`demo-expiry-verification.md`](demo-expiry-verification.md) |
+| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel | Remaining |
