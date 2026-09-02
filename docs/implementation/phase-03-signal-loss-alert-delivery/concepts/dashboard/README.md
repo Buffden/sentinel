@@ -68,6 +68,16 @@ provides explicit height so MapLibre sizes correctly. A layer-toggle overlay is 
 inside the map widget. The aviation deck.gl layer (aircraft markers) is the first real layer
 implementation. Exit proof: map tiles render, projection toggle works, aircraft dots appear.
 
+> **CP7g deviation:** the generic, searchable/collapsible layer-enable overlay described above
+> was never built, and CP7g's aviation filters (callsign search, airborne/grounded status) live
+> in their own floating `FilterPanel` instead, not that overlay. Reason: aviation is still the
+> only map layer — building a generic multi-layer toggle overlay now, with nothing else to
+> toggle, would be exactly the speculative platform primitive this project's extensibility rule
+> warns against (build shared primitives only when a real second consumer proves the need). The
+> layer-toggle overlay is still the right home for cross-domain layer enable/disable once a
+> second layer (vessels, weather, etc.) actually exists — build it then, against that real need,
+> and fold aviation's filters in if it makes sense at that point.
+
 **Layer 3: Alert panel.** Signal-loss alert list docked to the right. Scrollable, styled with
 shared design tokens. Static data first, live feed wired in a later checkpoint. Exit proof:
 alert cards render with correct status colors and layout holds on resize.
@@ -300,7 +310,7 @@ These exist as reserved slots in the shell. Implementations wait for their respe
 | CP7d | Authentication + login page | 401 redirects; cookie auth works |
 | CP7e | REST map hydration | real Redis entities on map |
 | CP7f | Live position WebSocket | aircraft moves without page refresh |
-| CP7g | Filters | filters do not corrupt underlying entity state |
+| CP7g | Filters — floating `FilterPanel` inside the Map widget (not the generic layer-toggle overlay this doc describes below; see note) | filters do not corrupt underlying entity state |
 | CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear |
 | CP7i | Live alert WebSocket feed | new alert appears without page refresh |
 | CP7j | Dedupe + stale guards | duplicate / stale simulation passes |

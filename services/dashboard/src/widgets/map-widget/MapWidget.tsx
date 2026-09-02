@@ -4,12 +4,19 @@ import { useEffect, useRef, useState } from 'react'
 import { Map as MLMap, setWorkerUrl } from 'maplibre-gl'
 import type { MapboxOverlay } from '@deck.gl/mapbox'
 import { MAP_STYLE_PRIMARY, MAP_STYLE_FALLBACK } from './mapStyle'
-import { aviationLayer, type AircraftPosition } from './layers/aviationLayer'
+import {
+	aviationLayer,
+	matchesStatus,
+	DEFAULT_AVIATION_FILTERS,
+	type AircraftPosition,
+	type AviationFilters,
+} from './layers/aviationLayer'
 import WidgetHeader from '@/shared/ui/WidgetHeader'
 import { fetchApi } from '@/features/auth/apiClient'
 import { type TrackedEntity, applyPositionUpdate } from '@/entities/tracked-entity/model'
 import { wireToTrackedEntity, isValidWireEntityDto } from '@/entities/tracked-entity/adapter'
 import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
+import FilterPanel from '@/features/entity-filtering/FilterPanel'
 
 // Point the GL worker at the static copy in /public so Turbopack
 // does not need to bundle the worker file as a module chunk.
@@ -64,6 +71,8 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	// Entity state: keyed by entity id for O(1) idempotent updates.
 	// Seeded from REST on map load (CP7e); live WS updates applied on top (CP7f).
 	const [entities, setEntities] = useState<Map<string, TrackedEntity>>(new Map())
+	// Filter state (CP7g). Presentation-only — never removes entries from `entities`.
+	const [filters, setFilters] = useState<AviationFilters>(DEFAULT_AVIATION_FILTERS)
 
 	const { subscribe } = useLiveFeed({
 		onPositionUpdate: (entity) => {
@@ -192,11 +201,18 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 			lon: e.lon,
 			lat: e.lat,
 			courseDeg: e.courseDeg,
+			callsign: e.callsign,
+			onGround: e.onGround,
 		}))
 		overlayRef.current.setProps({
-			layers: [aviationLayer.createLayer(aircraft, {})],
+			layers: [aviationLayer.createLayer(aircraft, filters)],
 		})
-	}, [entities])
+	}, [entities, filters])
+
+	const aircraftCount = entities.size
+	const shownCount = Array.from(entities.values()).filter((e) =>
+		matchesStatus({ id: e.id, lon: e.lon, lat: e.lat, courseDeg: e.courseDeg, callsign: e.callsign, onGround: e.onGround }, filters.status),
+	).length
 
 	function toggle3D() {
 		const next = !is3D
@@ -264,6 +280,12 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 			<WidgetHeader title="Global Map" actions={actions} />
 			<div style={{ flex: 1, position: 'relative' }}>
 				<div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+				<FilterPanel
+					filters={filters}
+					onFiltersChange={setFilters}
+					shownCount={shownCount}
+					totalCount={aircraftCount}
+				/>
 				<div
 					style={{
 						position: 'absolute',

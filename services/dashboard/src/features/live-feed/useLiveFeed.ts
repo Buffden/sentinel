@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { openWebSocket } from '@/shared/realtime/websocketClient'
-import type { TrackedEntity } from '@/entities/tracked-entity/model'
+import type { TrackedEntityUpdate } from '@/entities/tracked-entity/model'
 
 // Wire shape of the data field in a position-updates WS frame.
 // Different from WireEntityDto (REST): uses timestamp_ms, no entity_subtype/on_ground.
@@ -34,7 +34,11 @@ interface WsPositionData {
 	callsign: string | null
 }
 
-function parsePositionFrame(data: unknown): TrackedEntity | null {
+// entitySubtype and onGround are intentionally absent from the return value,
+// not set to null — the WS frame doesn't carry them, and applyPositionUpdate
+// merges by key, so omitting them preserves whatever REST hydration (or an
+// earlier frame) already established instead of erasing it every tick.
+function parsePositionFrame(data: unknown): TrackedEntityUpdate | null {
 	if (!data || typeof data !== 'object') return null
 	const d = data as Record<string, unknown>
 	if (
@@ -55,9 +59,7 @@ function parsePositionFrame(data: unknown): TrackedEntity | null {
 		courseDeg: typeof p.course_deg === 'number' ? p.course_deg : null,
 		eventTimeMs: p.timestamp_ms,
 		entityType: typeof p.entity_type === 'string' ? p.entity_type : null,
-		entitySubtype: null,
 		callsign: typeof p.callsign === 'string' ? p.callsign : null,
-		onGround: null,
 	}
 }
 
@@ -68,7 +70,7 @@ const RECONNECT_DELAY_MS = 5_000
 const DEMO_EXPIRED_CODE = 4401
 
 interface UseLiveFeedOptions {
-	onPositionUpdate: (entity: TrackedEntity) => void
+	onPositionUpdate: (entity: TrackedEntityUpdate) => void
 	onDemoExpired?: () => void
 }
 
