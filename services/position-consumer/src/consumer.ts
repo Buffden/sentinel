@@ -702,7 +702,7 @@ async function run(): Promise<void> {
 	log('info', 'consumer connected');
 
 	await consumer.subscribe({ topic: config.SOURCE_TOPIC, fromBeginning: config.FROM_BEGINNING });
-	log('info', 'consumer subscribed', { topic: SOURCE_TOPIC });
+	log('info', 'consumer subscribed', { topic: config.SOURCE_TOPIC });
 
 	await consumer.run({
 		autoCommit: false,

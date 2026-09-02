@@ -7,8 +7,9 @@ import { MAP_STYLE_PRIMARY, MAP_STYLE_FALLBACK } from './mapStyle'
 import { aviationLayer, type AircraftPosition } from './layers/aviationLayer'
 import WidgetHeader from '@/shared/ui/WidgetHeader'
 import { fetchApi } from '@/features/auth/apiClient'
-import { type TrackedEntity } from '@/entities/tracked-entity/model'
+import { type TrackedEntity, applyPositionUpdate } from '@/entities/tracked-entity/model'
 import { wireToTrackedEntity, isValidWireEntityDto } from '@/entities/tracked-entity/adapter'
+import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 
 // Point the GL worker at the static copy in /public so Turbopack
 // does not need to bundle the worker file as a module chunk.
@@ -48,20 +49,28 @@ const ICON_BTN: React.CSSProperties = {
 interface MapWidgetProps {
 	// Direct prop when used outside Dockview; params fallback when Dockview renders this as a panel.
 	onToggleLayout?: () => void
-	params?: { onToggleLayout?: () => void }
+	onDemoExpired?: () => void
+	params?: { onToggleLayout?: () => void; onDemoExpired?: () => void }
 }
 
-export default function MapWidget({ onToggleLayout, params }: MapWidgetProps) {
+export default function MapWidget({ onToggleLayout, onDemoExpired, params }: MapWidgetProps) {
 	const toggleFn = onToggleLayout ?? params?.onToggleLayout
+	const demoExpiredFn = onDemoExpired ?? params?.onDemoExpired
 	const outerRef = useRef<HTMLDivElement>(null)
 	const containerRef = useRef<HTMLDivElement>(null)
 	const mapRef = useRef<MLMap | null>(null)
 	const overlayRef = useRef<MapboxOverlay | null>(null)
 	const [is3D, setIs3D] = useState(false)
-	// Entity state: CP7e seeds from REST; CP7f will apply live WS updates on top.
-	// State lives here for now — only MapWidget consumes it. CP7f lifts it
-	// to a useLiveFeed hook shared between map and alert panel.
-	const [entities, setEntities] = useState<TrackedEntity[]>([])
+	// Entity state: keyed by entity id for O(1) idempotent updates.
+	// Seeded from REST on map load (CP7e); live WS updates applied on top (CP7f).
+	const [entities, setEntities] = useState<Map<string, TrackedEntity>>(new Map())
+
+	const { subscribe } = useLiveFeed({
+		onPositionUpdate: (entity) => {
+			setEntities((prev) => applyPositionUpdate(prev, entity))
+		},
+		onDemoExpired: demoExpiredFn,
+	})
 
 	useEffect(() => {
 		const container = containerRef.current
@@ -127,25 +136,31 @@ export default function MapWidget({ onToggleLayout, params }: MapWidgetProps) {
 			// Use the current viewport bounds so we only fetch what is visible.
 			if (destroyed) return
 			const bounds = map.getBounds()
-			const bbox = [
-				bounds.getSouth().toFixed(6),
-				bounds.getWest().toFixed(6),
-				bounds.getNorth().toFixed(6),
-				bounds.getEast().toFixed(6),
-			].join(',')
+			const viewBbox: [number, number, number, number] = [
+				bounds.getSouth(),
+				bounds.getWest(),
+				bounds.getNorth(),
+				bounds.getEast(),
+			]
+			const bboxParam = viewBbox.map((n) => n.toFixed(6)).join(',')
 
 			try {
-				const res = await fetchApi(`/api/entities/live?bbox=${bbox}`)
+				const res = await fetchApi(`/api/entities/live?bbox=${bboxParam}`)
 				if (!res.ok) return
 				const raw: unknown[] = (await res.json()) as unknown[]
-				const hydrated = raw
-					.filter(isValidWireEntityDto)
-					.map(wireToTrackedEntity)
-				if (!destroyed) setEntities(hydrated)
+				const hydrated = raw.filter(isValidWireEntityDto).map(wireToTrackedEntity)
+				if (!destroyed) {
+					setEntities(new Map(hydrated.map((e) => [e.id, e])))
+				}
 			} catch {
 				// fetchApi throws on 401 (already redirects). Other errors:
-				// map stays empty; WS feed will populate in CP7f.
+				// map stays empty; WS feed will populate entities.
 			}
+
+			// CP7f: send bbox subscription so the WS server filters position
+			// updates to the current viewport. Called after REST hydration so
+			// the map has already seeded visible entities before live frames arrive.
+			if (!destroyed) subscribe(viewBbox)
 		})
 
 		// Notify MapLibre when container dimensions change (SplitLayout drag)
@@ -163,17 +178,20 @@ export default function MapWidget({ onToggleLayout, params }: MapWidgetProps) {
 			map.remove()
 			mapRef.current = null
 		}
-	}, [])
+	// subscribe is from useCallback(... []) — its reference is stable for the
+	// component lifetime, so adding it here does not cause the map to reinitialize.
+	}, [subscribe])
 
 	// Sync entity state → deck.gl overlay whenever entities change.
 	// The overlay is created inside the map load callback; if it isn't ready yet
 	// this effect is a no-op and will re-run once entities are set after load.
 	useEffect(() => {
 		if (!overlayRef.current) return
-		const aircraft: AircraftPosition[] = entities.map((e) => ({
+		const aircraft: AircraftPosition[] = Array.from(entities.values()).map((e) => ({
 			id: e.callsign ?? e.id,
 			lon: e.lon,
 			lat: e.lat,
+			courseDeg: e.courseDeg,
 		}))
 		overlayRef.current.setProps({
 			layers: [aviationLayer.createLayer(aircraft, {})],

@@ -28,7 +28,7 @@ Out of scope: multi-tenant workspace scoping (Phase 07), multi-instance fan-out,
 | CP4: API scaffold + auth | Express; Google OAuth; Sentinel JWT (HttpOnly cookie); 401 enforcement on REST and WebSocket upgrade | Done |
 | CP5: Alert sink | Kafka consumer; `ON CONFLICT (alert_id) DO NOTHING`; WebSocket delivery; offset commit contract | Done |
 | CP6: WebSocket serving | Position feed; bbox filtering; reconnect hydration | Done |
-| CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | In progress — CP7e done (TrackedEntity domain model; wireToTrackedEntity adapter; isValidWireEntityDto guard; MapWidget fetches GET /entities/live on load using viewport bbox; deck.gl overlay updated via setProps; SAMPLE_AIRCRAFT removed) |
+| CP7: Dashboard | Live map; alert panel; login page; demo mode (POST /auth/demo, role claim, IP rate limit, WS expiry) | In progress — CP7f done (websocketClient.ts factory; useLiveFeed hook with 5 s reconnect and demo-expiry handling; MapWidget entity state changed from array to Map; subscribe(bbox) called after REST hydration; applyPositionUpdate monotonicity guard; onDemoExpired threaded via Workspace params; aircraft markers move live without page refresh) |
 
 ---
 
