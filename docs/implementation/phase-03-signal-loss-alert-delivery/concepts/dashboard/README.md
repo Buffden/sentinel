@@ -11,6 +11,11 @@ Study for layout and visual patterns only. Do not copy source code.
 | --- | --- |
 | This file | Visual target, shell structure, layer responsibilities, state ownership, checkpoint order |
 | [`map-widget.md`](map-widget.md) | MapLibre GL + deck.gl integration, worker URL fix, layer boundary, header controls |
+| [`filters.md`](filters.md) | CP7g floating FilterPanel, the layer-toggle-overlay deviation, the applyPositionUpdate merge fix, two drag-bounds bugs |
+| [`shared-websocket.md`](shared-websocket.md) | CP7i live alert feed, the shared/reference-counted WebSocket singleton, REST vs WS alert wire-shape differences |
+| [`frontend-testing.md`](frontend-testing.md) | CP7j — why Vitest, the tsconfig-alias gotcha, position staleness + alert dedup proven with tests |
+| [`reconnect-reconciliation.md`](reconnect-reconciliation.md) | CP7k — the onReconnect signal, the MapWidget ref-cycle fix, two strict lint rules hit, proven against a real killed-API disconnect |
+| [`demo-expiry-verification.md`](demo-expiry-verification.md) | CP7l — no code needed, verified with a short-lived crafted JWT instead of waiting 3 real minutes |
 | [`network-boundary-adapter.puml`](network-boundary-adapter.puml) | Wire JSON → adapter → domain model → React sequence |
 | [`ws-separation-flow.puml`](ws-separation-flow.puml) | WebSocket lifecycle: connect, subscribe, reconnect, demo expiry, cleanup |
 
@@ -67,6 +72,17 @@ Exit proof: panels are visible and resizable.
 provides explicit height so MapLibre sizes correctly. A layer-toggle overlay is rendered
 inside the map widget. The aviation deck.gl layer (aircraft markers) is the first real layer
 implementation. Exit proof: map tiles render, projection toggle works, aircraft dots appear.
+
+> **CP7g deviation:** the generic, searchable/collapsible layer-enable overlay described above
+> was never built, and CP7g's aviation filters (callsign search, airborne/grounded status) live
+> in their own floating `FilterPanel` instead, not that overlay. Reason: aviation is still the
+> only map layer — building a generic multi-layer toggle overlay now, with nothing else to
+> toggle, would be exactly the speculative platform primitive this project's extensibility rule
+> warns against (build shared primitives only when a real second consumer proves the need). The
+> layer-toggle overlay is still the right home for cross-domain layer enable/disable once a
+> second layer (vessels, weather, etc.) actually exists — build it then, against that real need,
+> and fold aviation's filters in if it makes sense at that point. Implementation details, the
+> `applyPositionUpdate` merge fix, and two drag-bounds bugs: [`filters.md`](filters.md).
 
 **Layer 3: Alert panel.** Signal-loss alert list docked to the right. Scrollable, styled with
 shared design tokens. Static data first, live feed wired in a later checkpoint. Exit proof:
@@ -292,18 +308,18 @@ These exist as reserved slots in the shell. Implementations wait for their respe
 
 ## Checkpoint order
 
-| Step | Deliverable | Exit proof |
-| --- | --- | --- |
-| CP7a | Demo API additions | CLI verification only |
-| CP7b | Next.js bootstrap + quality tooling | lint / typecheck / build pass |
-| CP7c | Tokens + workspace shell + map widget (MapLibre GL + deck.gl) | Tiles render, aircraft dots visible, panels resizable |
-| CP7d | Authentication + login page | 401 redirects; cookie auth works |
-| CP7e | REST map hydration | real Redis entities on map |
-| CP7f | Live position WebSocket | aircraft moves without page refresh |
-| CP7g | Filters | filters do not corrupt underlying entity state |
-| CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear |
-| CP7i | Live alert WebSocket feed | new alert appears without page refresh |
-| CP7j | Dedupe + stale guards | duplicate / stale simulation passes |
-| CP7k | Reconnect reconciliation | disconnect → reconnect → hydrated |
-| CP7l | Demo expiry UX | WS close 4401 shows banner; redirect works |
-| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel |
+| Step | Deliverable | Exit proof | Status |
+| --- | --- | --- | --- |
+| CP7a | Demo API additions | CLI verification only | Done |
+| CP7b | Next.js bootstrap + quality tooling | lint / typecheck / build pass | Done |
+| CP7c | Tokens + workspace shell + map widget (MapLibre GL + deck.gl) | Tiles render, aircraft dots visible, panels resizable | Done |
+| CP7d | Authentication + login page | 401 redirects; cookie auth works | Done |
+| CP7e | REST map hydration | real Redis entities on map | Done |
+| CP7f | Live position WebSocket | aircraft moves without page refresh | Done |
+| CP7g | Filters — floating `FilterPanel` inside the Map widget | filters do not corrupt underlying entity state | Done — [`filters.md`](filters.md) |
+| CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear | Done |
+| CP7i | Live alert WebSocket feed | new alert appears without page refresh | Done — [`shared-websocket.md`](shared-websocket.md) |
+| CP7j | Dedupe + stale guards | duplicate / stale simulation passes | Done — [`frontend-testing.md`](frontend-testing.md) |
+| CP7k | Reconnect reconciliation | disconnect → reconnect → hydrated | Done — [`reconnect-reconciliation.md`](reconnect-reconciliation.md) |
+| CP7l | Demo expiry UX | WS close 4401 shows banner; redirect works | Done — [`demo-expiry-verification.md`](demo-expiry-verification.md) |
+| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel | Remaining |

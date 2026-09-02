@@ -1,24 +1,32 @@
 'use client'
 
-// Live-feed hook: manages the WebSocket connection to the API.
+// Live-feed hook: the one blessed entry point for real-time data from the
+// API's WebSocket. Knows about position-updates, alert-events, and the
+// subscribe(bbox) message — callers (MapWidget, AlertWidget) know nothing
+// about frames or channels, only TrackedEntity/Alert updates.
 //
 // Responsibilities:
-//   - Opens a WebSocket on mount and closes it on unmount.
-//   - Reconnects with a fixed 5 s delay on unexpected disconnection.
-//   - Does NOT reconnect on close code 4401 (demo session expired).
+//   - Subscribes to the shared, page-level WebSocket connection
+//     (shared/realtime/liveSocket.ts) on mount, unsubscribes on unmount.
+//     Does not own the connection itself — MapWidget and AlertWidget are
+//     independently-mounted Dockview panels, and this hook may be called
+//     by both at once; the underlying connection is a singleton so that
+//     stays one WebSocket, not two.
 //   - Exposes subscribe(bbox) so callers can set/update the server-side
 //     bbox filter. Safe to call before the connection is open — the message
 //     is dropped silently if the socket is not yet ready.
 //   - Parses position-updates frames and calls onPositionUpdate with the
-//     mapped TrackedEntity.
-//   - Calls onDemoExpired when the server closes with code 4401.
+//     mapped TrackedEntity update.
+//   - Parses alert-events frames and calls onAlertUpdate with the mapped Alert.
+//   - Calls onDemoExpired when the server closes the connection with code 4401.
 //
-// The hook uses refs for callbacks so the WebSocket is created once and
+// The hook uses refs for callbacks so the subscription is created once and
 // never recreated when the parent re-renders with new inline functions.
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
-import { openWebSocket } from '@/shared/realtime/websocketClient'
-import type { TrackedEntity } from '@/entities/tracked-entity/model'
+import { acquireLiveSocket, type LiveFrame } from '@/shared/realtime/liveSocket'
+import type { TrackedEntityUpdate } from '@/entities/tracked-entity/model'
+import type { Alert } from '@/entities/alert/model'
 
 // Wire shape of the data field in a position-updates WS frame.
 // Different from WireEntityDto (REST): uses timestamp_ms, no entity_subtype/on_ground.
@@ -34,7 +42,11 @@ interface WsPositionData {
 	callsign: string | null
 }
 
-function parsePositionFrame(data: unknown): TrackedEntity | null {
+// entitySubtype and onGround are intentionally absent from the return value,
+// not set to null — the WS frame doesn't carry them, and applyPositionUpdate
+// merges by key, so omitting them preserves whatever REST hydration (or an
+// earlier frame) already established instead of erasing it every tick.
+function parsePositionFrame(data: unknown): TrackedEntityUpdate | null {
 	if (!data || typeof data !== 'object') return null
 	const d = data as Record<string, unknown>
 	if (
@@ -55,88 +67,110 @@ function parsePositionFrame(data: unknown): TrackedEntity | null {
 		courseDeg: typeof p.course_deg === 'number' ? p.course_deg : null,
 		eventTimeMs: p.timestamp_ms,
 		entityType: typeof p.entity_type === 'string' ? p.entity_type : null,
-		entitySubtype: null,
 		callsign: typeof p.callsign === 'string' ? p.callsign : null,
-		onGround: null,
 	}
 }
 
-// Reconnect delay in ms after an unexpected close.
-const RECONNECT_DELAY_MS = 5_000
-
-// Close code the API sends when a demo JWT expires.
-const DEMO_EXPIRED_CODE = 4401
-
-interface UseLiveFeedOptions {
-	onPositionUpdate: (entity: TrackedEntity) => void
-	onDemoExpired?: () => void
+// Wire shape of the data field in an alert-events WS frame: the Alert
+// Evaluator's Kafka message, republished verbatim by the API's alert sink.
+// Different from WireAlertDto (REST): detected_at_ms is a number (straight
+// from Kafka), not detected_at as an ISO string (from the DB), and there is
+// no updated_at/acknowledged_at/resolved_at — those are DB-only columns.
+interface WsAlertData {
+	alert_id: string
+	entity_id: string
+	entity_type: string
+	alert_type: string
+	priority: string
+	status: string
+	detected_at_ms: number
+	payload: Record<string, unknown>
 }
 
-export function useLiveFeed({ onPositionUpdate, onDemoExpired }: UseLiveFeedOptions) {
-	// Refs so the WebSocket effect never needs to re-run when callbacks change.
+function parseAlertFrame(data: unknown): Alert | null {
+	if (!data || typeof data !== 'object') return null
+	const d = data as Record<string, unknown>
+	if (
+		typeof d['alert_id'] !== 'string' ||
+		typeof d['entity_id'] !== 'string' ||
+		typeof d['alert_type'] !== 'string' ||
+		typeof d['status'] !== 'string' ||
+		typeof d['detected_at_ms'] !== 'number'
+	)
+		return null
+
+	const a = d as unknown as WsAlertData
+	return {
+		id: a.alert_id,
+		alertType: a.alert_type,
+		entityId: a.entity_id,
+		entityType: a.entity_type,
+		status: a.status,
+		priority: a.priority,
+		detectedAtMs: a.detected_at_ms,
+		payload: a.payload ?? {},
+	}
+}
+
+interface UseLiveFeedOptions {
+	onPositionUpdate?: (entity: TrackedEntityUpdate) => void
+	onAlertUpdate?: (alert: Alert) => void
+	onDemoExpired?: () => void
+	// Fires when the connection re-opens after having dropped — never on the
+	// initial connect. Callers use this to re-run REST hydration and
+	// re-subscribe(bbox), recovering anything missed during the gap.
+	onReconnect?: () => void
+}
+
+export function useLiveFeed({
+	onPositionUpdate,
+	onAlertUpdate,
+	onDemoExpired,
+	onReconnect,
+}: UseLiveFeedOptions) {
+	// Refs so the subscription effect never needs to re-run when callbacks change.
 	const onPositionUpdateRef = useRef(onPositionUpdate)
+	const onAlertUpdateRef = useRef(onAlertUpdate)
 	const onDemoExpiredRef = useRef(onDemoExpired)
+	const onReconnectRef = useRef(onReconnect)
 
 	// Keep refs current after every render (useLayoutEffect runs synchronously,
 	// satisfying the eslint-plugin-react-compiler rule about ref writes).
 	useLayoutEffect(() => {
 		onPositionUpdateRef.current = onPositionUpdate
+		onAlertUpdateRef.current = onAlertUpdate
 		onDemoExpiredRef.current = onDemoExpired
+		onReconnectRef.current = onReconnect
 	})
 
-	// Stable ref to the active send function, set when the socket opens.
+	// Stable ref to the shared socket's send function.
 	const sendRef = useRef<((data: string) => void) | null>(null)
 
 	useEffect(() => {
-		let stopped = false
-		let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-		let activeClose: (() => void) | null = null
-
 		const wsUrl = process.env['NEXT_PUBLIC_WS_URL'] ?? 'ws://localhost:3000'
+		const socket = acquireLiveSocket(wsUrl)
+		sendRef.current = socket.send
 
-		function connect() {
-			const handle = openWebSocket(wsUrl, {
-				onOpen: () => {
-					sendRef.current = handle.send
-				},
-				onMessage: (raw) => {
-					let frame: { channel: string; data: unknown }
-					try {
-						frame = JSON.parse(raw) as { channel: string; data: unknown }
-					} catch {
-						return
-					}
-					if (frame.channel === 'position-updates') {
-						const entity = parsePositionFrame(frame.data)
-						if (entity) onPositionUpdateRef.current(entity)
-					}
-				},
-				onClose: (code) => {
-					sendRef.current = null
-					activeClose = null
-					if (stopped) return
-					if (code === DEMO_EXPIRED_CODE) {
-						onDemoExpiredRef.current?.()
-						return // no reconnect after demo expiry
-					}
-					reconnectTimer = setTimeout(() => {
-						if (!stopped) connect()
-					}, RECONNECT_DELAY_MS)
-				},
-			})
-
-			activeClose = handle.close
-		}
-
-		connect()
+		const unsubFrame = socket.onFrame((frame: LiveFrame) => {
+			if (frame.channel === 'position-updates') {
+				const entity = parsePositionFrame(frame.data)
+				if (entity) onPositionUpdateRef.current?.(entity)
+			} else if (frame.channel === 'alert-events') {
+				const alert = parseAlertFrame(frame.data)
+				if (alert) onAlertUpdateRef.current?.(alert)
+			}
+		})
+		const unsubDemoExpired = socket.onDemoExpired(() => onDemoExpiredRef.current?.())
+		const unsubReconnect = socket.onReconnect(() => onReconnectRef.current?.())
 
 		return () => {
-			stopped = true
+			unsubFrame()
+			unsubDemoExpired()
+			unsubReconnect()
 			sendRef.current = null
-			if (reconnectTimer !== null) clearTimeout(reconnectTimer)
-			activeClose?.()
+			socket.release()
 		}
-	}, []) // Intentionally empty: runs once, uses refs for callbacks.
+	}, []) // Intentionally empty: subscribes once per mount, uses refs for callbacks.
 
 	// Stable subscribe function. Sends a bbox subscription to the server.
 	// Safe to call before the socket opens — silently dropped if not ready.
