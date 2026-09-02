@@ -11,6 +11,7 @@ Study for layout and visual patterns only. Do not copy source code.
 | --- | --- |
 | This file | Visual target, shell structure, layer responsibilities, state ownership, checkpoint order |
 | [`map-widget.md`](map-widget.md) | MapLibre GL + deck.gl integration, worker URL fix, layer boundary, header controls |
+| [`filters.md`](filters.md) | CP7g floating FilterPanel, the layer-toggle-overlay deviation, the applyPositionUpdate merge fix, two drag-bounds bugs |
 | [`network-boundary-adapter.puml`](network-boundary-adapter.puml) | Wire JSON → adapter → domain model → React sequence |
 | [`ws-separation-flow.puml`](ws-separation-flow.puml) | WebSocket lifecycle: connect, subscribe, reconnect, demo expiry, cleanup |
 
@@ -76,7 +77,8 @@ implementation. Exit proof: map tiles render, projection toggle works, aircraft 
 > warns against (build shared primitives only when a real second consumer proves the need). The
 > layer-toggle overlay is still the right home for cross-domain layer enable/disable once a
 > second layer (vessels, weather, etc.) actually exists — build it then, against that real need,
-> and fold aviation's filters in if it makes sense at that point.
+> and fold aviation's filters in if it makes sense at that point. Implementation details, the
+> `applyPositionUpdate` merge fix, and two drag-bounds bugs: [`filters.md`](filters.md).
 
 **Layer 3: Alert panel.** Signal-loss alert list docked to the right. Scrollable, styled with
 shared design tokens. Static data first, live feed wired in a later checkpoint. Exit proof:
@@ -310,7 +312,7 @@ These exist as reserved slots in the shell. Implementations wait for their respe
 | CP7d | Authentication + login page | 401 redirects; cookie auth works |
 | CP7e | REST map hydration | real Redis entities on map |
 | CP7f | Live position WebSocket | aircraft moves without page refresh |
-| CP7g | Filters — floating `FilterPanel` inside the Map widget (not the generic layer-toggle overlay this doc describes below; see note) | filters do not corrupt underlying entity state |
+| CP7g | Filters — floating `FilterPanel` inside the Map widget; see [`filters.md`](filters.md) | filters do not corrupt underlying entity state |
 | CP7h | REST alert hydration | existing SIGNAL_LOSS alerts appear |
 | CP7i | Live alert WebSocket feed | new alert appears without page refresh |
 | CP7j | Dedupe + stale guards | duplicate / stale simulation passes |
