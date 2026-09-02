@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import { Redis } from 'ioredis';
 import { LeaderElection } from './leader.js';
@@ -12,14 +13,14 @@ const kafka = new Kafka({
 	logLevel: 0,
 });
 
-const producer = kafka.producer({
+export const producer = kafka.producer({
 	createPartitioner: Partitioners.LegacyPartitioner,
 });
 
 // ---- Redis setup -----------------------------------------------------------
 
 const instanceId = randomUUID();
-const redis = new Redis(config.REDIS_URL);
+export const redis = new Redis(config.REDIS_URL);
 const leader = new LeaderElection(
 	redis,
 	instanceId,
@@ -48,7 +49,7 @@ const leader = new LeaderElection(
 // Gate is written first. A crash between 1 and 2 means the entity misses an
 // alert for this episode. The alternative (Kafka first) would re-emit on
 // every scan tick until restart. Gate-first is the accepted trade-off.
-async function runScan(): Promise<void> {
+export async function runScan(): Promise<void> {
 	const nowMs = Date.now();
 	let cursor = '0';
 	let scanned = 0;
@@ -200,17 +201,22 @@ async function shutdown(): Promise<void> {
 	await redis.quit();
 }
 
-process.on('SIGINT', () => {
-	shutdown().then(() => process.exit(0));
-});
-process.on('SIGTERM', () => {
-	shutdown().then(() => process.exit(0));
-});
+// Only run the service when this file is executed directly (`npm run evaluator`),
+// not when imported — e.g. by an integration test importing runScan against a
+// real Redis and Kafka broker.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+	process.on('SIGINT', () => {
+		shutdown().then(() => process.exit(0));
+	});
+	process.on('SIGTERM', () => {
+		shutdown().then(() => process.exit(0));
+	});
 
-main().catch((err) => {
-	console.error({ err }, 'fatal error');
-	process.exit(1);
-});
+	main().catch((err) => {
+		console.error({ err }, 'fatal error');
+		process.exit(1);
+	});
+}
 
 // Resolves after `ms` milliseconds, or immediately if the signal is already
 // aborted or fires before the timer expires.
