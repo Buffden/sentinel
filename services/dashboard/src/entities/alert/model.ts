@@ -24,3 +24,16 @@ export function signalLossDarkSinceMs(alert: Alert): number | null {
 	const raw = alert.payload['dark_since_ms']
 	return typeof raw === 'number' ? raw : null
 }
+
+// Pure reducer: merge an incoming alert into the current map by alert_id.
+// Unlike position updates, there's no staleness/monotonicity concept here —
+// v1 has no acknowledge/resolve lifecycle (Phase 08), so a given alert_id's
+// content never changes after it's first published. A redelivered Kafka
+// message (e.g. after a crash before offset commit) republishes the exact
+// same content; overwriting by key is what makes that redelivery safe to
+// receive twice without creating a duplicate panel entry.
+export function applyAlertUpdate(current: Map<string, Alert>, incoming: Alert): Map<string, Alert> {
+	const next = new Map(current)
+	next.set(incoming.id, incoming)
+	return next
+}

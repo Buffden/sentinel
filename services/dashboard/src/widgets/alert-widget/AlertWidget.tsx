@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react'
 import WidgetHeader from '@/shared/ui/WidgetHeader'
 import { fetchApi } from '@/features/auth/apiClient'
 import { formatUtcTime } from '@/shared/lib/formatTime'
-import { type Alert, signalLossDarkSinceMs } from '@/entities/alert/model'
+import { type Alert, signalLossDarkSinceMs, applyAlertUpdate } from '@/entities/alert/model'
 import { wireToAlert, isValidWireAlertDto } from '@/entities/alert/adapter'
+import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 
 // STANDARD is the only priority the Alert Evaluator currently emits — every
 // SIGNAL_LOSS alert in v1 is STANDARD. ELEVATED is a real DATA_MODEL.md enum
@@ -17,8 +18,9 @@ const priorityColor: Record<string, string> = {
 }
 
 export default function AlertWidget() {
-	// Keyed by alert_id: idempotent hydration, and the same shape CP7i's live
-	// feed will merge into (duplicate alert_id must not create a second entry).
+	// Keyed by alert_id: idempotent hydration, and the same shape the live
+	// feed below merges into (duplicate alert_id must not create a second
+	// entry — see applyAlertUpdate).
 	const [alerts, setAlerts] = useState<Map<string, Alert>>(new Map())
 
 	useEffect(() => {
@@ -35,12 +37,21 @@ export default function AlertWidget() {
 			})
 			.catch(() => {
 				// fetchApi throws on 401 (already redirects). Other errors:
-				// panel stays empty; CP7i's live feed will populate it.
+				// panel stays empty; the live feed below can still populate it.
 			})
 		return () => {
 			cancelled = true
 		}
 	}, [])
+
+	// CP7i: new alerts appear without a page refresh. No ordering dependency
+	// on the REST hydration above — both paths upsert by alert_id, so whichever
+	// arrives first, the final state converges the same either way.
+	useLiveFeed({
+		onAlertUpdate: (alert) => {
+			setAlerts((prev) => applyAlertUpdate(prev, alert))
+		},
+	})
 
 	const list = Array.from(alerts.values())
 
