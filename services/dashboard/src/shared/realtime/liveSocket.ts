@@ -21,6 +21,7 @@ export interface LiveFrame {
 
 type FrameListener = (frame: LiveFrame) => void
 type DemoExpiredListener = () => void
+type ReconnectListener = () => void
 
 const RECONNECT_DELAY_MS = 5_000
 const DEMO_EXPIRED_CODE = 4401
@@ -28,12 +29,24 @@ const DEMO_EXPIRED_CODE = 4401
 let handle: WsHandle | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refCount = 0
+// True once this page has ever completed a connection. Distinguishes the
+// very first open (each widget's own mount-time hydration already covers
+// that) from a genuine reconnect after a drop (nothing else tells anyone
+// that happened — see onReconnect below).
+let hasConnectedBefore = false
 
 const frameListeners = new Set<FrameListener>()
 const demoExpiredListeners = new Set<DemoExpiredListener>()
+const reconnectListeners = new Set<ReconnectListener>()
 
 function connect(url: string): void {
 	handle = openWebSocket(url, {
+		onOpen: () => {
+			if (hasConnectedBefore) {
+				reconnectListeners.forEach((fn) => fn())
+			}
+			hasConnectedBefore = true
+		},
 		onMessage: (raw) => {
 			let frame: LiveFrame
 			try {
@@ -62,6 +75,11 @@ export interface LiveSocketSubscription {
 	send: (data: string) => void
 	onFrame: (fn: FrameListener) => () => void
 	onDemoExpired: (fn: DemoExpiredListener) => () => void
+	// Fires when the connection re-opens after having been open before —
+	// never on the initial connect. Callers use this to re-run REST
+	// hydration and re-send subscribe(bbox), recovering anything that
+	// happened during the disconnected window.
+	onReconnect: (fn: ReconnectListener) => () => void
 	release: () => void
 }
 
@@ -78,6 +96,10 @@ export function acquireLiveSocket(url: string): LiveSocketSubscription {
 		onDemoExpired: (fn) => {
 			demoExpiredListeners.add(fn)
 			return () => demoExpiredListeners.delete(fn)
+		},
+		onReconnect: (fn) => {
+			reconnectListeners.add(fn)
+			return () => reconnectListeners.delete(fn)
 		},
 		release: () => {
 			refCount--

@@ -116,17 +116,23 @@ interface UseLiveFeedOptions {
 	onPositionUpdate?: (entity: TrackedEntityUpdate) => void
 	onAlertUpdate?: (alert: Alert) => void
 	onDemoExpired?: () => void
+	// Fires when the connection re-opens after having dropped — never on the
+	// initial connect. Callers use this to re-run REST hydration and
+	// re-subscribe(bbox), recovering anything missed during the gap.
+	onReconnect?: () => void
 }
 
 export function useLiveFeed({
 	onPositionUpdate,
 	onAlertUpdate,
 	onDemoExpired,
+	onReconnect,
 }: UseLiveFeedOptions) {
 	// Refs so the subscription effect never needs to re-run when callbacks change.
 	const onPositionUpdateRef = useRef(onPositionUpdate)
 	const onAlertUpdateRef = useRef(onAlertUpdate)
 	const onDemoExpiredRef = useRef(onDemoExpired)
+	const onReconnectRef = useRef(onReconnect)
 
 	// Keep refs current after every render (useLayoutEffect runs synchronously,
 	// satisfying the eslint-plugin-react-compiler rule about ref writes).
@@ -134,6 +140,7 @@ export function useLiveFeed({
 		onPositionUpdateRef.current = onPositionUpdate
 		onAlertUpdateRef.current = onAlertUpdate
 		onDemoExpiredRef.current = onDemoExpired
+		onReconnectRef.current = onReconnect
 	})
 
 	// Stable ref to the shared socket's send function.
@@ -154,10 +161,12 @@ export function useLiveFeed({
 			}
 		})
 		const unsubDemoExpired = socket.onDemoExpired(() => onDemoExpiredRef.current?.())
+		const unsubReconnect = socket.onReconnect(() => onReconnectRef.current?.())
 
 		return () => {
 			unsubFrame()
 			unsubDemoExpired()
+			unsubReconnect()
 			sendRef.current = null
 			socket.release()
 		}

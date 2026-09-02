@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Map as MLMap, setWorkerUrl } from 'maplibre-gl'
 import type { MapboxOverlay } from '@deck.gl/mapbox'
 import { MAP_STYLE_PRIMARY, MAP_STYLE_FALLBACK } from './mapStyle'
@@ -67,6 +67,10 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	const containerRef = useRef<HTMLDivElement>(null)
 	const mapRef = useRef<MLMap | null>(null)
 	const overlayRef = useRef<MapboxOverlay | null>(null)
+	// Guards async hydration callbacks (initial load and reconnect) against
+	// applying state after the map instance they were reading from is gone —
+	// set in the map-creation effect's cleanup, checked before every setEntities.
+	const destroyedRef = useRef(false)
 	const [is3D, setIs3D] = useState(false)
 	// Entity state: keyed by entity id for O(1) idempotent updates.
 	// Seeded from REST on map load (CP7e); live WS updates applied on top (CP7f).
@@ -74,11 +78,66 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	// Filter state (CP7g). Presentation-only — never removes entries from `entities`.
 	const [filters, setFilters] = useState<AviationFilters>(DEFAULT_AVIATION_FILTERS)
 
+	// useLiveFeed's onReconnect needs to call hydrateAndSubscribe, which in
+	// turn needs `subscribe` from useLiveFeed's own return value — a genuine
+	// circular dependency. Broken via a ref: onReconnect calls through the
+	// ref (always safe to reference, no TDZ issue), and hydrateAndSubscribe
+	// is assigned into it every render, once `subscribe` actually exists.
+	const hydrateAndSubscribeRef = useRef<() => void>(() => {})
+
 	const { subscribe } = useLiveFeed({
 		onPositionUpdate: (entity) => {
 			setEntities((prev) => applyPositionUpdate(prev, entity))
 		},
 		onDemoExpired: demoExpiredFn,
+		// CP7k: a drop-then-resume means the server has forgotten this
+		// connection's bbox subscription, and anything that happened during
+		// the gap was never delivered — re-run the same sequence as initial load.
+		onReconnect: () => hydrateAndSubscribeRef.current(),
+	})
+
+	// CP7e (initial load) and CP7k (reconnect) both need the exact same
+	// sequence: fetch current entities for the viewport, replace state
+	// wholesale, then (re-)send subscribe(bbox). Hydrate-before-subscribe is
+	// deliberate — the map has already seeded visible entities before live
+	// frames for the new/resumed subscription can arrive.
+	const hydrateAndSubscribe = useCallback(async () => {
+		const map = mapRef.current
+		if (!map) return
+		const bounds = map.getBounds()
+		const viewBbox: [number, number, number, number] = [
+			bounds.getSouth(),
+			bounds.getWest(),
+			bounds.getNorth(),
+			bounds.getEast(),
+		]
+		const bboxParam = viewBbox.map((n) => n.toFixed(6)).join(',')
+
+		try {
+			const res = await fetchApi(`/api/entities/live?bbox=${bboxParam}`)
+			if (res.ok) {
+				const raw: unknown[] = (await res.json()) as unknown[]
+				const hydrated = raw.filter(isValidWireEntityDto).map(wireToTrackedEntity)
+				if (!destroyedRef.current) {
+					setEntities(new Map(hydrated.map((e) => [e.id, e])))
+				}
+			}
+		} catch {
+			// fetchApi throws on 401 (already redirects). Other errors: entities
+			// stay as they are; the live feed can still update individual entities.
+		}
+
+		if (!destroyedRef.current) subscribe(viewBbox)
+	}, [subscribe])
+
+	// Ref writes must happen outside render (this repo's react-hooks lint
+	// config forbids it during render) — useLayoutEffect runs synchronously
+	// right after commit, so the ref is current before any reconnect could
+	// possibly fire.
+	useLayoutEffect(() => {
+		hydrateAndSubscribeRef.current = () => {
+			void hydrateAndSubscribe()
+		}
 	})
 
 	useEffect(() => {
@@ -89,9 +148,11 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		// setup → cleanup → setup cycle that Strict Mode intentionally exercises.
 		if (!container || mapRef.current) return
 
-		// destroyed flag stops the load callback from running if cleanup fires
-		// before the style finishes loading (can happen in Strict Mode dev)
-		let destroyed = false
+		// Reset for this mount — cleanup below sets it back to true. Stops the
+		// load callback (and any later reconnect-triggered hydration) from
+		// applying state if cleanup fires before an async step finishes
+		// (can happen in Strict Mode dev).
+		destroyedRef.current = false
 
 		const map = new MLMap({
 			container,
@@ -114,7 +175,7 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		// Fall back to OpenFreeMap if the primary style cannot load
 		let usedFallback = false
 		map.on('error', (e) => {
-			if (usedFallback || destroyed) return
+			if (usedFallback || destroyedRef.current) return
 			const msg = String((e as unknown as { error?: { message?: string } }).error?.message ?? '')
 			if (msg.includes('style') || msg.includes('Unable to load')) {
 				usedFallback = true
@@ -123,14 +184,14 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		})
 
 		map.on('load', async () => {
-			if (destroyed) return
+			if (destroyedRef.current) return
 
 			// Dynamic import ensures luma.gl initializes only once even when
 			// Turbopack evaluates this module in multiple bundle contexts (Dockview).
 			const { MapboxOverlay } = await import('@deck.gl/mapbox')
 
 			// Attach deck.gl overlay once — all future layer updates use setProps.
-			// Start with empty data; hydration fetch below populates entities state,
+			// Start with empty data; hydration below populates entities state,
 			// which the useEffect below calls setProps to apply.
 			const overlay = new MapboxOverlay({
 				interleaved: false,
@@ -141,35 +202,10 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 			map.addControl(overlay as unknown as import('maplibre-gl').IControl)
 			overlayRef.current = overlay
 
-			// CP7e: REST hydration — seed map with live entities from Redis.
-			// Use the current viewport bounds so we only fetch what is visible.
-			if (destroyed) return
-			const bounds = map.getBounds()
-			const viewBbox: [number, number, number, number] = [
-				bounds.getSouth(),
-				bounds.getWest(),
-				bounds.getNorth(),
-				bounds.getEast(),
-			]
-			const bboxParam = viewBbox.map((n) => n.toFixed(6)).join(',')
-
-			try {
-				const res = await fetchApi(`/api/entities/live?bbox=${bboxParam}`)
-				if (!res.ok) return
-				const raw: unknown[] = (await res.json()) as unknown[]
-				const hydrated = raw.filter(isValidWireEntityDto).map(wireToTrackedEntity)
-				if (!destroyed) {
-					setEntities(new Map(hydrated.map((e) => [e.id, e])))
-				}
-			} catch {
-				// fetchApi throws on 401 (already redirects). Other errors:
-				// map stays empty; WS feed will populate entities.
-			}
-
-			// CP7f: send bbox subscription so the WS server filters position
-			// updates to the current viewport. Called after REST hydration so
-			// the map has already seeded visible entities before live frames arrive.
-			if (!destroyed) subscribe(viewBbox)
+			// CP7e: REST hydration — seed map with live entities from Redis, then
+			// CP7f: subscribe(bbox) so the WS server filters position updates to
+			// the current viewport. Same sequence CP7k reuses on reconnect.
+			if (!destroyedRef.current) await hydrateAndSubscribe()
 		})
 
 		// Notify MapLibre when container dimensions change (SplitLayout drag)
@@ -180,16 +216,16 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		resizeObserver.observe(container)
 
 		return () => {
-			destroyed = true
+			destroyedRef.current = true
 			resizeObserver.disconnect()
 			// map.remove() removes all attached controls including the deck.gl overlay
 			overlayRef.current = null
 			map.remove()
 			mapRef.current = null
 		}
-	// subscribe is from useCallback(... []) — its reference is stable for the
-	// component lifetime, so adding it here does not cause the map to reinitialize.
-	}, [subscribe])
+	// hydrateAndSubscribe wraps subscribe, itself stable for the component's
+	// lifetime — adding it here does not cause the map to reinitialize.
+	}, [hydrateAndSubscribe])
 
 	// Sync entity state → deck.gl overlay whenever entities change.
 	// The overlay is created inside the map load callback; if it isn't ready yet

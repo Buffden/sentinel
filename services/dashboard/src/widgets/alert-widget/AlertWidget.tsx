@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import WidgetHeader from '@/shared/ui/WidgetHeader'
 import { fetchApi } from '@/features/auth/apiClient'
 import { formatUtcTime } from '@/shared/lib/formatTime'
@@ -22,34 +22,43 @@ export default function AlertWidget() {
 	// feed below merges into (duplicate alert_id must not create a second
 	// entry — see applyAlertUpdate).
 	const [alerts, setAlerts] = useState<Map<string, Alert>>(new Map())
+	const unmountedRef = useRef(false)
 
-	useEffect(() => {
-		let cancelled = false
-		fetchApi('/api/alerts')
-			.then((res) => {
-				if (!res.ok) return
-				return res.json() as Promise<unknown[]>
-			})
-			.then((raw) => {
-				if (cancelled || !raw) return
-				const hydrated = raw.filter(isValidWireAlertDto).map(wireToAlert)
-				setAlerts(new Map(hydrated.map((a) => [a.id, a])))
-			})
-			.catch(() => {
-				// fetchApi throws on 401 (already redirects). Other errors:
-				// panel stays empty; the live feed below can still populate it.
-			})
-		return () => {
-			cancelled = true
+	// CP7h (initial mount) and CP7k (reconnect) both re-run this same fetch —
+	// on reconnect, any alert published during the disconnected window was
+	// never delivered over the (now-reopened) WebSocket, so REST is the only
+	// way to recover it.
+	const hydrateAlerts = useCallback(async () => {
+		try {
+			const res = await fetchApi('/api/alerts')
+			if (!res.ok) return
+			const raw = (await res.json()) as unknown[]
+			if (unmountedRef.current) return
+			const hydrated = raw.filter(isValidWireAlertDto).map(wireToAlert)
+			setAlerts(new Map(hydrated.map((a) => [a.id, a])))
+		} catch {
+			// fetchApi throws on 401 (already redirects). Other errors:
+			// panel stays empty; the live feed below can still populate it.
 		}
 	}, [])
 
+	useEffect(() => {
+		unmountedRef.current = false
+		queueMicrotask(() => void hydrateAlerts())
+		return () => {
+			unmountedRef.current = true
+		}
+	}, [hydrateAlerts])
+
 	// CP7i: new alerts appear without a page refresh. No ordering dependency
-	// on the REST hydration above — both paths upsert by alert_id, so whichever
-	// arrives first, the final state converges the same either way.
+	// between hydration and the live feed — both paths upsert by alert_id, so
+	// whichever arrives first, the final state converges the same either way.
 	useLiveFeed({
 		onAlertUpdate: (alert) => {
 			setAlerts((prev) => applyAlertUpdate(prev, alert))
+		},
+		onReconnect: () => {
+			void hydrateAlerts()
 		},
 	})
 
