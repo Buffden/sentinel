@@ -1,6 +1,5 @@
 name: CI
 
-# Runs on every PR and on pushes to the two long-lived branches.
 on:
   pull_request:
   push:
@@ -8,7 +7,6 @@ on:
       - main
       - docs/vision-plan
 
-# Cancel in-progress runs on the same ref so stale runs don't hold runners.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -16,85 +14,18 @@ concurrency:
 env:
   NODE_VERSION: '20'
 
-# ── Stage 1: Change detection ──────────────────────────────────────────────
-#
-# Each service job is conditional on its paths changing. This prevents
-# unrelated services from running their quality gates on every commit.
-# Infra changes (docker-compose, migrations) trigger all service checks
-# because they may affect runtime behavior even if service code is unchanged.
-
 jobs:
-  changes:
-    name: Detect changes
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-      contents: read
-    outputs:
-      dashboard: ${{ steps.filter.outputs.dashboard }}
-      api: ${{ steps.filter.outputs.api }}
-      position-consumer: ${{ steps.filter.outputs.position-consumer }}
-      alert-evaluator: ${{ steps.filter.outputs.alert-evaluator }}
-      ingestion-poller: ${{ steps.filter.outputs.ingestion-poller }}
-      infra: ${{ steps.filter.outputs.infra }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          # Full history required so dorny/paths-filter can diff the base
-          # commit on push events (default fetch-depth:1 may miss the base).
-          fetch-depth: 0
-
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            dashboard:
-              - 'services/dashboard/**'
-            api:
-              - 'services/api/**'
-            position-consumer:
-              - 'services/position-consumer/**'
-            alert-evaluator:
-              - 'services/alert-evaluator/**'
-            ingestion-poller:
-              - 'services/ingestion-poller/**'
-            infra:
-              - 'docker-compose.yml'
-              - 'infra/**'
-
-# ── Stage 2: Quality gates (parallel) ─────────────────────────────────────
-#
-# Each service runs independently. The dashboard is the only service with
-# a build step because Next.js compilation catches import and RSC errors
-# that tsc --noEmit does not.
-#
-# Backend services run tsc --noEmit only. No automated tests exist yet —
-# add a 'test' step here when the first test suite lands.
-#
-# npm cache: backend services have no package-lock.json yet, so
-# actions/setup-node's built-in npm cache cannot be used (it requires a
-# lockfile). A manual actions/cache step keyed on package.json is used
-# instead. Commit package-lock.json files and switch to:
-#   cache: npm
-#   cache-dependency-path: services/<name>/package-lock.json
-# for fully reproducible installs.
-
   check-dashboard:
-    name: "Dashboard: lint / typecheck / build"
+    name: "Dashboard: typecheck / lint / build"
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.dashboard == 'true' || needs.changes.outputs.infra == 'true'
     defaults:
       run:
         working-directory: services/dashboard
     steps:
       - uses: actions/checkout@v5
 
-      # pnpm/action-setup must run before actions/setup-node so the
-      # pnpm cache path is registered before setup-node reads it.
       - uses: pnpm/action-setup@v4
         with:
-          # Pinned to match packageManager field in services/dashboard/package.json.
           version: 11.10.0
 
       - uses: actions/setup-node@v5
@@ -115,16 +46,12 @@ jobs:
       - name: Build
         run: pnpm build
         env:
-          # Placeholders for NEXT_PUBLIC_ vars inlined at build time.
-          # Real values are injected at runtime on the deployment host.
           NEXT_PUBLIC_GOOGLE_CLIENT_ID: ci-placeholder
           NEXT_PUBLIC_WS_URL: ws://localhost:3000
 
   check-api:
     name: "API: typecheck"
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.api == 'true' || needs.changes.outputs.infra == 'true'
     defaults:
       run:
         working-directory: services/api
@@ -150,8 +77,6 @@ jobs:
   check-position-consumer:
     name: "Position Consumer: typecheck"
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.position-consumer == 'true' || needs.changes.outputs.infra == 'true'
     defaults:
       run:
         working-directory: services/position-consumer
@@ -177,8 +102,6 @@ jobs:
   check-alert-evaluator:
     name: "Alert Evaluator: typecheck"
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.alert-evaluator == 'true' || needs.changes.outputs.infra == 'true'
     defaults:
       run:
         working-directory: services/alert-evaluator
@@ -204,8 +127,6 @@ jobs:
   check-ingestion-poller:
     name: "Ingestion Poller: typecheck"
     runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.ingestion-poller == 'true' || needs.changes.outputs.infra == 'true'
     defaults:
       run:
         working-directory: services/ingestion-poller
@@ -228,109 +149,17 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-# ── Stage 3: Required gate ─────────────────────────────────────────────────
-#
-# Single job required by branch protection. Always runs regardless of which
-# upstream jobs were skipped — a skipped service is not a failure.
-# Add this job name to the "Required status checks" rule in GitHub settings.
-
+  # All service jobs must pass for this job to succeed.
+  # Add "CI pass" as the required status check in branch protection settings.
   ci-pass:
     name: CI pass
     runs-on: ubuntu-latest
     needs:
-      - changes
       - check-dashboard
       - check-api
       - check-position-consumer
       - check-alert-evaluator
       - check-ingestion-poller
-    if: always()
     steps:
-      - name: Check all quality gates
-        run: |
-          results="${{ join(needs.*.result, ' ') }}"
-          echo "Job results: $results"
-          if echo "$results" | grep -qE '\b(failure|cancelled)\b'; then
-            echo "One or more quality gates failed."
-            exit 1
-          fi
-          echo "All gates passed or were skipped."
+      - run: echo "All checks passed."
 
-# ── Stage 4: Docker build + push ───────────────────────────────────────────
-#
-# Disabled until each service has a Dockerfile. To enable:
-#   1. Add services/<name>/Dockerfile for each service.
-#   2. Create an ECR repository per service in your AWS account.
-#   3. Add secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
-#   4. Add vars: AWS_REGION, ECR_REGISTRY.
-#   5. Uncomment the job below and remove this comment block.
-#
-# build-and-push:
-#   name: "Docker: build and push (${{ matrix.service }})"
-#   runs-on: ubuntu-latest
-#   needs: ci-pass
-#   if: >
-#     github.event_name == 'push' &&
-#     (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/docs/vision-plan')
-#   strategy:
-#     matrix:
-#       service:
-#         - api
-#         - position-consumer
-#         - alert-evaluator
-#         - ingestion-poller
-#         - dashboard
-#   steps:
-#     - uses: actions/checkout@v5
-#
-#     - uses: aws-actions/configure-aws-credentials@v4
-#       with:
-#         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#         aws-region: ${{ vars.AWS_REGION }}
-#
-#     - name: Log in to ECR
-#       id: login-ecr
-#       uses: aws-actions/amazon-ecr-login@v2
-#
-#     - name: Build and push
-#       env:
-#         REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-#         IMAGE_TAG: ${{ github.sha }}
-#       run: |
-#         docker build \
-#           -t $REGISTRY/sentinel-${{ matrix.service }}:$IMAGE_TAG \
-#           -t $REGISTRY/sentinel-${{ matrix.service }}:latest \
-#           -f services/${{ matrix.service }}/Dockerfile \
-#           services/${{ matrix.service }}
-#         docker push $REGISTRY/sentinel-${{ matrix.service }}:$IMAGE_TAG
-#         docker push $REGISTRY/sentinel-${{ matrix.service }}:latest
-
-# ── Stage 5: Deploy ────────────────────────────────────────────────────────
-#
-# Disabled until Stage 4 is active. Requires a GitHub environment named
-# "production" with any required reviewers configured.
-#
-# deploy:
-#   name: Deploy to production
-#   runs-on: ubuntu-latest
-#   needs: build-and-push
-#   environment: production
-#   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-#   steps:
-#     - uses: actions/checkout@v5
-#
-#     - uses: aws-actions/configure-aws-credentials@v4
-#       with:
-#         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#         aws-region: ${{ vars.AWS_REGION }}
-#
-#     - name: Deploy updated task definitions
-#       env:
-#         IMAGE_TAG: ${{ github.sha }}
-#       run: |
-#         # Update ECS task definitions for changed services, then trigger
-#         # a rolling deployment. Alternatively, SSH to the EC2 host and
-#         # run: docker compose pull && docker compose up -d
-#         echo "Configure deploy command for your target environment."
