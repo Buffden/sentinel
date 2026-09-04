@@ -112,6 +112,8 @@ export async function runScan(): Promise<void> {
 			const parseField = (v: string | undefined): number | null =>
 				v && v !== '' ? Number(v) : null;
 
+			const callsign = entity['callsign'] && entity['callsign'] !== '' ? entity['callsign'] : null;
+
 			const alert = {
 				alert_id: alertId,
 				entity_id: entityId,
@@ -124,6 +126,7 @@ export async function runScan(): Promise<void> {
 				detected_at_ms: nowMs,
 				payload: {
 					dark_since_ms: darkSinceMs,
+					callsign,
 					last_known_lat: parseField(entity['lat']),
 					last_known_lon: parseField(entity['lon']),
 					last_known_altitude_m: parseField(entity['altitude_m']),
