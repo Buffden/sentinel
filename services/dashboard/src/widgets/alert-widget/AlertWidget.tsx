@@ -17,11 +17,53 @@ const priorityColor: Record<string, string> = {
 	ELEVATED: 'var(--color-status-critical)',
 }
 
+// Renders one label/value row inside an expanded alert card. Mirrors the
+// Row pattern in FlightInfoWidget — not extracted to a shared component
+// since these two callers are the only consumers so far.
+function DetailRow({ label, value }: { label: string; value: string }) {
+	return (
+		<div
+			style={{
+				display: 'flex',
+				justifyContent: 'space-between',
+				alignItems: 'center',
+				padding: '3px 0',
+			}}
+		>
+			<span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)' }}>
+				{label}
+			</span>
+			<span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--color-text-primary)', fontFamily: 'var(--font-mono)' }}>
+				{value}
+			</span>
+		</div>
+	)
+}
+
+// payload numeric fields come from Redis via the API as number | null
+// (docs/DATA_MODEL.md — SIGNAL_LOSS evidence). Anything else is unexpected.
+function formatPayloadNumber(value: unknown, unit: string, digits = 0): string {
+	return typeof value === 'number' ? `${value.toFixed(digits)}${unit}` : '—'
+}
+
+// Card header identifier: the flight callsign (e.g. "EZY92XM") reads far
+// better than the entity_id icao24 hex it's keyed on. Older alert rows
+// (persisted before callsign was added to the payload) and entities OpenSky
+// never reported one for both fall back to the hex — still unique, just less
+// readable.
+function flightLabel(alert: Alert): string {
+	const callsign = alert.payload['callsign']
+	return typeof callsign === 'string' && callsign !== '' ? callsign : alert.entityId
+}
+
 export default function AlertWidget() {
 	// Keyed by alert_id: idempotent hydration, and the same shape the live
 	// feed below merges into (duplicate alert_id must not create a second
 	// entry — see applyAlertUpdate).
 	const [alerts, setAlerts] = useState<Map<string, Alert>>(new Map())
+	// Which single card is expanded, if any. Re-clicking the open card (or
+	// clicking a different one) collapses it — see toggleExpanded below.
+	const [expandedId, setExpandedId] = useState<string | null>(null)
 	const unmountedRef = useRef(false)
 
 	// CP7h (initial mount) and CP7k (reconnect) both re-run this same fetch —
@@ -64,6 +106,10 @@ export default function AlertWidget() {
 
 	const list = Array.from(alerts.values())
 
+	const toggleExpanded = (alertId: string) => {
+		setExpandedId((prev) => (prev === alertId ? null : alertId))
+	}
+
 	return (
 		<div
 			style={{
@@ -94,13 +140,25 @@ export default function AlertWidget() {
 				{list.map((alert) => {
 					const color = priorityColor[alert.priority] ?? 'var(--color-text-muted)'
 					const darkSinceMs = signalLossDarkSinceMs(alert)
+					const isExpanded = alert.id === expandedId
 					return (
 						<div
 							key={alert.id}
+							role="button"
+							tabIndex={0}
+							aria-expanded={isExpanded}
+							onClick={() => toggleExpanded(alert.id)}
+							onKeyDown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault()
+									toggleExpanded(alert.id)
+								}
+							}}
 							style={{
 								padding: 'var(--space-2) var(--space-3)',
 								borderBottom: '1px solid var(--color-border-subtle)',
-								borderLeft: `3px solid ${color}`,
+								borderLeft: `${isExpanded ? 4 : 3}px solid ${color}`,
+								background: isExpanded ? 'var(--color-bg-elevated)' : 'transparent',
 								cursor: 'pointer',
 							}}
 						>
@@ -120,16 +178,27 @@ export default function AlertWidget() {
 										fontWeight: 600,
 									}}
 								>
-									{alert.entityId}
+									{flightLabel(alert)}
 								</span>
-								<span
-									style={{
-										fontSize: 'var(--font-size-xs)',
-										color,
-										fontFamily: 'var(--font-mono)',
-									}}
-								>
-									{alert.alertType.replace('_', ' ')}
+								<span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+									<span
+										style={{
+											fontSize: 'var(--font-size-xs)',
+											color,
+											fontFamily: 'var(--font-mono)',
+										}}
+									>
+										{alert.alertType.replace('_', ' ')}
+									</span>
+									<span
+										style={{
+											fontSize: 'var(--font-size-xs)',
+											color: 'var(--color-text-muted)',
+											fontFamily: 'var(--font-mono)',
+										}}
+									>
+										{isExpanded ? '▾' : '▸'}
+									</span>
 								</span>
 							</div>
 							<div
@@ -143,6 +212,28 @@ export default function AlertWidget() {
 									? `Dark since ${formatUtcTime(darkSinceMs)}`
 									: `Detected ${formatUtcTime(alert.detectedAtMs)}`}
 							</div>
+
+							{isExpanded && (
+								<div
+									style={{
+										marginTop: 'var(--space-2)',
+										paddingTop: 'var(--space-2)',
+										borderTop: '1px solid var(--color-border-subtle)',
+									}}
+								>
+									<DetailRow label="ALERT ID" value={alert.id} />
+									<DetailRow label="ENTITY ID (ICAO24)" value={alert.entityId} />
+									<DetailRow label="ENTITY TYPE" value={alert.entityType} />
+									<DetailRow label="PRIORITY" value={alert.priority} />
+									<DetailRow label="STATUS" value={alert.status} />
+									<DetailRow label="DETECTED" value={formatUtcTime(alert.detectedAtMs)} />
+									<DetailRow label="LAST KNOWN LAT" value={formatPayloadNumber(alert.payload['last_known_lat'], '°', 4)} />
+									<DetailRow label="LAST KNOWN LON" value={formatPayloadNumber(alert.payload['last_known_lon'], '°', 4)} />
+									<DetailRow label="ALTITUDE" value={formatPayloadNumber(alert.payload['last_known_altitude_m'], ' m')} />
+									<DetailRow label="SPEED" value={formatPayloadNumber(alert.payload['last_known_speed_mps'], ' m/s', 1)} />
+									<DetailRow label="COURSE" value={formatPayloadNumber(alert.payload['last_known_course_deg'], '°')} />
+								</div>
+							)}
 						</div>
 					)
 				})}

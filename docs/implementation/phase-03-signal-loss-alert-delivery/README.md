@@ -139,6 +139,7 @@ Kafka payload published by the Alert Evaluator:
 ```json
 {
   "dark_since_ms": 1787634000000,
+  "callsign": "EZY92XM",
   "last_known_lat": 51.5,
   "last_known_lon": -0.1,
   "last_known_altitude_m": 10150,
@@ -147,7 +148,7 @@ Kafka payload published by the Alert Evaluator:
 }
 ```
 
-All `last_known_*` fields are read from `entity:live:{entity_id}` at scan time. Null/empty string values from the Redis hash become `null` in the payload.
+`callsign` and all `last_known_*` fields are read from `entity:live:{entity_id}` at scan time. Null/empty string values from the Redis hash become `null` in the payload. `callsign` identifies the flight, not the entity — `entity_id` (icao24) is the aircraft's fixed transponder address and stays constant across flights.
 
 ---
 
