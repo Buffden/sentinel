@@ -16,6 +16,7 @@ Study for layout and visual patterns only. Do not copy source code.
 | [`frontend-testing.md`](frontend-testing.md) | CP7j — why Vitest, the tsconfig-alias gotcha, position staleness + alert dedup proven with tests |
 | [`reconnect-reconciliation.md`](reconnect-reconciliation.md) | CP7k — the onReconnect signal, the MapWidget ref-cycle fix, two strict lint rules hit, proven against a real killed-API disconnect |
 | [`demo-expiry-verification.md`](demo-expiry-verification.md) | CP7l — no code needed, verified with a short-lived crafted JWT instead of waiting 3 real minutes |
+| [`future-alert-resolution-and-map-status.md`](future-alert-resolution-and-map-status.md) | Deferred, not part of Phase 03 — alert auto-resolve on flight resume (belongs to Phase 08) and a dark-entity map visual status (dashboard follow-up) |
 | [`network-boundary-adapter.puml`](network-boundary-adapter.puml) | Wire JSON → adapter → domain model → React sequence |
 | [`ws-separation-flow.puml`](ws-separation-flow.puml) | WebSocket lifecycle: connect, subscribe, reconnect, demo expiry, cleanup |
 

@@ -7,6 +7,15 @@
 //
 // Requires: `make up` and the `alerts` topic provisioned (infra/kafka/topics.sh),
 // or the CI service containers + topic-create step.
+//
+// WARNING — do not run this suite against a dev stack with the `api` service's
+// alert-sink running. These tests publish real messages to the real `alerts`
+// topic on purpose (see above); the api's Kafka consumer has no way to tell a
+// test alert from a real one and will idempotently persist it to the real
+// TimescaleDB `alerts` table. If that happens, the rows show up as unreadable
+// `test-evaluator-<uuid>` entries in the dashboard alert panel — clean up with
+// `DELETE FROM alerts WHERE entity_id LIKE 'test-%'`. Stop `api` (or point
+// this suite at infra the api isn't consuming from) before running it.
 import { randomUUID } from 'node:crypto';
 import { Kafka } from 'kafkajs';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';

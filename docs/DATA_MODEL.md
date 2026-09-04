@@ -417,7 +417,7 @@ Published by Alert Evaluator; consumed by API.
 
 Payload evidence:
 
-- SIGNAL_LOSS: `dark_since_ms`, last known location;
+- SIGNAL_LOSS: `dark_since_ms`, `callsign`, last known location;
 - ROUTE_DEVIATION: route segment/deviation data and sustained count;
 - UNSCHEDULED_PROXIMITY: `pair_key`, counterparty, location, distance, `episode_start_ms`;
 - COMPOSITE: nested signal-loss + proximity evidence, correlation window, `supersedes_alert_ids`.
