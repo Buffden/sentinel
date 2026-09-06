@@ -157,8 +157,12 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		const map = new MLMap({
 			container,
 			style: MAP_STYLE_PRIMARY,
-			center: [20, 30],
-			zoom: 2,
+			// Temporary local-dev default: centered on California to match the
+			// ingestion poller's OPENSKY_* bbox (services/ingestion-poller/.env).
+			// No moveend/zoomend resubscribe exists yet, so this initial view is
+			// what the mount-time hydrate + WS subscribe bbox is locked to.
+			center: [-119.5, 37.2],
+			zoom: 5,
 			pitch: 0,
 			bearing: 0,
 			pixelRatio: window.devicePixelRatio,
