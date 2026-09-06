@@ -323,4 +323,4 @@ These exist as reserved slots in the shell. Implementations wait for their respe
 | CP7j | Dedupe + stale guards | duplicate / stale simulation passes | Done — [`frontend-testing.md`](frontend-testing.md) |
 | CP7k | Reconnect reconciliation | disconnect → reconnect → hydrated | Done — [`reconnect-reconciliation.md`](reconnect-reconciliation.md) |
 | CP7l | Demo expiry UX | WS close 4401 shows banner; redirect works | Done — [`demo-expiry-verification.md`](demo-expiry-verification.md) |
-| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel | Remaining |
+| CP7m | Full E2E demonstration | aircraft → dark → alert → alert panel | Done — observed live: entity dark for 5 min threshold produced a SIGNAL_LOSS alert that appeared in the alert panel without a page refresh |
