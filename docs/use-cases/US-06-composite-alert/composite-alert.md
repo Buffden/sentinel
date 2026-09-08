@@ -18,6 +18,7 @@ As an operator, I want a signal-loss episode and a related unscheduled-proximity
 - When a proximity candidate falls within `COMPOSITE_CORRELATION_WINDOW_MS` of an active or recent signal-loss episode involving either member of the pair, the Alert Evaluator emits a COMPOSITE alert.
 - The Alert Evaluator determines composite eligibility from the candidate plus Redis `alert-state` / `recent-loss`; it does not query Neo4j.
 - Each signal-loss episode can be upgraded into at most one COMPOSITE incident.
+- If both pair members have a qualifying signal-loss episode, exactly one is selected by deterministic temporal tie-break (see [Composite eligibility rule](../../DATA_MODEL.md#composite-eligibility-rule)); the non-selected member's episode remains independently eligible for a different incident, not swallowed.
 - If no qualifying signal-loss state exists, the same candidate produces UNSCHEDULED_PROXIMITY.
 - The API atomically persists the COMPOSITE and marks referenced active individual alerts (`NEW` or `ACKNOWLEDGED`) `SUPERSEDED`.
 - `RESOLVED` individual alerts are terminal and are not retroactively superseded.
@@ -47,7 +48,7 @@ API consumes COMPOSITE
   → commit atomically
 ```
 
-If Vessel B resumes before the proximity candidate arrives, the Position Consumer writes `recent-loss:B` before deleting `alert-state:B`. The Alert Evaluator can still correlate within the bounded TTL and consumes the recent-loss opportunity after successful composite emission.
+If Vessel B resumes before the proximity candidate arrives, the Position Consumer writes `recent-loss:B` before deleting `alert-state:B`. The Alert Evaluator can still correlate — eligibility is decided by the source-time gap to `dark_since_ms` (see [Composite eligibility rule](../../DATA_MODEL.md#composite-eligibility-rule) in `DATA_MODEL.md`), not by `recent-loss` merely existing — and marks `composite_issued=1` on `recent-loss:B` after successful composite emission. `recent-loss:B` itself is not deleted on consumption; its existing TTL retires it naturally, and a Kafka-redelivered candidate must not re-derive a different decision from a since-changed loss episode — see [Composite claim and decision protocol](../../DATA_MODEL.md#composite-claim-and-decision-protocol).
 
 ---
 

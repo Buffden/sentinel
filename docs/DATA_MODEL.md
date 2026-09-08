@@ -8,6 +8,7 @@ Canonical schemas for Sentinel's persistent stores, Redis state, and Kafka contr
 
 - Source telemetry time is carried as `timestamp_ms`.
 - Episode anchors, replay guards, correlation windows, and deterministic identities use source event time.
+- Composite correlation (see [Composite eligibility rule](#composite-eligibility-rule)) anchors to `dark_since_ms` for both an active-dark and a recently-resumed signal-loss episode. A Redis key's TTL is retention, never the eligibility boundary itself — retention bounds may outlive the true source-time eligibility window; the explicit `dark_since_ms` comparison is the sole authority for whether a candidate qualifies.
 - Operational audit timestamps such as database `created_at` / `updated_at` may use processing time.
 - Kafka processing is at-least-once. Durable writes must therefore be idempotent.
 - Historical backfill uses a separate consumer group/mode and suppresses ephemeral live side effects.
@@ -263,19 +264,125 @@ Fields:
 
 - `dark_since_ms`;
 - `signal_loss_alert_id`;
-- `composite_issued` (`0|1`).
+- `composite_issued` (`0|1`);
+- `composite_claim_candidate_id` — the claiming proximity candidate's identity (`{pair_key}:{episode_start_ms}`), or absent. See [Composite claim and decision protocol](#composite-claim-and-decision-protocol).
 
-Writer/reader: Alert Evaluator only. No TTL. Position Consumer deletes it when the entity resumes, after writing `recent-loss`.
+Writer/reader: Alert Evaluator only, for the `composite_*` fields — see the protocol section for why plain unconditional writes are no longer sufficient once these fields exist. No TTL. Position Consumer transitions this into `recent-loss` when the entity resumes (see below).
 
 ### `recent-loss:{entity_id}` — hash
 
-Fields: `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`.
+Fields: `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`, `composite_issued` (`0|1`), `composite_claim_candidate_id`.
 
-- Writer: Position Consumer on first accepted resume position.
+- Writer: Position Consumer on first accepted resume position (`dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`, carrying forward whatever `composite_issued`/`composite_claim_candidate_id` `alert-state` already held — see [Composite claim and decision protocol](#composite-claim-and-decision-protocol) for why this handoff cannot be a plain read-then-write once these fields are mutable); Alert Evaluator for `composite_*` field updates thereafter.
 - Reader/consumer: Alert Evaluator.
-- TTL: `COMPOSITE_CORRELATION_WINDOW_MS`.
+- TTL: `COMPOSITE_CORRELATION_WINDOW_MS`, counted from `resumed_at_ms`. This is a **retention bound**, not the eligibility window itself — see [Composite eligibility rule](#composite-eligibility-rule). `resumed_at_ms` is evidence for the COMPOSITE payload; it is not an input to the eligibility computation.
 
-A qualifying composite consumes/deletes the key.
+A qualifying composite sets `composite_issued=1` on whichever hash currently holds the episode. **The key is not deleted.** Existing TTL retention removes it naturally, same as an unconsumed episode — see [Composite claim and decision protocol](#composite-claim-and-decision-protocol) for why eager deletion on consumption is a correctness bug, not just untidy state.
+
+### Composite eligibility rule
+
+Given a `proximity.candidates` event, the Alert Evaluator checks both pair members independently for a qualifying signal-loss episode — active (`alert-state:{entity_id}`) or recently closed (`recent-loss:{entity_id}`). Both hashes carry `dark_since_ms`; eligibility is computed from that field alone, with **one formula for both representations**:
+
+```text
+gap_ms = candidate.episode_start_ms - loss.dark_since_ms
+
+qualifies iff:
+0 <= gap_ms <= COMPOSITE_CORRELATION_WINDOW_MS
+```
+
+`recent-loss`'s Redis TTL (`COMPOSITE_CORRELATION_WINDOW_MS` counted from `resumed_at_ms`) is retention, not this eligibility check. Because the Position Consumer only creates `recent-loss` on an accepted resume position, `resumed_at_ms >= dark_since_ms` always, so the key's expiry (`resumed_at_ms + COMPOSITE_CORRELATION_WINDOW_MS`) is always at or after the true eligibility deadline (`dark_since_ms + COMPOSITE_CORRELATION_WINDOW_MS`) — a genuinely eligible candidate can never find the key already expired. The reverse is not guaranteed: after a long dark interval, `recent-loss` can still exist past its true gap-based deadline. Key existence alone does not mean the candidate qualifies; the `dark_since_ms` comparison above is the sole authority.
+
+**Both entities qualifying.** A signal-loss episode on either pair member may independently qualify. One composite anchors to exactly one `dark_since_ms`, so when both members qualify, exactly one episode is selected by deterministic temporal tie-break:
+
+```text
+winner = the qualifying episode with the smallest gap_ms;
+         ties broken by the lexicographically smaller entity_id
+```
+
+Only the selected episode is consumed (`composite_issued` set to `1`; the underlying key is not deleted — see below). The non-selected member's signal-loss episode remains independently active/recent and may still qualify for a different composite — it is not swallowed by losing this tie-break.
+
+This section describes CP2's **read-only eligibility snapshot** only — deciding which episode, if any, currently looks eligible. It says nothing about how that snapshot is safely turned into a durable claim and a published alert without racing a concurrent claimant or losing the composite on crash. That is the [Composite claim and decision protocol](#composite-claim-and-decision-protocol) below.
+
+### Composite claim and decision protocol
+
+CP2's eligibility resolution (above) is a snapshot, not a lock: Redis state can change between resolving eligibility and acting on it. Turning a resolved winner into a durably claimed, published `COMPOSITE` — without losing it on crash, without a concurrent claimant stealing it, and without Kafka redelivery silently reclassifying the same candidate — requires three additional pieces of state, resolved as a design decision (Pre-CP3A) before any of them were implemented.
+
+**Canonical claim identity is the proximity episode, not the pair.** A `pair_key` alone is insufficient: the same pair can produce multiple distinct proximity episodes over time (`{pair_key}:{episode_start_ms}` is already the proximity episode's own identity, per [Neo4j's `PROXIMITY_EVENT`](#edge-proximity_event) and the Correlation Worker's episode state). If a loss-episode claim were keyed only by `pair_key`, a second, later, genuinely different proximity episode for the same pair would be indistinguishable from a Kafka redelivery of the first. Every claim in this protocol is therefore identified by:
+
+```text
+candidate_id = {pair_key}:{episode_start_ms}
+```
+
+**1. Loss-episode claim** — "which candidate, if any, won this signal-loss episode?" Lives on whichever of `alert-state`/`recent-loss` currently holds the episode, as `composite_claim_candidate_id` (a `candidate_id`, or absent) alongside the existing `composite_issued` flag:
+
+```text
+CLAIM (Lua, atomic):
+  revalidate dark_since_ms still matches the resolved snapshot
+  composite_issued == '0'
+  composite_claim_candidate_id is empty OR equals this candidate_id
+  -> atomically set composite_claim_candidate_id = candidate_id
+
+FINALIZE (Lua, atomic, only after Kafka publish confirmed):
+  composite_claim_candidate_id still equals this candidate_id
+  -> set composite_issued = '1'
+```
+
+A claim is fenced against a *different* candidate (a different pair racing for the same loss episode), but is resumable by the *same* candidate on redelivery — CLAIM is idempotent for its own `candidate_id`, not a one-shot gate. This is why CLAIM must run before publish (fencing) and FINALIZE only after publish is confirmed (crash-safety): a naive "claim then publish" design permanently loses the composite if the process crashes between the two, because the claim burns the episode's only chance with no retry path — unlike signal-loss (which the docs already accept losing one alert to on crash) and unlike proximity candidates (which get a "next ping" retry that a one-shot `proximity.candidates` delivery has no equivalent of).
+
+**2. `alert-state` → `recent-loss` handoff must become one atomic transfer, not read-then-write.** CP1's handoff (`recent-loss-handoff` concept) was safe when the hash held only static episode evidence. Once `composite_claim_candidate_id`/`composite_issued` are mutable, a `HGETALL` read followed by a separate `MULTI` write racing an Alert Evaluator CLAIM can silently erase a claim recorded between the read and the `EXEC`:
+
+| Step | Actor | Operation | Result |
+| --- | --- | --- | --- |
+| 1 | Position Consumer | `HGETALL alert-state` | reads `composite_claim_candidate_id` empty |
+| 2 | Alert Evaluator | `CLAIM` (Lua) | `alert-state.composite_claim_candidate_id = X` |
+| 3 | Position Consumer | `MULTI(HSET recent-loss from step 1, ..., DEL alert-state) EXEC` | `recent-loss` written from the stale step-1 snapshot — candidate `X`'s claim, written at step 2, never arrives |
+
+The handoff must become a single Lua script that reads current field values and writes them into `recent-loss` (including whatever `composite_*` fields are present at that instant) inside the same atomic step that deletes `alert-state`, so Redis's own command serialization — not application-level timing — determines whether a concurrent CLAIM lands before or after the handoff. **This is a real consequence of adding mutable coordination fields to these hashes, not a refactor** — CP1's original `MULTI`/`EXEC` (`HSET` + `PEXPIRE` + `DEL` from already-read values) was not sufficient once claim fields exist. **Implemented as of CP3A** — see [`atomic-signal-loss-handoff`](implementation/phase-06-composite-correlation/concepts/atomic-signal-loss-handoff/atomic-signal-loss-handoff.md) for the Lua script, its sequence diagram of this exact race, and real-Redis proof that a seeded claim survives the transfer unchanged.
+
+**3. Candidate decision record** — "what did we decide for this exact proximity candidate?", independent of loss-episode state. This closes a second, symmetric redelivery bug beyond the one loss-episode claiming alone fixes:
+
+```text
+COMPOSITE published, crash before the proximity.candidates offset commits
+  -> redelivery finds the loss episode already composite_issued=1 (or claimed by this candidate_id)
+  -> without a decision record, naive re-resolution says "not eligible"
+  -> wrongly publishes UNSCHEDULED_PROXIMITY alongside the already-published COMPOSITE
+
+UNSCHEDULED_PROXIMITY published because no loss episode existed yet,
+crash before the proximity.candidates offset commits
+  -> the signal-loss scan runs in between, opening alert-state for the same entity
+  -> redelivery now finds a qualifying episode
+  -> wrongly publishes COMPOSITE too
+```
+
+Both directions produce two different alert types/IDs for one proximity candidate — not a harmless idempotent duplicate, since `{pair_key}:UNSCHEDULED_PROXIMITY:{episode_start_ms}` and `{pair_key}:COMPOSITE:{dark_since_ms}` are deliberately different deterministic identities and the API has no way to know they refer to the same encounter.
+
+```text
+alert-decision:{pair_key}:{episode_start_ms} -- hash
+
+Fields:
+  decision              COMPOSITE | UNSCHEDULED_PROXIMITY
+  selected_entity_id    (COMPOSITE only)
+  dark_since_ms         (COMPOSITE only)
+  signal_loss_alert_id  (COMPOSITE only)
+  loss_source           ACTIVE | RECENT (COMPOSITE only)
+  resumed_at_ms         (COMPOSITE only, RECENT source)
+```
+
+Once a decision record exists for a `proximity.candidates` message, that message's processing **replays the recorded decision** rather than re-resolving CP2 against current (possibly changed) Redis state. Lifecycle: created before the Kafka publish it protects, deleted only after that message's own Kafka offset commits.
+
+```text
+create decision -> publish output -> finalize claim -> commit input offset -> delete decision
+```
+
+A crash before the offset commits leaves the decision record in place — replay-safe. A crash after the offset commits but before the delete leaves an orphaned decision record — a cleanup leak, not a correctness failure, since it is never consulted again once its owning message has been durably processed. **No TTL is set on this record.** `COMPOSITE_CORRELATION_WINDOW_MS` answers "how long can a *new* candidate correlate with this loss" — a fundamentally different lifetime than "how long must we remember a Kafka processing decision for redelivery," which must survive at least as long as the input offset can remain uncommitted. Tying the two together would silently reintroduce the decision-flip bug after any outage longer than the correlation window. A cleanup policy for orphaned records is deferred until this topic's actual `retention.ms` is an explicit, documented value — none is currently set.
+
+**Invariants established by this protocol:**
+
+1. One loss episode can be claimed by at most one canonical proximity candidate (`{pair_key}:{episode_start_ms}`), never a bare `pair_key`. Not yet implemented (CP3B).
+2. A candidate's alert-type decision is sticky across Kafka redelivery, in both directions (COMPOSITE cannot flip to UNSCHEDULED_PROXIMITY or vice versa on replay). Not yet implemented (CP3C, wired in CP5).
+3. The `alert-state` → `recent-loss` handoff preserves claim/finalize state atomically — a single Lua transfer, not a read-then-`MULTI`-write. **Implemented (CP3A).**
+4. `recent-loss`'s TTL governs eligibility retention, never Kafka replay memory; the decision record's lifecycle is independent and tied to input-offset commit, not to `COMPOSITE_CORRELATION_WINDOW_MS`. Not yet implemented (decision record is CP3C).
+5. The same candidate may resume its own pending claim; a different candidate may never steal it. Not yet implemented (CP3B).
 
 ### `deviation-state:{entity_id}` — hash
 

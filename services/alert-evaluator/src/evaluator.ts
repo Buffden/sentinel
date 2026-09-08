@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Kafka, Partitioners } from 'kafkajs';
+import { Kafka, Partitioners, type Consumer } from 'kafkajs';
 import { Redis } from 'ioredis';
 import { LeaderElection } from './leader.js';
 import { config } from './config.js';
@@ -16,12 +16,6 @@ const kafka = new Kafka({
 export const producer = kafka.producer({
 	createPartitioner: Partitioners.LegacyPartitioner,
 });
-
-// Kafka's own consumer-group partition assignment already guarantees each
-// proximity.candidates message is processed by exactly one instance at a
-// time -- unlike the signal-loss scan (driven by a timer, not a partition),
-// this consumer needs no additional Redis-lease leader election on top.
-export const proximityConsumer = kafka.consumer({ groupId: config.GROUP_ID });
 
 // ---- Redis setup -----------------------------------------------------------
 
@@ -243,50 +237,38 @@ export async function handleProximityCandidate(
 	);
 }
 
-// ---- Leader session --------------------------------------------------------
+// ---- Candidate consumer session --------------------------------------------
 
-// Each time this instance becomes leader it gets a fresh AbortController.
-// When the lease is lost (or revoked), the controller is aborted, which
-// unblocks the sleeping loop immediately and stops it before the next tick.
-// This prevents the previous-session loop from waking up and running
-// alongside a newly started session.
-async function runLeaderSession(): Promise<void> {
-	const ac = new AbortController();
-
-	leader.startRenewal(() => {
-		console.warn({ instanceId }, 'lease lost — aborting leader session');
-		ac.abort();
-	});
-
-	console.info({ instanceId }, 'acquired leader lease — starting scan loop');
-
-	while (!ac.signal.aborted) {
-		await runScan();
-		await sleep(config.SCAN_INTERVAL_MS, ac.signal);
-	}
-
-	// Stop the renewal timer now that the loop has exited cleanly.
-	leader.stopRenewal();
+// ADR-005: only the current lease holder joins/polls the Alert Evaluator's
+// candidate consumer group -- named around "candidate consumer" rather than
+// "proximity consumer" because ADR-005 scopes this lifecycle to every
+// candidate topic the evaluator consumes (deviation.candidates and
+// proximity.candidates). deviation.candidates consumption does not exist yet,
+// so this only subscribes to what is real today; it is not built opportunistically.
+//
+// groupId is a parameter rather than reading config.GROUP_ID directly so
+// tests can join a disposable group against the real broker without
+// touching the production alert-evaluator group.
+export interface CandidateConsumerSession {
+	consumer: Consumer;
+	// Idempotent: safe to call from the lease-loss callback, a normal session
+	// exit, and shutdown() without coordinating who calls it first -- every
+	// caller converges on the same in-flight disconnect() promise rather than
+	// racing a second disconnect.
+	stop: () => Promise<void>;
 }
 
-// ---- Main ------------------------------------------------------------------
+export async function startCandidateConsumerSession(
+	groupId: string,
+): Promise<CandidateConsumerSession> {
+	const consumer = kafka.consumer({ groupId });
 
-async function main(): Promise<void> {
-	console.info({ instanceId }, 'alert evaluator starting');
-
-	await producer.connect();
-	console.info({ instanceId }, 'kafka producer connected');
-
-	await proximityConsumer.connect();
-	await proximityConsumer.subscribe({
+	await consumer.connect();
+	await consumer.subscribe({
 		topic: config.PROXIMITY_CANDIDATES_TOPIC,
 		fromBeginning: config.FROM_BEGINNING,
 	});
-	// consumer.run() resolves once the fetch loop has started, not when
-	// message processing finishes -- messages continue arriving via
-	// eachMessage in the background, so this does not block the leader loop
-	// started below.
-	await proximityConsumer.run({
+	await consumer.run({
 		autoCommit: false,
 		eachMessage: async ({ topic, partition, message }) => {
 			const rawValue = message.value?.toString() ?? '';
@@ -302,13 +284,93 @@ async function main(): Promise<void> {
 				await handleProximityCandidate(candidate);
 			}
 
-			await proximityConsumer.commitOffsets([
+			await consumer.commitOffsets([
 				{ topic, partition, offset: (BigInt(offset) + 1n).toString() },
 			]);
 		},
 	});
-	console.info({ instanceId }, 'proximity candidates consumer running');
 
+	let stopPromise: Promise<void> | null = null;
+	const stop = (): Promise<void> => {
+		if (!stopPromise) {
+			stopPromise = consumer.disconnect();
+		}
+		return stopPromise;
+	};
+
+	return { consumer, stop };
+}
+
+// ---- Leader session --------------------------------------------------------
+
+// Set only while this instance holds the lease; null for a follower or
+// between terms. shutdown() reads these to tear down an in-progress
+// leadership term cleanly instead of leaving the process mid-session.
+let activeSession: CandidateConsumerSession | null = null;
+let activeSessionAbort: AbortController | null = null;
+
+// Each time this instance becomes leader it gets a fresh AbortController and
+// a fresh candidate consumer session -- both scoped to this leadership term,
+// never reused across acquisitions.
+//
+// activeSession/activeSessionAbort are module-level so shutdown() (a
+// separate top-level function, invoked from a signal handler that runs
+// concurrently with this loop) can reach the current term's session without
+// this function passing anything out. session.stop() is idempotent, so the
+// lease-loss callback below, this function's own teardown, and shutdown()
+// can all call it without coordinating who goes first.
+//
+// The lease-loss callback here does two things immediately, not on the scan
+// loop's next tick: it aborts the controller (unblocking the sleeping scan
+// loop) AND initiates session.stop() (leaving the Kafka group). ADR-005:
+// followers do not participate, and a former leader begins leaving the
+// candidate consumer group as soon as lease loss is detected -- not once
+// this loop happens to notice. Kafka's own group rebalance, not this
+// callback, is what fences any message already in flight when the lease
+// was lost; deterministic alert_id plus idempotent persistence downstream
+// remains the correctness backstop during that brief overlap.
+async function runLeaderSession(): Promise<void> {
+	const ac = new AbortController();
+	activeSessionAbort = ac;
+
+	const session = await startCandidateConsumerSession(config.GROUP_ID);
+	activeSession = session;
+	console.info({ instanceId }, 'joined candidate consumer group');
+
+	leader.startRenewal(() => {
+		console.warn({ instanceId }, 'lease lost — leaving candidate consumer group');
+		ac.abort();
+		void session.stop();
+	});
+
+	console.info({ instanceId }, 'acquired leader lease — starting scan loop');
+
+	try {
+		while (!ac.signal.aborted) {
+			await runScan();
+			await sleep(config.SCAN_INTERVAL_MS, ac.signal);
+		}
+	} finally {
+		leader.stopRenewal();
+		await session.stop();
+		console.info({ instanceId }, 'left candidate consumer group');
+		activeSession = null;
+		activeSessionAbort = null;
+	}
+}
+
+// ---- Main ------------------------------------------------------------------
+
+async function main(): Promise<void> {
+	console.info({ instanceId }, 'alert evaluator starting');
+
+	await producer.connect();
+	console.info({ instanceId }, 'kafka producer connected');
+
+	// ADR-005: the candidate consumer group is joined only inside
+	// runLeaderSession(), on lease acquisition -- not here. A follower must
+	// never become a member of the alert-evaluator Kafka consumer group.
+	//
 	// Single loop: try to acquire, run as leader, then fall back to polling.
 	while (true) {
 		const acquired = await leader.tryAcquire();
@@ -321,11 +383,18 @@ async function main(): Promise<void> {
 	}
 }
 
+// Mirrors lease loss: if this instance currently holds a leadership term,
+// abort its scan loop and leave the candidate consumer group before
+// releasing the lease -- rather than exiting mid-session and leaving Kafka
+// to detect the departure via session timeout.
 async function shutdown(): Promise<void> {
 	console.info({ instanceId }, 'shutting down');
+	activeSessionAbort?.abort();
+	if (activeSession) {
+		await activeSession.stop();
+	}
 	leader.stopRenewal();
 	await leader.release();
-	await proximityConsumer.disconnect();
 	await producer.disconnect();
 	await redis.quit();
 }

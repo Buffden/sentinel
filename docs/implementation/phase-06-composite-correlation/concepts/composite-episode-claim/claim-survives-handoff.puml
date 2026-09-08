@@ -1,0 +1,61 @@
+@startuml claim-survives-handoff
+title A Claim Survives CP3A's Handoff Mid-Flight
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Alert Evaluator" as AE #DBEAFE
+participant "Redis" as R #FEF9C3
+participant "Position Consumer" as PC #D1FAE5
+
+AE -> R : CLAIM (Lua)\nKEYS = [alert-state:X, recent-loss:X]\nexpected dark_since_ms, candidate_id
+
+note right of R
+  Script checks alert-state:X first, finds a
+  dark_since_ms match, composite_issued='0',
+  no existing claim -> SUCCESS.
+  composite_claim_candidate_id set on
+  alert-state:X, in the SAME script call.
+end note
+R --> AE : claimed = true
+
+PC -> R : entity resumes -- CP3A atomic handoff\n(unrelated trigger: whenever the entity resumes,\nnot in response to the claim above)
+
+note right of R
+  One Lua script transfers ALL current
+  alert-state:X fields -- including
+  composite_claim_candidate_id and
+  composite_issued -- into recent-loss:X,
+  then deletes alert-state:X. The claim set
+  above is carried forward unconditionally;
+  this script does not interpret it (see
+  atomic-signal-loss-handoff).
+end note
+
+AE -> R : FINALIZE (Lua)\nSAME KEYS = [alert-state:X, recent-loss:X]\nsame expected dark_since_ms, same candidate_id
+
+note right of R
+  One script call: alert-state:X no longer
+  has a dark_since_ms match (key is gone) --
+  the SAME call falls through and checks
+  recent-loss:X, finds the match, confirms
+  the claim, sets composite_issued='1'.
+  Not two round-trips -- one atomic script
+  inspecting both keys.
+end note
+R --> AE : finalized = true
+
+note over AE, PC
+  Neither CLAIM nor FINALIZE needed to know,
+  or be told, which representation held the
+  episode at the moment each ran.
+end note
+
+@enduml

@@ -1,0 +1,43 @@
+@startuml eligibility-resolution-sequence
+title resolveCompositeEligibility — Read-Only Resolution (CP2)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Alert Evaluator\n(composite.ts)" as CE #DBEAFE
+participant "Redis" as Redis #FEF9C3
+
+CE -> CE : resolveCompositeEligibility(\n  redis, entityAId, entityBId,\n  episodeStartMs, windowMs)
+
+par entity A
+  CE -> Redis : HGETALL alert-state:{entityAId}
+  Redis --> CE : fields (or empty)
+  CE -> Redis : HGETALL recent-loss:{entityAId}\n(only if alert-state absent)
+  Redis --> CE : fields (or empty)
+else entity B
+  CE -> Redis : HGETALL alert-state:{entityBId}
+  Redis --> CE : fields (or empty)
+  CE -> Redis : HGETALL recent-loss:{entityBId}\n(only if alert-state absent)
+  Redis --> CE : fields (or empty)
+end
+
+CE -> CE : selectWinningEpisode(a, b)\n-- pure, no Redis, no Kafka
+
+note right of CE
+  No HSET, no PEXPIRE, no DEL, no producer.send.
+  Returns QualifyingLossEpisode | null.
+  handleProximityCandidate is not wired to
+  this yet -- claiming and emitting are
+  separate, later checkpoints.
+end note
+
+CE -> CE : return winner or null
+
+@enduml
