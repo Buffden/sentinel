@@ -245,6 +245,47 @@ describe('handlePosition', () => {
 		await assertNoCandidate(pairKey);
 	});
 
+	it('redelivering the exact same position message does not create a second episode or a second publish', async () => {
+		// Simulates Kafka at-least-once redelivery: a crash between handling a
+		// message and committing its offset causes the identical message
+		// (same timestamp_ms, not a later one) to be processed again.
+		const incomingId = `test-worker-${randomUUID()}`;
+		const candidateId = `test-worker-${randomUUID()}`;
+		seededEntityIds.add(incomingId).add(candidateId);
+
+		const observedAtMs = Date.now();
+		await seedCandidateEntity(candidateId, BASE_LAT + 0.0003, BASE_LON, observedAtMs);
+
+		const position = {
+			entity_id: incomingId,
+			entity_type: 'aircraft',
+			timestamp_ms: observedAtMs,
+			lat: BASE_LAT,
+			lon: BASE_LON,
+		};
+
+		await handlePosition(redis, session, producer, position);
+
+		const pairKey =
+			incomingId <= candidateId ? `${incomingId}:${candidateId}` : `${candidateId}:${incomingId}`;
+		seededRedisKeys.add(`proximity-episode:${pairKey}`);
+		const first = await waitForCandidate(pairKey);
+		expect(first).toBeDefined();
+		receivedCandidates.length = 0;
+
+		// Redeliver: identical message, identical timestamp_ms.
+		await handlePosition(redis, session, producer, position);
+		await assertNoCandidate(pairKey);
+
+		const edgeCount = await session.executeRead((tx) =>
+			tx.run(
+				'MATCH (:Entity {id: $a})-[r:PROXIMITY_EVENT]-(:Entity {id: $b}) RETURN count(r) AS c',
+				{ a: incomingId, b: candidateId },
+			),
+		);
+		expect(edgeCount.records[0]!.get('c').toNumber()).toBe(1);
+	});
+
 	it('does nothing when no candidates are within range', async () => {
 		const incomingId = `test-worker-${randomUUID()}`;
 		seededEntityIds.add(incomingId);

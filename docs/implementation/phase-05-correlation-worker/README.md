@@ -32,7 +32,7 @@ position.normalized → Correlation Worker → H3 candidates → exact distance 
 | Candidate publication + `KNOWN_ASSOCIATE` filtering — `evaluateProximityEncounter`: evidence always recorded, publish decision gated on known-associate status and publish-confirmation state, retry via `candidate_published` | Done |
 | Service assembly — `handlePosition`/`worker.ts`: real Kafka consumer/producer wiring the full pipeline together; proven end-to-end against the real dev stack | Done |
 | Alert Evaluator integration — `handleProximityCandidate`: consume `proximity.candidates` (no leader election needed, Kafka partitioning already isolates instances), emit deterministic `UNSCHEDULED_PROXIMITY`. Composite correlation against signal-loss state deferred to a later phase | Done |
-| Exit verification — full path proven end-to-end; all required failure experiments below | Not started |
+| Exit verification — template ready at [`exit-verification.md`](exit-verification.md); every check has been proven at least once in a concept debrief, but the developer's own pass through the template is the actual gate | Template ready — awaiting developer verification |
 
 The Correlation Worker service scaffold (`services/correlation-worker/`) holds real, immediately-used code, not a speculative wrapper — the candidate-lookup function is this phase's actual first deliverable.
 
@@ -54,3 +54,4 @@ One candidate/alert exists per continuous unscheduled encounter, one graph edge 
 | Path | Description |
 | --- | --- |
 | [`concepts/`](concepts/README.md) | Concept notes and checkpoint debriefs, in reading order |
+| [`exit-verification.md`](exit-verification.md) | Final store inspection and exit criteria evaluation |
