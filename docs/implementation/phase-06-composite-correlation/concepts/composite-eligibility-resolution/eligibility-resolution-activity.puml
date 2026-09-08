@@ -1,0 +1,73 @@
+@startuml eligibility-resolution-activity
+title resolveEntityLossEpisode — Per-Entity Resolution (CP2)
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:HGETALL alert-state:{entity_id};
+
+if (dark_since_ms present?) then (yes)
+  if (composite_issued === '0'?) then (no)
+    :reject -- already upgraded\nto a composite;
+    stop
+  else (yes)
+  endif
+  if (dark_since_ms finite\nAND signal_loss_alert_id non-empty?) then (no)
+    :reject -- malformed episode\nmust not accidentally qualify;
+    stop
+  else (yes)
+  endif
+  if (0 <= gap_ms <= windowMs?) then (no)
+    :reject -- outside window;
+    stop
+  else (yes)
+  endif
+  :return { source: ACTIVE, dark_since_ms,\nsignal_loss_alert_id, resumed_at_ms: null, gap_ms };
+  stop
+else (no)
+endif
+
+:HGETALL recent-loss:{entity_id};
+
+note right
+  Reached only when alert-state is absent --
+  the two keys are mutually exclusive by
+  construction (clearSignalLossEpisode's
+  single MULTI in Position Consumer).
+end note
+
+if (dark_since_ms present?) then (no)
+  :return null;
+  stop
+else (yes)
+endif
+
+if (dark_since_ms finite\nAND signal_loss_alert_id non-empty\nAND resumed_at_ms finite?) then (no)
+  :reject -- malformed episode;
+  :return null;
+  stop
+else (yes)
+endif
+
+if (0 <= gap_ms <= windowMs?) then (no)
+  :reject -- key existence alone\nis never sufficient;
+  :return null;
+  stop
+else (yes)
+endif
+
+:return { source: RECENT, dark_since_ms,\nsignal_loss_alert_id, resumed_at_ms, gap_ms };
+
+stop
+
+@enduml

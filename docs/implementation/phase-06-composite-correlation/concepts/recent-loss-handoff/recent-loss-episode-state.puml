@@ -1,0 +1,43 @@
+@startuml recent-loss-episode-state
+title Signal-Loss Episode — Redis Key State (CP1)
+
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam stateArrowColor #333333
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+[*] --> NO_EPISODE
+
+NO_EPISODE --> ACTIVE : Alert Evaluator scan detects\nsilence >= SIGNAL_LOSS_THRESHOLD_MS\n(alert-state:{entity_id} written)
+
+ACTIVE --> RECENT : entity resumes\n(Position Consumer MULTI:\nHSET recent-loss + PEXPIRE + DEL alert-state)
+
+RECENT --> NO_EPISODE : COMPOSITE_CORRELATION_WINDOW_MS\nelapses — Redis TTL expiry\n(retention bound, not eligibility)
+
+RECENT --> NO_EPISODE : entity goes dark again before\nrecent-loss expires — a NEW ACTIVE\nepisode opens independently
+
+note right of ACTIVE
+  alert-state:{entity_id}
+  No TTL. Anchored by dark_since_ms.
+  composite_issued = '0' reserved for
+  Phase 06 composite correlation.
+end note
+
+note right of RECENT
+  recent-loss:{entity_id}
+  TTL = COMPOSITE_CORRELATION_WINDOW_MS,
+  counted from resumed_at_ms.
+  This is retention only — actual composite
+  eligibility is a separate source-time check
+  (see correlation-window-semantics).
+end note
+
+note bottom of NO_EPISODE
+  No Redis key exists for this entity's
+  signal-loss state. A future silence opens
+  a brand new ACTIVE episode with a new
+  dark_since_ms and a new deterministic alert_id.
+end note
+
+@enduml

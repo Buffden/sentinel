@@ -1,0 +1,70 @@
+@startuml decision-flip-redelivery
+title Why a Loss-Episode Claim Alone Isn't Enough — Both Redelivery Directions
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "proximity.candidates\n(Kafka)" as PC #FCE7F3
+participant "Alert Evaluator" as AE #DBEAFE
+participant "alert-state /\nrecent-loss (Redis)" as Redis #FEF9C3
+participant "alerts (Kafka)" as AT #D1FAE5
+
+== Direction 1 — a published COMPOSITE must not downgrade on replay ==
+
+PC -> AE : deliver candidate (attempt 1)
+AE -> Redis : CLAIM succeeds
+AE -> AT : publish COMPOSITE
+
+note over PC, AT
+  CRASH before this proximity.candidates
+  message's own offset commits.
+end note
+
+PC -> AE : redeliver the SAME candidate (attempt 2)
+AE -> Redis : loss episode already\ncomposite_issued=1 / claimed
+
+note right of AE
+  Without a decision record: naive logic
+  re-derives "not eligible" from the NOW-
+  claimed episode and gets it backwards.
+end note
+
+AE -> AT : (wrong) publish UNSCHEDULED_PROXIMITY
+note over AT
+  Two different alert types, two different
+  deterministic IDs, for ONE candidate --
+  not a harmless idempotent duplicate.
+end note
+
+== Direction 2 — an UNSCHEDULED_PROXIMITY must not upgrade on replay ==
+
+PC -> AE : deliver candidate (attempt 1)
+AE -> Redis : no qualifying loss episode found
+AE -> AT : publish UNSCHEDULED_PROXIMITY
+
+note over PC, AT
+  CRASH before this proximity.candidates
+  message's own offset commits.
+end note
+
+... the signal-loss scan runs independently,\nopening a fresh alert-state episode ...
+
+PC -> AE : redeliver the SAME candidate (attempt 2)
+AE -> Redis : loss episode now qualifies
+
+note right of AE
+  Without a decision record: naive logic
+  re-runs CP2 fresh against changed state
+  and gets a DIFFERENT answer than attempt 1.
+end note
+
+AE -> AT : (wrong) publish COMPOSITE
+
+@enduml

@@ -194,6 +194,19 @@ After a major component, the developer must be able to answer: why it exists, wh
 
 A checkpoint is not complete because Claude wrote the code or tests pass.
 
+### Implementation Documentation Requirement
+
+"Affected documentation is aligned" (above) is not optional polish and does not mean only updating source-of-truth contracts (ADRs, `DATA_MODEL.md`, `ARCHITECTURE.md`, use cases) when they change. Every completed non-trivial checkpoint — one that introduces a real mechanism, not a trivial familiar edit — must also, before the checkpoint is called done:
+
+- maintain an implementation concept document (`docs/implementation/phase-XX-*/concepts/<concept>/<concept>.md`) covering the mental model, ownership, and failure modes, following the existing Phase 03/05 pattern (plain language → technical depth → map to code → retention questions → completion checklist);
+- include a checkpoint debrief (`<concept>-debrief.md`) with real evidence — actual command output, actual inspected state — not a restatement of the concept doc;
+- add PlantUML source (`.puml`) only when a flow/sequence/state/class visualization materially improves understanding over prose and a code map; do not add a diagram, especially a class diagram, merely for completeness;
+- render every `.puml` to SVG and commit it under the mirrored path `diagrams/docs/implementation/phase-XX-*/concepts/...`, linked from the concept markdown;
+- link the new concept from that phase's `concepts/README.md` and, if the phase README tracks a checkpoint table, update that table;
+- describe only implemented and accepted behavior. Any checkpoint still under design discussion (a Pre-CPnX naming a resolved decision, or a later CPn not yet built) must be listed as Pending, not documented as if decided — this applies even when prior conversation sketched a design; nothing is accepted until it is actually implemented and committed.
+
+Phase 06 fell behind this standard for four checkpoints before being backfilled (see `docs/implementation/phase-06-composite-correlation/`) — a documentation-only checkpoint had to be inserted afterward to catch up. Do not let that repeat in any phase: treat the documentation above as part of each checkpoint itself, not a cleanup pass done later.
+
 ---
 
 ## Implementation Guardrails

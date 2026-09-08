@@ -1,0 +1,57 @@
+@startuml write-once-decision
+title writeCandidateDecisionIfAbsent — Write-Once Immutable Record
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:candidate calls with a requested decision\n(UNSCHEDULED_PROXIMITY, or COMPOSITE +\nfrozen loss identity);
+
+:Lua: EXISTS alert-decision:{candidate_id}?;
+
+if (key absent?) then (yes)
+  :HSET all fields\n(same script, same call as the EXISTS check);
+  :return CREATED;
+  note right
+    No separate GET-then-application-decides-
+    then-HSET -- a concurrent writer could race
+    that gap. One script, one atomic decision.
+  end note
+  :caller receives the decision it requested;
+  stop
+else (no)
+endif
+
+:read existing decision, selected_entity_id,\ndark_since_ms from the stored hash;
+
+if (decision, entity, and dark_since_ms\nALL match the request?) then (yes)
+  :return IDEMPOTENT\n(the existing record, unchanged);
+  note right
+    Safe for a Kafka-redelivered candidate to
+    call again with the same decision it made
+    the first time.
+  end note
+  :caller receives the existing decision;
+  stop
+else (no)
+  :return CONFLICT\n(the existing record, unchanged);
+  note right
+    A different decision was already recorded
+    for this candidate_id. The original is
+    NEVER overwritten -- this is an invariant
+    violation, not normal control flow.
+  end note
+  :caller catches\nCandidateDecisionConflictError;
+  stop
+endif
+
+@enduml
