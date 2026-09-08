@@ -1,0 +1,59 @@
+@startuml eligibility-tie-break-activity
+title Composite Eligibility Rule (Pre-CP2B) — Source-Time Window + Tie-Break
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:proximity.candidates arrives\n(entity_a_id, entity_b_id, episode_start_ms);
+
+:for each pair member, find a qualifying\nloss episode -- active (alert-state) or\nrecent (recent-loss) -- and compute\ngap_ms = episode_start_ms - dark_since_ms;
+
+note right
+  dark_since_ms is the ONLY eligibility
+  anchor for both representations.
+  resumed_at_ms (recent-loss only) is
+  evidence, never part of this formula.
+end note
+
+if (gap_ms < 0?) then (yes)
+  :reject -- candidate predates the loss;
+else (no)
+endif
+
+if (gap_ms > COMPOSITE_CORRELATION_WINDOW_MS?) then (yes)
+  :reject -- outside the window;
+  note right: window boundary is inclusive
+else (no)
+  :qualifies;
+endif
+
+if (both members qualify?) then (yes)
+  if (gap_ms equal?) then (yes)
+    :winner = lexicographically\nsmaller entity_id;
+    note right: matches pair_key's own min:max convention
+  else (no)
+    :winner = smaller gap_ms;
+  endif
+else (no)
+  if (exactly one qualifies?) then (yes)
+    :winner = the qualifying member;
+  else (no)
+    :no winner -- plain UNSCHEDULED_PROXIMITY;
+  endif
+endif
+
+:the non-selected member's episode\nremains independently active/recent --\nnot consumed by losing this tie-break;
+
+stop
+
+@enduml

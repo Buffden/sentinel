@@ -1,0 +1,68 @@
+@startuml leader-follower-failover-sequence
+title Alert Evaluator — Leader-Scoped Candidate Consumption (Pre-CP2A)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Instance A" as A #DBEAFE
+participant "Instance B" as B #D1FAE5
+participant "Redis\n(alert-evaluator:leader)" as Redis #FEF9C3
+participant "Kafka\nalert-evaluator group" as Kafka #FCE7F3
+
+== Startup — A acquires the lease first ==
+
+A -> Redis : SET alert-evaluator:leader A NX PX 15000
+Redis --> A : OK
+A -> Kafka : startCandidateConsumerSession()\nconnect + subscribe + run
+Kafka --> A : joined (sole member)
+note right of A
+  ADR-005: only the perceived lease
+  holder intentionally joins/polls the
+  candidate consumer group.
+end note
+
+B -> Redis : SET alert-evaluator:leader B NX PX 15000
+Redis --> B : null (key exists)
+note right of B
+  running as follower — waiting for
+  leader lease. B never calls
+  startCandidateConsumerSession().
+end note
+
+== Steady state ==
+
+Kafka -> A : proximity.candidates message
+A -> A : handleProximityCandidate(...)
+
+== A loses the lease (SIGTERM) ==
+
+A -> A : shutdown()\nabort scan loop
+A -> Kafka : session.stop() -> consumer.disconnect()
+Kafka --> A : left group
+A -> Redis : Lua release (ownership-checked DEL)
+Redis --> A : released
+
+== B takes over ==
+
+B -> Redis : SET alert-evaluator:leader B NX PX 15000
+Redis --> B : OK
+B -> Kafka : startCandidateConsumerSession()
+Kafka --> B : joined (sole member, new member-id)
+
+note over A, B
+  Not a claimed instant, zero-overlap guarantee.
+  A's in-flight eachMessage (if any) may finish
+  after B has already joined. The bounded overlap
+  is absorbed downstream by deterministic alert_id
+  + idempotent persistence, same backstop used
+  everywhere else in Sentinel — not eliminated here.
+end note
+
+@enduml

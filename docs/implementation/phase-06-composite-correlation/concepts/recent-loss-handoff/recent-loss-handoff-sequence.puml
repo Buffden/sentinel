@@ -1,0 +1,56 @@
+@startuml recent-loss-handoff-sequence
+title Position Consumer — Signal-Loss Episode Handoff (CP1)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Position Consumer\n(consumer.ts)" as PC #DBEAFE
+participant "Redis" as Redis #FEF9C3
+
+== Accepted resume position arrives ==
+
+PC -> Redis : HGETALL alert-state:{entity_id}
+Redis --> PC : dark_since_ms, signal_loss_alert_id, composite_issued
+
+note right of PC
+  If alert-state has no dark_since_ms,
+  the entity was never dark — no-op,
+  clearSignalLossEpisode returns immediately.
+end note
+
+== Entity was dark — close the episode ==
+
+group MULTI / EXEC — one atomic transaction
+  PC -> Redis : HSET recent-loss:{entity_id}\n  dark_since_ms, resumed_at_ms, signal_loss_alert_id
+  PC -> Redis : PEXPIRE recent-loss:{entity_id} COMPOSITE_CORRELATION_WINDOW_MS
+  PC -> Redis : DEL alert-state:{entity_id}
+end
+Redis --> PC : [1, 1, 1]  (all three applied)
+
+note right of Redis
+  No other client can observe an in-between
+  state: recent-loss is never visible without
+  its TTL already attached, and alert-state is
+  never "half deleted" mid-handoff.
+end note
+
+== Crash boundary ==
+
+note over PC, Redis
+  Crash before EXEC reaches Redis: none of the three
+  commands ran — alert-state is untouched, safe retry
+  on the next accepted position for this entity.
+
+  EXEC reaches Redis: all three ran — recent-loss has
+  its TTL and alert-state is already gone. No window
+  where EXEC succeeded but alert-state is still stale.
+end note
+
+@enduml

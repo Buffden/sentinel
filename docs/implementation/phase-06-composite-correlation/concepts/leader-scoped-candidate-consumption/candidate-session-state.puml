@@ -1,0 +1,42 @@
+@startuml candidate-session-state
+title Candidate Consumer Session Lifecycle (Pre-CP2A)
+
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam stateArrowColor #333333
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+[*] --> NO_SESSION : instance starts as follower
+
+NO_SESSION --> JOINING : leader.tryAcquire() succeeds\nrunLeaderSession() begins
+
+JOINING --> ACTIVE : startCandidateConsumerSession()\nconnect + subscribe + run resolve
+
+ACTIVE --> LEAVING : lease lost (renewal Lua returns 0)\nOR SIGTERM/shutdown()
+
+LEAVING --> NO_SESSION : session.stop() -> consumer.disconnect()\n(memoized -- safe from any caller)
+
+note right of ACTIVE
+  Scan loop runs concurrently.
+  activeSession / activeSessionAbort
+  are set at module scope so shutdown()
+  can reach this term's session.
+end note
+
+note right of LEAVING
+  stop() is idempotent: the lease-loss
+  callback, this session's own teardown,
+  and shutdown() may all call it without
+  coordinating who goes first -- every
+  caller converges on the same disconnect()
+  promise, never a second one.
+end note
+
+note bottom of NO_SESSION
+  A follower never enters JOINING.
+  Only a lease acquisition attempt
+  can start this lifecycle.
+end note
+
+@enduml
