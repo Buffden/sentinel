@@ -49,6 +49,8 @@ This consumer processes messages sequentially — kafkajs's `eachMessage` awaits
 
 ## Manual end-to-end proof (already run — see debrief)
 
+![Correlation Worker — Real End-to-End Run](../../../../../diagrams/docs/implementation/phase-05-correlation-worker/concepts/service-assembly/end-to-end-sequence.svg)
+
 The real service was started against the real dev stack, a real `position.normalized` message was produced via `rpk`, and a real `proximity.candidates` message was consumed back out — with matching evidence in Redis (`proximity-episode:*`) and Neo4j (`PROXIMITY_EVENT`). This is the one piece no unit or integration test alone proves: that the assembled service, run as a process against the real brokers, actually does the whole thing.
 
 ---

@@ -12,6 +12,8 @@ Writes one durable, replay-safe graph edge per proximity episode: `(Entity)-[:PR
 
 ### MERGE's pattern match is directional, the uniqueness constraint isn't
 
+![MERGE Directionality — Proven Directly Against Neo4j](../../../../../diagrams/docs/implementation/phase-05-correlation-worker/concepts/neo4j-proximity-event/merge-directionality.svg)
+
 Proved directly against Neo4j before writing any code: `MERGE (a)-[r:TYPE {key: K}]->(b)` looks for a relationship in that exact direction. If the same key already exists but as `(b)-[:TYPE {key: K}]->(a)`, MERGE doesn't find it — it tries to create a new one, and the database's uniqueness constraint on `key` rejects it as a hard error (`Relationship already exists...`), not a silent no-op. So node order has to be fixed by the application, every time, regardless of which entity's ping triggered the write — which is exactly what `canonicalPairKey`'s ordering already gives us.
 
 ### Why `KNOWN_ASSOCIATE` reads don't need the same discipline

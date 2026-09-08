@@ -1,0 +1,53 @@
+@startuml merge-directionality
+title MERGE Directionality — Proven Directly Against Neo4j Before Writing Code
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "cypher-shell" as C #DBEAFE
+participant "Neo4j" as N #FEF9C3
+
+== Same direction twice -- idempotent (the normal repeat-confirmation case) ==
+
+C -> N : MERGE (a:Entity{id:"A"})-[r:PROXIMITY_EVENT{key:K}]->(b:Entity{id:"B"})\nON CREATE SET r.min_distance_metres = 800
+N --> C : created, 1 edge
+
+C -> N : MERGE (a:Entity{id:"A"})-[r:PROXIMITY_EVENT{key:K}]->(b:Entity{id:"B"})\nON MATCH SET r.last_seen_ms = ..., r.min_distance_metres = CASE...
+N --> C : matched existing edge, still 1 edge
+
+== Reversed direction, same key -- hard error, not a silent duplicate ==
+
+C -> N : MERGE (b:Entity{id:"B"})-[r:PROXIMITY_EVENT{key:K}]->(a:Entity{id:"A"})
+N --> C : ERROR -- uniqueness constraint\nviolation on key K
+note right of N
+  MERGE's pattern match is directional.
+  It does not find the edge created in the
+  OPPOSITE direction with the same key --
+  it tries to CREATE a new one, and the
+  constraint on key rejects it outright.
+  Edge count stays at 1; nothing corrupts.
+end note
+
+== KNOWN_ASSOCIATE existence read -- undirected, no such hazard ==
+
+C -> N : MATCH (a:Entity{id:"A"})-[k:KNOWN_ASSOCIATE]-(b:Entity{id:"B"})\nRETURN k
+N --> C : found -- regardless of which\ndirection it was created in
+
+note over C, N
+  Direction only matters for MERGE's
+  create-or-match write. A plain existence
+  read has no such pattern-direction
+  constraint -- this is why canonicalPairKey's
+  ordering discipline is required before every
+  PROXIMITY_EVENT write, but not before a
+  KNOWN_ASSOCIATE read.
+end note
+
+@enduml

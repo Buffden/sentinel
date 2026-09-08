@@ -14,6 +14,8 @@ The Neo4j write needs an `episode_start_ms` for its idempotency key, but nothing
 
 Signal-loss detection needs an active scan because there's no natural "entity went silent" event. Proximity gap detection doesn't need one: as long as a pair keeps being found close together, each confirmation renews the key's TTL; the moment confirmations stop, Redis expires the key on its own, with no polling required. The TTL duration (`PROXIMITY_EPISODE_GAP_MS`) is the tolerance for a missed or delayed ping before the encounter is considered over.
 
+![touchProximityEpisode — One Atomic Check-and-Act](../../../../../diagrams/docs/implementation/phase-05-correlation-worker/concepts/proximity-episode-state/episode-touch-activity.svg)
+
 ### Why this needs a Lua script, not separate `EXISTS`/`HSET` calls
 
 Correlation Worker instances aren't behind a single-leader lease the way the Alert Evaluator is — nothing stops two instances (or two consumer partitions) from processing confirmations for the same pair at nearly the same moment. If "check whether an episode exists" and "create or refresh it" were two separate round trips, both instances could see "no episode" and both create one, defeating the entire purpose of episode identity. The Lua script makes check-and-act one atomic Redis operation.

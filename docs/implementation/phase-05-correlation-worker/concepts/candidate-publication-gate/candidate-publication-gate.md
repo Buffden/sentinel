@@ -10,6 +10,8 @@ Every piece so far (candidate lookup, distance filter, pair key, Neo4j evidence,
 
 ## Concepts
 
+![Candidate Publication Gate State Machine](../../../../../diagrams/docs/implementation/phase-05-correlation-worker/concepts/candidate-publication-gate/candidate-publication-state.svg)
+
 ### Evidence is unconditional; the alert path is filtered
 
 `touchProximityEpisode` and `mergeProximityEvent` run for every qualifying pair, known associate or not — a pair's proximity history is never lost just because it turns out to be an expected relationship. Only the decision to publish a candidate is filtered by `KNOWN_ASSOCIATE`. This matches the documented contract directly: known associates "retain graph/episode evidence" but never produce a candidate.
