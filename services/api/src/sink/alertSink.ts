@@ -9,6 +9,7 @@ const consumer = kafka.consumer({ groupId: config.API_GROUP_ID });
 export interface AlertMessage {
 	alert_id: string;
 	entity_id: string;
+	counterparty_entity_id?: string | null;
 	entity_type: string;
 	alert_type: string;
 	priority: string;
@@ -28,12 +29,13 @@ export interface AlertMessage {
 export async function persistAlert(alert: AlertMessage, raw: string): Promise<void> {
 	await pool.query(
 		`INSERT INTO alerts
-			 (alert_id, entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+			 (alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 		 ON CONFLICT (alert_id) DO NOTHING`,
 		[
 			alert.alert_id,
 			alert.entity_id,
+			alert.counterparty_entity_id ?? null,
 			alert.entity_type,
 			alert.alert_type,
 			alert.priority,
