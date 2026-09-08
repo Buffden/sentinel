@@ -1,18 +1,13 @@
-// Integration tests for H3 proximity candidate lookup
-// Run against a REAL Redis (docker-compose), not a mock: the guarantee under
-// test is that gridDisk(cell, k) plus ZRANGEBYSCORE against the exact
-// geo-cell:{cell_id} sorted sets the Position Consumer writes in production
-// actually returns (or correctly excludes) real H3 cell IDs and real Redis
-// scores -- a fake gridDisk/sorted-set would only prove the fake behaves as
-// coded, not that a real cell boundary or a real stale score is handled.
+// Runs against a REAL Redis, not a mock: the guarantee under test is that
+// gridDisk(cell, k) + ZRANGEBYSCORE against real geo-cell:{cell_id} sorted
+// sets correctly returns/excludes real cell IDs and scores -- a fake
+// wouldn't prove a real boundary or a real stale score is handled.
 //
-// Requires: `make up` (locally) or the CI Redis service container.
+// Requires: `make up`.
 //
-// All cell IDs and coordinates below come from a direct h3-js exploration
-// (gridDisk/gridRing/cellToBoundary) against h3-js 4.5.0 at resolution 7,
-// not from a formula assuming H3's average edge length is a worst-case bound.
-// See docs/implementation/phase-05-correlation-worker/concepts/h3-candidate-lookup/
-// for how these specific cells and coordinates were derived and verified.
+// Cell IDs/coordinates below come from direct h3-js exploration
+// (gridDisk/gridRing/cellToBoundary) at resolution 7, not a formula assuming
+// average edge length is a worst-case bound. See concepts/h3-candidate-lookup.
 import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';

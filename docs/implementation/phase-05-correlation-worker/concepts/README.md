@@ -1,6 +1,6 @@
 # Phase 05 Concepts
 
-Concept notes and debrief records for Phase 05 checkpoints, in the order you'd read them while working through the phase.
+Concept notes and debrief records, in the order you'd read them while working through this phase.
 
 | Folder | Observable result |
 | --- | --- |

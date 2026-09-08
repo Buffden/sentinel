@@ -20,21 +20,21 @@ position.normalized → Correlation Worker → H3 candidates → exact distance 
 8. Alert Evaluator converts an unscheduled candidate into `UNSCHEDULED_PROXIMITY`.
 9. Existing API path persists and delivers it.
 
-## Checkpoint progress
+## Progress
 
-| Checkpoint | Scope | Status |
-| --- | --- | --- |
-| CP1: H3 candidate lookup | `findProximityCandidates`: gridDisk(k) union of `geo-cell:*` sorted sets, freshness filter, self-exclusion, dedup. No distance calc, no service loop | Done |
-| CP2: Exact distance filtering | Haversine/great-circle distance over CP1's candidates against `PROXIMITY_THRESHOLD_METRES` | Not started |
-| CP3: Canonical pair ordering | `pair_key = min(a,b):max(a,b)` so A/B and B/A triggering resolve to one identity | Not started |
-| CP4: Neo4j proximity evidence | `MERGE` one `PROXIMITY_EVENT` edge per episode, idempotent under replay | Not started |
-| CP5: Proximity episode state | `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection | Not started |
-| CP6: Candidate publication | One `proximity.candidates` event per new encounter; `candidate_published` retry flag | Not started |
-| CP7: KNOWN_ASSOCIATE filtering | Graph evidence retained for known pairs; candidate never published for them | Not started |
-| CP8: Alert Evaluator integration | Consume `proximity.candidates`, emit `UNSCHEDULED_PROXIMITY` (or `COMPOSITE` per existing signal-loss correlation) | Not started |
-| CP9: Exit verification | Full path proven end-to-end; all required failure experiments below | Not started |
+| Scope | Status |
+| --- | --- |
+| H3 candidate lookup — `findProximityCandidates`: gridDisk(k) union of `geo-cell:*` sorted sets, freshness filter, self-exclusion, dedup. No distance calc, no service loop | Done |
+| Exact distance filtering — haversine/great-circle distance over the candidates above, against `PROXIMITY_THRESHOLD_METRES` | Not started |
+| Canonical pair ordering — `pair_key = min(a,b):max(a,b)` so A/B and B/A triggering resolve to one identity | Not started |
+| Neo4j proximity evidence — `MERGE` one `PROXIMITY_EVENT` edge per episode, idempotent under replay | Not started |
+| Proximity episode state — `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection | Not started |
+| Candidate publication — one `proximity.candidates` event per new encounter; `candidate_published` retry flag | Not started |
+| `KNOWN_ASSOCIATE` filtering — graph evidence retained for known pairs; candidate never published for them | Not started |
+| Alert Evaluator integration — consume `proximity.candidates`, emit `UNSCHEDULED_PROXIMITY` (or `COMPOSITE` per existing signal-loss correlation) | Not started |
+| Exit verification — full path proven end-to-end; all required failure experiments below | Not started |
 
-Correlation Worker service scaffold (`services/correlation-worker/`) was created in CP1 to hold real, immediately-used code — not a speculative wrapper — since the candidate-lookup function is Phase 05's actual first deliverable, not a placeholder for a hypothetical future consumer.
+The Correlation Worker service scaffold (`services/correlation-worker/`) holds real, immediately-used code, not a speculative wrapper — the candidate-lookup function is this phase's actual first deliverable.
 
 ## Required Failure Experiments
 
