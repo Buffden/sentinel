@@ -1,0 +1,93 @@
+@startuml composite-claim-protocol-flow
+title Composite Claim + Decision Protocol (Pre-CP3A) — Not Yet Implemented
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:proximity.candidates message arrives\n(candidate_id = {pair_key}:{episode_start_ms});
+
+if (alert-decision:{candidate_id} exists?) then (yes)
+  :replay the recorded decision --\ndo NOT re-resolve CP2 against\ncurrent Redis state;
+  note right
+    Closes both redelivery directions:
+    COMPOSITE -> UNSCHEDULED and
+    UNSCHEDULED -> COMPOSITE.
+  end note
+  :re-publish the same deterministic\nalert_id (safe -- idempotent downstream);
+  :commit input offset;
+  :delete alert-decision:{candidate_id};
+  stop
+else (no)
+endif
+
+:CP2 -- resolveCompositeEligibility\n(read-only snapshot);
+
+if (a winner resolved?) then (yes)
+  :CLAIM (Lua, atomic) on the winner's\nalert-state or recent-loss hash;
+  note right
+    revalidate dark_since_ms;
+    composite_issued == '0';
+    composite_claim_candidate_id empty
+      OR already == this candidate_id;
+    -> set composite_claim_candidate_id
+  end note
+  if (claim succeeded?) then (no)
+    :fall through -- do not compose;
+    :decision = UNSCHEDULED_PROXIMITY;
+  else (yes)
+    :decision = COMPOSITE\n(selected_entity_id, dark_since_ms,\nsignal_loss_alert_id, loss_source, resumed_at_ms?);
+  endif
+else (no)
+  :decision = UNSCHEDULED_PROXIMITY;
+endif
+
+:persist alert-decision:{candidate_id}\n-- BEFORE Kafka output;
+note right
+  Crash here: redelivery finds the decision
+  record and replays it -- CP2 is never
+  re-run for this candidate_id again.
+end note
+
+:construct the deterministic alert\n(COMPOSITE or UNSCHEDULED_PROXIMITY);
+
+:Kafka publish to alerts topic;
+note right
+  Crash here: redelivery replays the SAME
+  decision -> same deterministic alert_id
+  -> safe duplicate, absorbed downstream.
+end note
+
+if (decision == COMPOSITE?) then (yes)
+  :FINALIZE (Lua, atomic);
+  note right
+    composite_claim_candidate_id still ==
+    this candidate_id -> composite_issued = '1'.
+    Does NOT delete recent-loss/alert-state.
+  end note
+else (no)
+endif
+
+:commit proximity.candidates input offset;
+
+:delete alert-decision:{candidate_id};
+note right
+  Orphaned if the process crashes between
+  offset commit and this delete -- a cleanup
+  leak, not a correctness failure, since the
+  record is never consulted again once its
+  owning message is durably processed.
+end note
+
+stop
+
+@enduml

@@ -48,7 +48,7 @@ API consumes COMPOSITE
   → commit atomically
 ```
 
-If Vessel B resumes before the proximity candidate arrives, the Position Consumer writes `recent-loss:B` before deleting `alert-state:B`. The Alert Evaluator can still correlate — eligibility is decided by the source-time gap to `dark_since_ms` (see [Composite eligibility rule](../../DATA_MODEL.md#composite-eligibility-rule) in `DATA_MODEL.md`), not by `recent-loss` merely existing — and consumes the recent-loss opportunity after successful composite emission.
+If Vessel B resumes before the proximity candidate arrives, the Position Consumer writes `recent-loss:B` before deleting `alert-state:B`. The Alert Evaluator can still correlate — eligibility is decided by the source-time gap to `dark_since_ms` (see [Composite eligibility rule](../../DATA_MODEL.md#composite-eligibility-rule) in `DATA_MODEL.md`), not by `recent-loss` merely existing — and marks `composite_issued=1` on `recent-loss:B` after successful composite emission. `recent-loss:B` itself is not deleted on consumption; its existing TTL retires it naturally, and a Kafka-redelivered candidate must not re-derive a different decision from a since-changed loss episode — see [Composite claim and decision protocol](../../DATA_MODEL.md#composite-claim-and-decision-protocol).
 
 ---
 
