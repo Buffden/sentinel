@@ -11,5 +11,6 @@ Concept notes and debrief records for Phase 06 checkpoints, in the order you'd r
 | [composite-claim-protocol/](composite-claim-protocol/) | Design-only: the crash-safe claim/decision protocol traced by hand against every redelivery scenario, resolved and documented in `DATA_MODEL.md` before any code exists against it |
 | [atomic-signal-loss-handoff/](atomic-signal-loss-handoff/) | A claim seeded on `alert-state` survives the `recent-loss` handoff byte-for-byte, via a single Lua script replacing the CP1-era read-then-`MULTI`-write |
 | [composite-episode-claim/](composite-episode-claim/) | Two concurrent different-candidate claims against real Redis: exactly one wins; the winner's own retry still succeeds; the loser cannot finalize |
+| [candidate-decision-record/](candidate-decision-record/) | Two concurrent conflicting decisions for the same candidate against real Redis: exactly one becomes canonical, the loser throws, and replaying the winner stays idempotent |
 
-Checkpoints not yet in this list (CP3C onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.
+Checkpoints not yet in this list (CP4 onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.

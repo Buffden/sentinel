@@ -269,3 +269,226 @@ export async function finalizeCompositeEpisode(
 	)) as [number, string];
 	return result[0] === 1;
 }
+
+// ---- Candidate decision record (CP3C) ---------------------------------------
+//
+// alert-decision:{pair_key}:{episode_start_ms} answers exactly one question:
+// "for this exact proximity candidate, what alert-type decision was already
+// made?" It does not resolve eligibility (CP2), claim a loss episode (CP3B),
+// publish to Kafka, or finalize anything -- and it has no deletion logic
+// yet; that depends on the input-offset lifecycle CP5 wires up. See
+// DATA_MODEL.md's "Composite claim and decision protocol" for why this
+// exists as a mechanism separate from loss-episode claiming: the claim
+// alone only protects one direction of a redelivery decision flip, not both.
+//
+// For COMPOSITE, the record freezes the loss identity CP2/tie-break already
+// selected -- entity, source representation, dark_since_ms,
+// signal_loss_alert_id, resumed_at_ms -- so a later replay reconstructs the
+// same decision without re-running CP2 against Redis state that may have
+// changed since. It deliberately does not freeze a final Kafka alert
+// payload; constructing the deterministic COMPOSITE alert is CP4's job.
+
+export interface CompositeCandidateDecision {
+	decision: 'COMPOSITE';
+	candidate_id: string;
+	selected_entity_id: string;
+	loss_source: LossEpisodeSource;
+	dark_since_ms: number;
+	signal_loss_alert_id: string;
+	resumed_at_ms: number | null;
+}
+
+export interface UnscheduledCandidateDecision {
+	decision: 'UNSCHEDULED_PROXIMITY';
+	candidate_id: string;
+}
+
+export type CandidateDecision = CompositeCandidateDecision | UnscheduledCandidateDecision;
+
+// Thrown by writeCandidateDecisionIfAbsent when a decision already stored
+// for this candidate_id is logically different from the one being written.
+// This is an invariant violation, not a normal control-flow outcome: a
+// single candidate_id should only ever be decided once, by construction
+// (Kafka's own partitioning plus Pre-CP2A's leader-scoped consumption mean
+// no two processes should be deciding the same candidate concurrently under
+// normal operation). Surfacing it as a thrown error, rather than silently
+// keeping the old decision or overwriting it, is deliberate: fail closed
+// and make the corruption visible instead of guessing which side was right.
+export class CandidateDecisionConflictError extends Error {
+	constructor(
+		public readonly requested: CandidateDecision,
+		public readonly existing: CandidateDecision,
+	) {
+		super(
+			`candidate decision conflict for ${requested.candidate_id}: ` +
+				`requested ${requested.decision}, already recorded ${existing.decision}`,
+		);
+		this.name = 'CandidateDecisionConflictError';
+	}
+}
+
+function decisionKey(candidateId: string): string {
+	return `alert-decision:${candidateId}`;
+}
+
+// Flattens a CandidateDecision into the fixed seven-field ARGV shape both
+// Lua scripts below expect, so a non-COMPOSITE decision still has a
+// consistent field count to compare against (empty string for the fields
+// that don't apply).
+function decisionToArgs(
+	d: CandidateDecision,
+): [string, string, string, string, string, string, string] {
+	if (d.decision === 'UNSCHEDULED_PROXIMITY') {
+		return [d.decision, d.candidate_id, '', '', '', '', ''];
+	}
+	return [
+		d.decision,
+		d.candidate_id,
+		d.selected_entity_id,
+		String(d.dark_since_ms),
+		d.loss_source,
+		d.signal_loss_alert_id,
+		d.resumed_at_ms === null ? '' : String(d.resumed_at_ms),
+	];
+}
+
+// Inverse of decisionToArgs -- reconstructs a CandidateDecision from the
+// seven flat fields as stored in (or returned by) Redis. Throws if the
+// record is malformed: an unrecognized decision value, or a COMPOSITE
+// record missing required fields. This is the "fail closed rather than
+// silently re-deciding" guard -- a caller must never receive a decision
+// object that looks valid but was reconstructed from corrupted data.
+function argsToDecision(
+	fields: [string, string, string, string, string, string, string],
+): CandidateDecision {
+	const [
+		decision,
+		candidateId,
+		selectedEntityId,
+		darkSinceMsRaw,
+		lossSource,
+		signalLossAlertId,
+		resumedAtMsRaw,
+	] = fields;
+
+	if (decision === 'UNSCHEDULED_PROXIMITY') {
+		return { decision, candidate_id: candidateId };
+	}
+
+	if (decision === 'COMPOSITE') {
+		const darkSinceMs = Number(darkSinceMsRaw);
+		if (
+			!selectedEntityId ||
+			!Number.isFinite(darkSinceMs) ||
+			(lossSource !== 'ACTIVE' && lossSource !== 'RECENT') ||
+			!signalLossAlertId
+		) {
+			throw new Error(`malformed alert-decision record for candidate_id ${candidateId}`);
+		}
+		return {
+			decision,
+			candidate_id: candidateId,
+			selected_entity_id: selectedEntityId,
+			loss_source: lossSource,
+			dark_since_ms: darkSinceMs,
+			signal_loss_alert_id: signalLossAlertId,
+			resumed_at_ms: resumedAtMsRaw === '' ? null : Number(resumedAtMsRaw),
+		};
+	}
+
+	throw new Error(
+		`malformed alert-decision record for candidate_id ${candidateId}: unknown decision`,
+	);
+}
+
+// KEYS[1] = alert-decision:{candidate_id}
+// ARGV[1..7] = decision, candidate_id, selected_entity_id, dark_since_ms,
+//              loss_source, signal_loss_alert_id, resumed_at_ms
+//              (empty strings for the fields UNSCHEDULED_PROXIMITY has none of)
+//
+// Atomically checks absence and establishes the record in the same script --
+// not GET-then-application-decides-then-HSET, which a concurrent writer
+// could race. If the key already exists, compares decision + entity +
+// dark_since_ms (the fields that define "the same logical decision") against
+// what was requested: an exact match is idempotent success; anything else
+// is a conflict. Always returns the record now canonically stored, so the
+// caller never has to guess whether it got the value it asked for.
+const WRITE_CANDIDATE_DECISION_IF_ABSENT_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	redis.call('HSET', KEYS[1],
+		'decision', ARGV[1],
+		'candidate_id', ARGV[2],
+		'selected_entity_id', ARGV[3],
+		'dark_since_ms', ARGV[4],
+		'loss_source', ARGV[5],
+		'signal_loss_alert_id', ARGV[6],
+		'resumed_at_ms', ARGV[7])
+	return {1, ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[5], ARGV[6], ARGV[7]}
+end
+
+local existing_decision = redis.call('HGET', KEYS[1], 'decision') or ''
+local existing_candidate_id = redis.call('HGET', KEYS[1], 'candidate_id') or ''
+local existing_entity = redis.call('HGET', KEYS[1], 'selected_entity_id') or ''
+local existing_dark_since = redis.call('HGET', KEYS[1], 'dark_since_ms') or ''
+local existing_loss_source = redis.call('HGET', KEYS[1], 'loss_source') or ''
+local existing_alert_id = redis.call('HGET', KEYS[1], 'signal_loss_alert_id') or ''
+local existing_resumed_at = redis.call('HGET', KEYS[1], 'resumed_at_ms') or ''
+
+if existing_decision == ARGV[1] and existing_entity == ARGV[3] and existing_dark_since == ARGV[4] then
+	return {1, existing_decision, existing_candidate_id, existing_entity, existing_dark_since, existing_loss_source, existing_alert_id, existing_resumed_at}
+end
+
+return {0, existing_decision, existing_candidate_id, existing_entity, existing_dark_since, existing_loss_source, existing_alert_id, existing_resumed_at}
+`;
+
+// Returns the previously recorded decision for candidateId, or null if none
+// exists yet. Throws if a record exists but is malformed (see
+// argsToDecision) -- never returns an object reconstructed from corrupted
+// data, and never treats "malformed" the same as "no decision yet" (that
+// would let a caller silently re-decide via CP2 when the record's mere
+// corruption is not evidence the original decision should be discarded).
+export async function readCandidateDecision(
+	redis: Redis,
+	candidateId: string,
+): Promise<CandidateDecision | null> {
+	const fields = await redis.hgetall(decisionKey(candidateId));
+	if (!fields || Object.keys(fields).length === 0) return null;
+
+	return argsToDecision([
+		fields['decision'] ?? '',
+		fields['candidate_id'] ?? '',
+		fields['selected_entity_id'] ?? '',
+		fields['dark_since_ms'] ?? '',
+		fields['loss_source'] ?? '',
+		fields['signal_loss_alert_id'] ?? '',
+		fields['resumed_at_ms'] ?? '',
+	]);
+}
+
+// Establishes decision as the permanent, immutable record for its
+// candidate_id if none exists yet. If one already exists and is logically
+// identical, this is an idempotent success returning that existing record --
+// safe for a Kafka-redelivered candidate to call again. If one already
+// exists and differs, throws CandidateDecisionConflictError rather than
+// overwriting: a single candidate_id must only ever be decided once. Never
+// touches alert-state, recent-loss, or any TTL.
+export async function writeCandidateDecisionIfAbsent(
+	redis: Redis,
+	decision: CandidateDecision,
+): Promise<CandidateDecision> {
+	const args = decisionToArgs(decision);
+	const result = (await redis.eval(
+		WRITE_CANDIDATE_DECISION_IF_ABSENT_LUA,
+		1,
+		decisionKey(decision.candidate_id),
+		...args,
+	)) as [number, string, string, string, string, string, string, string];
+
+	const [success, ...storedArgs] = result;
+	const stored = argsToDecision(
+		storedArgs as [string, string, string, string, string, string, string],
+	);
+
+	if (success === 1) return stored;
+	throw new CandidateDecisionConflictError(decision, stored);
+}

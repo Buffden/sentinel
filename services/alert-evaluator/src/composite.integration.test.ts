@@ -9,13 +9,16 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { redis } from './evaluator.js';
 import {
+	CandidateDecisionConflictError,
 	claimCompositeEpisode,
 	finalizeCompositeEpisode,
+	readCandidateDecision,
 	resolveCompositeEligibility,
 	resolveEntityLossEpisode,
 	selectWinningEpisode,
+	writeCandidateDecisionIfAbsent,
 } from './composite.js';
-import type { QualifyingLossEpisode } from './composite.js';
+import type { CandidateDecision, QualifyingLossEpisode } from './composite.js';
 
 const WINDOW_MS = 60_000;
 
@@ -676,6 +679,155 @@ describe('composite.ts claim/finalize primitives (integration)', () => {
 			const ttlAfter = await redis.pttl(recentLossKey);
 			expect(ttlAfter).toBeGreaterThan(0);
 			expect(ttlAfter).toBeLessThanOrEqual(ttlBefore);
+		});
+	});
+});
+
+// CP3C: readCandidateDecision / writeCandidateDecisionIfAbsent. Real Redis,
+// not mocks -- the guarantee under test is write-once immutability under
+// real concurrent writers, which a fake store built from the same
+// assumptions as the implementation would not actually prove.
+//
+// No Kafka, no eligibility resolution, no loss-episode claiming anywhere in
+// this suite -- alert-decision only answers "what did we already decide for
+// this exact candidate."
+describe('composite.ts candidate decision record (integration)', () => {
+	const pairKey = `test-a-${randomUUID()}:test-b-${randomUUID()}`;
+	const episodeStartMs = 1_700_000_050_000;
+	const candidateId = `${pairKey}:${episodeStartMs}`;
+	const decisionKey = `alert-decision:${candidateId}`;
+
+	afterEach(async () => {
+		await redis.del(decisionKey);
+	});
+
+	function unscheduledDecision(): CandidateDecision {
+		return { decision: 'UNSCHEDULED_PROXIMITY', candidate_id: candidateId };
+	}
+
+	function compositeDecision(overrides: Partial<CandidateDecision> = {}): CandidateDecision {
+		return {
+			decision: 'COMPOSITE',
+			candidate_id: candidateId,
+			selected_entity_id: 'test-entity-a',
+			loss_source: 'ACTIVE',
+			dark_since_ms: 1_700_000_000_000,
+			signal_loss_alert_id: 'test-entity-a:SIGNAL_LOSS:1700000000000',
+			resumed_at_ms: null,
+			...overrides,
+		} as CandidateDecision;
+	}
+
+	describe('readCandidateDecision', () => {
+		it('returns null when no record exists', async () => {
+			expect(await readCandidateDecision(redis, candidateId)).toBeNull();
+		});
+
+		it('fails closed on a malformed stored record instead of returning null', async () => {
+			// Corrupt the hash directly -- an unrecognized decision value, not
+			// "no decision yet". Must not be silently treated the same way.
+			await redis.hset(decisionKey, 'decision', 'NOT_A_REAL_DECISION', 'candidate_id', candidateId);
+
+			await expect(readCandidateDecision(redis, candidateId)).rejects.toThrow();
+		});
+
+		it('fails closed on a COMPOSITE record missing required fields', async () => {
+			await redis.hset(decisionKey, 'decision', 'COMPOSITE', 'candidate_id', candidateId);
+			// selected_entity_id, dark_since_ms, loss_source, signal_loss_alert_id
+			// all absent.
+
+			await expect(readCandidateDecision(redis, candidateId)).rejects.toThrow();
+		});
+	});
+
+	describe('writeCandidateDecisionIfAbsent', () => {
+		it('stores a first UNSCHEDULED_PROXIMITY decision', async () => {
+			const stored = await writeCandidateDecisionIfAbsent(redis, unscheduledDecision());
+			expect(stored).toEqual(unscheduledDecision());
+			expect(await readCandidateDecision(redis, candidateId)).toEqual(unscheduledDecision());
+		});
+
+		it('is idempotent for the same UNSCHEDULED_PROXIMITY decision written twice', async () => {
+			await writeCandidateDecisionIfAbsent(redis, unscheduledDecision());
+			const second = await writeCandidateDecisionIfAbsent(redis, unscheduledDecision());
+			expect(second).toEqual(unscheduledDecision());
+		});
+
+		it('stores a first COMPOSITE decision with the frozen loss identity', async () => {
+			const decision = compositeDecision();
+			const stored = await writeCandidateDecisionIfAbsent(redis, decision);
+			expect(stored).toEqual(decision);
+			expect(await readCandidateDecision(redis, candidateId)).toEqual(decision);
+		});
+
+		it('is idempotent for the same COMPOSITE decision written twice', async () => {
+			const decision = compositeDecision();
+			await writeCandidateDecisionIfAbsent(redis, decision);
+			const second = await writeCandidateDecisionIfAbsent(redis, decision);
+			expect(second).toEqual(decision);
+		});
+
+		it('a COMPOSITE attempt after an existing UNSCHEDULED_PROXIMITY decision conflicts -- the original stands', async () => {
+			await writeCandidateDecisionIfAbsent(redis, unscheduledDecision());
+
+			await expect(
+				writeCandidateDecisionIfAbsent(redis, compositeDecision()),
+			).rejects.toBeInstanceOf(CandidateDecisionConflictError);
+
+			expect(await readCandidateDecision(redis, candidateId)).toEqual(unscheduledDecision());
+		});
+
+		it('an UNSCHEDULED_PROXIMITY attempt after an existing COMPOSITE decision conflicts -- the original stands', async () => {
+			const original = compositeDecision();
+			await writeCandidateDecisionIfAbsent(redis, original);
+
+			await expect(
+				writeCandidateDecisionIfAbsent(redis, unscheduledDecision()),
+			).rejects.toBeInstanceOf(CandidateDecisionConflictError);
+
+			expect(await readCandidateDecision(redis, candidateId)).toEqual(original);
+		});
+
+		it('two concurrent conflicting writes: exactly one decision becomes canonical', async () => {
+			const composite = compositeDecision();
+			const unscheduled = unscheduledDecision();
+
+			const results = await Promise.allSettled([
+				writeCandidateDecisionIfAbsent(redis, composite),
+				writeCandidateDecisionIfAbsent(redis, unscheduled),
+			]);
+
+			const fulfilled = results.filter((r) => r.status === 'fulfilled');
+			const rejected = results.filter((r) => r.status === 'rejected');
+			expect(fulfilled).toHaveLength(1);
+			expect(rejected).toHaveLength(1);
+			expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+				CandidateDecisionConflictError,
+			);
+
+			// Whichever one actually won is what's canonically stored -- the
+			// two must agree, not just "something is there".
+			const winner = (fulfilled[0] as PromiseFulfilledResult<CandidateDecision>).value;
+			expect(await readCandidateDecision(redis, candidateId)).toEqual(winner);
+		});
+
+		it('does not mutate alert-state or recent-loss', async () => {
+			const entityId = 'test-entity-a';
+			const alertStateKey = `alert-state:${entityId}`;
+			const recentLossKey = `recent-loss:${entityId}`;
+			await redis.del(alertStateKey, recentLossKey);
+
+			await writeCandidateDecisionIfAbsent(redis, compositeDecision());
+
+			expect(await redis.exists(alertStateKey)).toBe(0);
+			expect(await redis.exists(recentLossKey)).toBe(0);
+		});
+
+		it("sets no TTL on the decision record -- replay lifetime is not this checkpoint's concern", async () => {
+			await writeCandidateDecisionIfAbsent(redis, compositeDecision());
+
+			// -1 means "exists, no expiry" -- distinct from -2 ("does not exist").
+			expect(await redis.pttl(decisionKey)).toBe(-1);
 		});
 	});
 });
