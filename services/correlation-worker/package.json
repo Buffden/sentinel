@@ -1,0 +1,24 @@
+{
+	"name": "@sentinel/correlation-worker",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"worker": "tsx src/worker.ts",
+		"test": "vitest run",
+		"test:coverage": "vitest run --coverage"
+	},
+	"dependencies": {
+		"h3-js": "^4.5.0",
+		"ioredis": "^6.0.0",
+		"kafkajs": "^2.2.4",
+		"neo4j-driver": "^5.24.0"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"tsx": "^4.19.0",
+		"typescript": "^5.6.0",
+		"vitest": "^4.1.11",
+		"@vitest/coverage-v8": "^4.1.11"
+	}
+}

@@ -13,15 +13,15 @@ let server: Server;
 let baseUrl: string;
 
 async function insertAlert(
-	overrides: Partial<{ status: string; detectedAt: Date }> = {},
+	overrides: Partial<{ status: string; detectedAt: Date; counterpartyEntityId: string }> = {},
 ): Promise<string> {
 	const alertId = `test-alert-${randomUUID()}`;
 	const detectedAt = overrides.detectedAt ?? new Date();
 	await pool.query(
 		`INSERT INTO alerts
-			 (alert_id, entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
-		 VALUES ($1, 'test-entity', 'aircraft', 'SIGNAL_LOSS', 'STANDARD', $2, '{}', $3, $3)`,
-		[alertId, overrides.status ?? 'NEW', detectedAt],
+			 (alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
+		 VALUES ($1, 'test-entity', $2, 'aircraft', 'SIGNAL_LOSS', 'STANDARD', $3, '{}', $4, $4)`,
+		[alertId, overrides.counterpartyEntityId ?? null, overrides.status ?? 'NEW', detectedAt],
 	);
 	return alertId;
 }
@@ -66,6 +66,20 @@ describe('GET /alerts (integration)', () => {
 		expect(returnedIds).toContain(newId);
 		expect(returnedIds).toContain(ackId);
 		expect(returnedIds).not.toContain(resolvedId);
+	});
+
+	it('includes counterparty_entity_id for a proximity-style alert', async () => {
+		const id = await insertAlert({ counterpartyEntityId: 'test-counterparty' });
+		seededIds.push(id);
+
+		const res = await fetch(`${baseUrl}/alerts`);
+		const body = (await res.json()) as Array<{
+			alert_id: string;
+			counterparty_entity_id: string | null;
+		}>;
+		const found = body.find((a) => a.alert_id === id);
+
+		expect(found?.counterparty_entity_id).toBe('test-counterparty');
 	});
 
 	it('orders results by detected_at descending', async () => {

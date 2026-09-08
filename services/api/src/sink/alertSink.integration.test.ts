@@ -64,6 +64,44 @@ describe('persistAlert — idempotent by alert_id (integration)', () => {
 		}
 	});
 
+	it('persists counterparty_entity_id for a proximity-style alert', async () => {
+		const alert = buildAlert({
+			alert_type: 'UNSCHEDULED_PROXIMITY',
+			counterparty_entity_id: 'test-counterparty',
+			payload: { pair_key: 'test-entity:test-counterparty', distance_metres: 42.5 },
+		});
+
+		try {
+			await persistAlert(alert, JSON.stringify(alert));
+
+			const { rows } = await pool.query(
+				'SELECT entity_id, counterparty_entity_id FROM alerts WHERE alert_id = $1',
+				[alert.alert_id],
+			);
+			expect(rows).toHaveLength(1);
+			expect(rows[0].entity_id).toBe('test-entity');
+			expect(rows[0].counterparty_entity_id).toBe('test-counterparty');
+		} finally {
+			await pool.query('DELETE FROM alerts WHERE alert_id = $1', [alert.alert_id]);
+		}
+	});
+
+	it('leaves counterparty_entity_id null for an alert type with no counterparty', async () => {
+		const alert = buildAlert(); // SIGNAL_LOSS, no counterparty_entity_id set
+
+		try {
+			await persistAlert(alert, JSON.stringify(alert));
+
+			const { rows } = await pool.query(
+				'SELECT counterparty_entity_id FROM alerts WHERE alert_id = $1',
+				[alert.alert_id],
+			);
+			expect(rows[0].counterparty_entity_id).toBeNull();
+		} finally {
+			await pool.query('DELETE FROM alerts WHERE alert_id = $1', [alert.alert_id]);
+		}
+	});
+
 	it('a different alert_id is a distinct row', async () => {
 		const a = buildAlert();
 		const b = buildAlert();

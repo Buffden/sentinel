@@ -17,6 +17,12 @@ export const producer = kafka.producer({
 	createPartitioner: Partitioners.LegacyPartitioner,
 });
 
+// Kafka's own consumer-group partition assignment already guarantees each
+// proximity.candidates message is processed by exactly one instance at a
+// time -- unlike the signal-loss scan (driven by a timer, not a partition),
+// this consumer needs no additional Redis-lease leader election on top.
+export const proximityConsumer = kafka.consumer({ groupId: config.GROUP_ID });
+
 // ---- Redis setup -----------------------------------------------------------
 
 const instanceId = randomUUID();
@@ -150,6 +156,93 @@ export async function runScan(): Promise<void> {
 	console.info({ instanceId, scanned, alerted }, 'scan complete');
 }
 
+// ---- Proximity candidate handling -------------------------------------------
+
+export interface ProximityCandidateMessage {
+	pair_key: string;
+	entity_a_id: string;
+	entity_b_id: string;
+	episode_start_ms: number;
+	lat: number;
+	lon: number;
+	distance_at_detection: number;
+}
+
+function parseProximityCandidate(rawValue: string): ProximityCandidateMessage | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawValue);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== 'object' || parsed === null) return null;
+	const p = parsed as Record<string, unknown>;
+	if (
+		typeof p['pair_key'] !== 'string' ||
+		typeof p['entity_a_id'] !== 'string' ||
+		typeof p['entity_b_id'] !== 'string' ||
+		typeof p['episode_start_ms'] !== 'number' ||
+		typeof p['lat'] !== 'number' ||
+		typeof p['lon'] !== 'number' ||
+		typeof p['distance_at_detection'] !== 'number'
+	) {
+		return null;
+	}
+	return p as unknown as ProximityCandidateMessage;
+}
+
+// proximity.candidates already means "exact proximity confirmed, new
+// episode, no KNOWN_ASSOCIATE relationship" -- the Correlation Worker did
+// that work before publishing, so this does not repeat a Neo4j check.
+// Composite correlation (checking alert-state/recent-loss for a qualifying
+// signal-loss episode on either entity) is a later phase; every candidate
+// becomes UNSCHEDULED_PROXIMITY here.
+//
+// entity_a_id is always the alert's primary entity_id and entity_b_id the
+// counterparty -- both are already canonically ordered by the Correlation
+// Worker, so this assignment is deterministic across redelivery.
+export async function handleProximityCandidate(
+	candidate: ProximityCandidateMessage,
+): Promise<void> {
+	const alertId = `${candidate.pair_key}:UNSCHEDULED_PROXIMITY:${candidate.episode_start_ms}`;
+
+	// entity_type isn't on the candidate message -- entity:live:* is already
+	// read here for signal-loss, for the same reason: it's the one place
+	// last-known entity facts live. Default to '' (never null) to match the
+	// alerts table's NOT NULL entity_type column, same as the signal-loss path.
+	const entityType =
+		(await redis.hget(`entity:live:${candidate.entity_a_id}`, 'entity_type')) ?? '';
+
+	const alert = {
+		alert_id: alertId,
+		entity_id: candidate.entity_a_id,
+		counterparty_entity_id: candidate.entity_b_id,
+		entity_type: entityType,
+		alert_type: 'UNSCHEDULED_PROXIMITY',
+		priority: 'STANDARD',
+		status: 'NEW',
+		detected_at_ms: Date.now(),
+		payload: {
+			pair_key: candidate.pair_key,
+			counterparty_entity_id: candidate.entity_b_id,
+			lat: candidate.lat,
+			lon: candidate.lon,
+			distance_metres: candidate.distance_at_detection,
+			episode_start_ms: candidate.episode_start_ms,
+		},
+	};
+
+	await producer.send({
+		topic: config.ALERTS_TOPIC,
+		messages: [{ key: candidate.pair_key, value: JSON.stringify(alert) }],
+	});
+
+	console.info(
+		{ instanceId, alertId, pairKey: candidate.pair_key },
+		'unscheduled proximity alert emitted',
+	);
+}
+
 // ---- Leader session --------------------------------------------------------
 
 // Each time this instance becomes leader it gets a fresh AbortController.
@@ -184,6 +277,38 @@ async function main(): Promise<void> {
 	await producer.connect();
 	console.info({ instanceId }, 'kafka producer connected');
 
+	await proximityConsumer.connect();
+	await proximityConsumer.subscribe({
+		topic: config.PROXIMITY_CANDIDATES_TOPIC,
+		fromBeginning: config.FROM_BEGINNING,
+	});
+	// consumer.run() resolves once the fetch loop has started, not when
+	// message processing finishes -- messages continue arriving via
+	// eachMessage in the background, so this does not block the leader loop
+	// started below.
+	await proximityConsumer.run({
+		autoCommit: false,
+		eachMessage: async ({ topic, partition, message }) => {
+			const rawValue = message.value?.toString() ?? '';
+			const offset = message.offset;
+
+			const candidate = parseProximityCandidate(rawValue);
+			if (candidate === null) {
+				console.warn(
+					{ instanceId, topic, partition, offset },
+					'skipping unparseable proximity.candidates message',
+				);
+			} else {
+				await handleProximityCandidate(candidate);
+			}
+
+			await proximityConsumer.commitOffsets([
+				{ topic, partition, offset: (BigInt(offset) + 1n).toString() },
+			]);
+		},
+	});
+	console.info({ instanceId }, 'proximity candidates consumer running');
+
 	// Single loop: try to acquire, run as leader, then fall back to polling.
 	while (true) {
 		const acquired = await leader.tryAcquire();
@@ -200,6 +325,7 @@ async function shutdown(): Promise<void> {
 	console.info({ instanceId }, 'shutting down');
 	leader.stopRenewal();
 	await leader.release();
+	await proximityConsumer.disconnect();
 	await producer.disconnect();
 	await redis.quit();
 }
