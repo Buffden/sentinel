@@ -14,6 +14,10 @@ function requirePositiveInt(name: string, raw: string | undefined, def: number):
 export const config = {
 	REDIS_URL: process.env['REDIS_URL'] ?? 'redis://localhost:6379',
 
+	NEO4J_URI: process.env['NEO4J_URI'] ?? 'bolt://localhost:7687',
+	NEO4J_USER: process.env['NEO4J_USER'] ?? 'neo4j',
+	NEO4J_PASSWORD: process.env['NEO4J_PASSWORD'] ?? 'sentinel-dev',
+
 	// Must match Position Consumer's LIVE_H3_RESOLUTION -- geo-cell:{cell_id}
 	// keys are only meaningful candidates if both services use the same resolution.
 	LIVE_H3_RESOLUTION: requirePositiveInt(
