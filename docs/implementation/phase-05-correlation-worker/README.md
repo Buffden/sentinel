@@ -28,7 +28,7 @@ position.normalized → Correlation Worker → H3 candidates → exact distance 
 | Exact distance filtering — `filterByDistance`: real lat/lon from `entity:live:*`, great-circle distance, threshold cutoff, nearest-first ordering | Done |
 | Canonical pair ordering — `canonicalPairKey`: `min(a,b):max(a,b)` so A/B and B/A triggering resolve to one identity | Done |
 | Neo4j proximity evidence — `mergeProximityEvent`: idempotent, direction-safe `MERGE` of one `PROXIMITY_EVENT` edge per episode | Done |
-| Proximity episode state — `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection | Not started |
+| Proximity episode state — `touchProximityEpisode`: `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection, atomic via Lua | Done |
 | Candidate publication — one `proximity.candidates` event per new encounter; `candidate_published` retry flag | Not started |
 | `KNOWN_ASSOCIATE` filtering — graph evidence retained for known pairs; candidate never published for them | Not started |
 | Alert Evaluator integration — consume `proximity.candidates`, emit `UNSCHEDULED_PROXIMITY` (or `COMPOSITE` per existing signal-loss correlation) | Not started |

@@ -42,4 +42,14 @@ export const config = {
 		process.env['CANDIDATE_SEARCH_K'],
 		2,
 	),
+
+	// How long a pair can go without a confirming close ping before the
+	// encounter is considered over. Redis TTL expiry does the detection, not
+	// a scan. 60s tolerates a few missed/delayed pings without truncating a
+	// real encounter; tune once real ping cadence under load is known.
+	PROXIMITY_EPISODE_GAP_MS: requirePositiveInt(
+		'PROXIMITY_EPISODE_GAP_MS',
+		process.env['PROXIMITY_EPISODE_GAP_MS'],
+		60_000,
+	),
 } as const;
