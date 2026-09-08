@@ -30,6 +30,12 @@ These are often confused. They are different things:
 
 The separation matters: Google's token proves "this person is who they say they are." The Sentinel JWT proves "this person has an active session in our system."
 
+![JWT Lifecycle — Google ID Token vs Sentinel JWT](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/api-scaffold/jwt-lifecycle.svg)
+
+The first-login path — verifying the Google token and creating the Sentinel session — in detail:
+
+![User Upsert — POST /auth/google](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/api-scaffold/user-upsert.svg)
+
 ### 3. Why HttpOnly cookie, not localStorage
 
 `HttpOnly` cookies cannot be read by JavaScript. XSS attacks that inject scripts into your page cannot steal the token. `localStorage` is readable by any script on the page.
@@ -47,6 +53,10 @@ A valid JWT is not just parseable — it must:
 - Contain the expected claims (`user_id`, `email`)
 
 A tampered payload with a valid-looking structure but wrong signature must be rejected. A legitimate token that has expired must be rejected. Never skip expiry checks.
+
+This validation happens once, centrally, as Express middleware — every REST route and the WebSocket upgrade handler share the same check rather than each reimplementing it:
+
+![Express Middleware Chain](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/api-scaffold/middleware-chain.svg)
 
 ### 5. Alert sink — why Kafka → TimescaleDB
 
@@ -73,6 +83,8 @@ The browser posts the Google ID token to `POST /auth/google`. The API verifies i
 Every subsequent request sends that cookie automatically. The API verifies the JWT signature and expiry with its own secret, extracts `user_id`, and queries TimescaleDB.
 
 WebSocket upgrades follow the same path: the browser sends the cookie on the upgrade request, the API validates the JWT before completing the handshake, and rejects with 401 if the token is missing or invalid.
+
+![API Auth Flow: Google OAuth + Sentinel JWT + Demo Mode](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/api-scaffold/auth-flow.svg)
 
 ---
 

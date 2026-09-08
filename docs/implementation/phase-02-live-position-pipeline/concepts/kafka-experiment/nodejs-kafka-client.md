@@ -33,6 +33,10 @@ services/
     src/consume.ts
 ```
 
+The runtime component view — producer to broker to consumer, offset commit cycle — rather than the file layout above:
+
+![Node.js Producer → adsb.raw → Node.js Consumer Group](../../../../../diagrams/docs/implementation/phase-02-live-position-pipeline/concepts/kafka-experiment/data-flow.svg)
+
 ---
 
 ## TypeScript runtime

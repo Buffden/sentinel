@@ -36,6 +36,10 @@ Sentinel's topics map directly to data flow boundaries:
 
 Each topic is an independent stream. A consumer reading `position.normalized` has no effect on a consumer reading `alerts`.
 
+![Kafka Basics: Broker, Topic, Producer, Consumer](../../../../diagrams/docs/implementation/phase-01-infrastructure/concepts/kafka-basics.svg)
+
+Two consumer groups reading the same topic independently is exactly how Sentinel scales: `position.normalized` has multiple real consumers (Deviation Detector, Correlation Worker), each tracking its own committed offset, unaffected by how far along the others are.
+
 ## Why Sentinel uses an event broker
 
 Without a broker, services would call each other directly over HTTP. That creates tight coupling:

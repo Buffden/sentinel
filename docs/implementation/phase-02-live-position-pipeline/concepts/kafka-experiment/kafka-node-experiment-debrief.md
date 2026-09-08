@@ -13,6 +13,12 @@
 
 ---
 
+The full experiment, time-ordered — consumer startup, producer run, delivery, autoCommit, and the crash-replay experiment sections below all trace through this one interaction:
+
+![Kafka Experiment: Producer and Consumer — Observed Interaction](../../../../../diagrams/docs/implementation/phase-02-live-position-pipeline/concepts/kafka-experiment/kafka-experiment-sequence.svg)
+
+---
+
 ## 1. Consumer startup (first run)
 
 ```bash

@@ -20,6 +20,10 @@ The third offset is the one that actually survives a restart: the **committed co
 
 These three are independent. The record offset is set by the broker when a record is written. The current position is set by the consumer as it fetches. The committed offset is set by the consumer when it explicitly (or automatically) tells the broker "I've processed up to here."
 
+Two independent consumer groups reading the same partition sit at different committed offsets, proving the third kind of offset is per-group, not global:
+
+![Three Offset Concepts: Partition Log and Consumer Groups](../../../../../diagrams/docs/implementation/phase-02-live-position-pipeline/concepts/kafka-experiment/offset-model.svg)
+
 ---
 
 ## autoCommit: what it does and when it matters
