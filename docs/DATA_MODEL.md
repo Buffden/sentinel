@@ -8,6 +8,7 @@ Canonical schemas for Sentinel's persistent stores, Redis state, and Kafka contr
 
 - Source telemetry time is carried as `timestamp_ms`.
 - Episode anchors, replay guards, correlation windows, and deterministic identities use source event time.
+- Composite correlation (see [Composite eligibility rule](#composite-eligibility-rule)) anchors to `dark_since_ms` for both an active-dark and a recently-resumed signal-loss episode. A Redis key's TTL is retention, never the eligibility boundary itself — retention bounds may outlive the true source-time eligibility window; the explicit `dark_since_ms` comparison is the sole authority for whether a candidate qualifies.
 - Operational audit timestamps such as database `created_at` / `updated_at` may use processing time.
 - Kafka processing is at-least-once. Durable writes must therefore be idempotent.
 - Historical backfill uses a separate consumer group/mode and suppresses ephemeral live side effects.
@@ -273,9 +274,31 @@ Fields: `dark_since_ms`, `resumed_at_ms`, `signal_loss_alert_id`.
 
 - Writer: Position Consumer on first accepted resume position.
 - Reader/consumer: Alert Evaluator.
-- TTL: `COMPOSITE_CORRELATION_WINDOW_MS`.
+- TTL: `COMPOSITE_CORRELATION_WINDOW_MS`, counted from `resumed_at_ms`. This is a **retention bound**, not the eligibility window itself — see [Composite eligibility rule](#composite-eligibility-rule). `resumed_at_ms` is evidence for the COMPOSITE payload; it is not an input to the eligibility computation.
 
 A qualifying composite consumes/deletes the key.
+
+### Composite eligibility rule
+
+Given a `proximity.candidates` event, the Alert Evaluator checks both pair members independently for a qualifying signal-loss episode — active (`alert-state:{entity_id}`) or recently closed (`recent-loss:{entity_id}`). Both hashes carry `dark_since_ms`; eligibility is computed from that field alone, with **one formula for both representations**:
+
+```text
+gap_ms = candidate.episode_start_ms - loss.dark_since_ms
+
+qualifies iff:
+0 <= gap_ms <= COMPOSITE_CORRELATION_WINDOW_MS
+```
+
+`recent-loss`'s Redis TTL (`COMPOSITE_CORRELATION_WINDOW_MS` counted from `resumed_at_ms`) is retention, not this eligibility check. Because the Position Consumer only creates `recent-loss` on an accepted resume position, `resumed_at_ms >= dark_since_ms` always, so the key's expiry (`resumed_at_ms + COMPOSITE_CORRELATION_WINDOW_MS`) is always at or after the true eligibility deadline (`dark_since_ms + COMPOSITE_CORRELATION_WINDOW_MS`) — a genuinely eligible candidate can never find the key already expired. The reverse is not guaranteed: after a long dark interval, `recent-loss` can still exist past its true gap-based deadline. Key existence alone does not mean the candidate qualifies; the `dark_since_ms` comparison above is the sole authority.
+
+**Both entities qualifying.** A signal-loss episode on either pair member may independently qualify. One composite anchors to exactly one `dark_since_ms`, so when both members qualify, exactly one episode is selected by deterministic temporal tie-break:
+
+```text
+winner = the qualifying episode with the smallest gap_ms;
+         ties broken by the lexicographically smaller entity_id
+```
+
+Only the selected episode is consumed (`composite_issued=1`, or the `recent-loss` key deleted). The non-selected member's signal-loss episode remains independently active/recent and may still qualify for a different composite — it is not swallowed by losing this tie-break.
 
 ### `deviation-state:{entity_id}` — hash
 
