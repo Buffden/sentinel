@@ -25,7 +25,7 @@ position.normalized → Correlation Worker → H3 candidates → exact distance 
 | Scope | Status |
 | --- | --- |
 | H3 candidate lookup — `findProximityCandidates`: gridDisk(k) union of `geo-cell:*` sorted sets, freshness filter, self-exclusion, dedup. No distance calc, no service loop | Done |
-| Exact distance filtering — haversine/great-circle distance over the candidates above, against `PROXIMITY_THRESHOLD_METRES` | Not started |
+| Exact distance filtering — `filterByDistance`: real lat/lon from `entity:live:*`, great-circle distance, threshold cutoff, nearest-first ordering | Done |
 | Canonical pair ordering — `pair_key = min(a,b):max(a,b)` so A/B and B/A triggering resolve to one identity | Not started |
 | Neo4j proximity evidence — `MERGE` one `PROXIMITY_EVENT` edge per episode, idempotent under replay | Not started |
 | Proximity episode state — `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection | Not started |
