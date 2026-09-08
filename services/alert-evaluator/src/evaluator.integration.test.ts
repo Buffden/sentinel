@@ -20,7 +20,13 @@ import { randomUUID } from 'node:crypto';
 import { Kafka } from 'kafkajs';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { config } from './config.js';
-import { handleProximityCandidate, producer, redis, runScan } from './evaluator.js';
+import {
+	handleProximityCandidate,
+	producer,
+	redis,
+	runScan,
+	startCandidateConsumerSession,
+} from './evaluator.js';
 import type { ProximityCandidateMessage } from './evaluator.js';
 
 interface AlertMessage {
@@ -297,4 +303,83 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 			await redis.del(`entity:live:${candidate.entity_a_id}`);
 		}
 	});
+});
+
+// ADR-005: only the current lease holder joins/polls the Alert Evaluator's
+// candidate consumer group. This tests the real Kafka group protocol (real
+// Redpanda, real JoinGroup/LeaveGroup with the broker's group coordinator) --
+// a mocked consumer cannot prove real membership changes.
+//
+// Every test here uses its own disposable groupId, generated per test, NEVER
+// config.GROUP_ID: joining the real alert-evaluator group here would trigger
+// a real rebalance against any dev evaluator instance that happens to be
+// running against this same broker.
+describe('startCandidateConsumerSession — ADR-005 candidate consumer group lifecycle (integration)', () => {
+	const testKafka = new Kafka({
+		clientId: 'evaluator-session-test',
+		brokers: config.KAFKA_BROKERS,
+		logLevel: 0,
+	});
+	const admin = testKafka.admin();
+
+	beforeAll(async () => {
+		await admin.connect();
+	});
+
+	afterAll(async () => {
+		await admin.disconnect();
+	});
+
+	// Kafka group join/leave and coordinator state changes are asynchronous --
+	// describeGroups() called immediately after connect()/disconnect() can
+	// still reflect the pre-change state. Poll with a bounded timeout instead
+	// of asserting once.
+	async function waitForMemberCount(
+		groupId: string,
+		expected: number,
+		timeoutMs = 10_000,
+	): Promise<number> {
+		const deadline = Date.now() + timeoutMs;
+		let lastCount = -1;
+		while (Date.now() < deadline) {
+			const { groups } = await admin.describeGroups([groupId]);
+			lastCount = groups[0]?.members.length ?? 0;
+			if (lastCount === expected) return lastCount;
+			await new Promise((r) => setTimeout(r, 200));
+		}
+		return lastCount;
+	}
+
+	it('joining a session makes this instance the sole real Kafka group member', async () => {
+		const groupId = `test-alert-evaluator-session-${randomUUID()}`;
+		const session = await startCandidateConsumerSession(groupId);
+		try {
+			expect(await waitForMemberCount(groupId, 1)).toBe(1);
+		} finally {
+			await session.stop();
+		}
+	}, 20_000);
+
+	it('stopping the session actually leaves the real Kafka group', async () => {
+		const groupId = `test-alert-evaluator-session-${randomUUID()}`;
+		const session = await startCandidateConsumerSession(groupId);
+		expect(await waitForMemberCount(groupId, 1)).toBe(1);
+
+		await session.stop();
+
+		expect(await waitForMemberCount(groupId, 0)).toBe(0);
+	}, 20_000);
+
+	it('stop() is idempotent under concurrent callers', async () => {
+		const groupId = `test-alert-evaluator-session-${randomUUID()}`;
+		const session = await startCandidateConsumerSession(groupId);
+		await waitForMemberCount(groupId, 1);
+
+		// Mirrors the real shape: the lease-loss callback calls stop() and
+		// runLeaderSession's own teardown calls it too -- both must converge
+		// on one disconnect rather than racing a second one.
+		await Promise.all([session.stop(), session.stop()]);
+
+		expect(await waitForMemberCount(groupId, 0)).toBe(0);
+	}, 20_000);
 });
