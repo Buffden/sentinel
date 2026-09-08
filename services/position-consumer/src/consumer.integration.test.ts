@@ -316,8 +316,9 @@ describe('consumer.ts idempotency and monotonicity (integration)', () => {
 		});
 
 		it('no-ops when there is no open signal-loss episode', async () => {
-			await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+			const applied = await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
 
+			expect(applied).toBe(false);
 			expect(await redis.exists(recentLossKey)).toBe(0);
 		});
 
@@ -332,21 +333,59 @@ describe('consumer.ts idempotency and monotonicity (integration)', () => {
 				'0',
 			);
 
-			await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+			const applied = await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+			expect(applied).toBe(true);
 
 			const recentLoss = await redis.hgetall(recentLossKey);
 			expect(recentLoss).toEqual({
 				dark_since_ms: '1699999940000',
 				resumed_at_ms: '1700000000000',
 				signal_loss_alert_id: `${entityId}:SIGNAL_LOSS:1699999940000`,
+				composite_issued: '0',
+				composite_claim_candidate_id: '',
 			});
 
-			// Proves the TTL was attached in the same MULTI that made the key
+			// Proves the TTL was attached in the same Lua call that made the key
 			// visible — not a separate, potentially-skipped follow-up call.
 			const ttlMs = await redis.pttl(recentLossKey);
 			expect(ttlMs).toBeGreaterThan(0);
 			expect(ttlMs).toBeLessThanOrEqual(60_000);
 
+			expect(await redis.exists(alertStateKey)).toBe(0);
+		});
+
+		// CP3A: the specific regression this Lua rewrite exists to prevent. A
+		// claim recorded by the Alert Evaluator on alert-state (composite_issued
+		// and composite_claim_candidate_id) must move to recent-loss byte-for-byte
+		// -- a read-then-write handoff could lose a claim landing in the gap
+		// between the read and the write; this proves the atomic version doesn't.
+		it('a claim already present on alert-state survives the transition unchanged', async () => {
+			const claimCandidateId = 'test-pair-a:test-pair-b:1700000045000';
+			await redis.hset(
+				alertStateKey,
+				'dark_since_ms',
+				'1699999940000',
+				'signal_loss_alert_id',
+				`${entityId}:SIGNAL_LOSS:1699999940000`,
+				'composite_issued',
+				'0',
+				'composite_claim_candidate_id',
+				claimCandidateId,
+			);
+
+			const applied = await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+			expect(applied).toBe(true);
+
+			const recentLoss = await redis.hgetall(recentLossKey);
+			expect(recentLoss['composite_claim_candidate_id']).toBe(claimCandidateId);
+			expect(recentLoss['composite_issued']).toBe('0');
+			expect(recentLoss).toEqual({
+				dark_since_ms: '1699999940000',
+				resumed_at_ms: '1700000000000',
+				signal_loss_alert_id: `${entityId}:SIGNAL_LOSS:1699999940000`,
+				composite_issued: '0',
+				composite_claim_candidate_id: claimCandidateId,
+			});
 			expect(await redis.exists(alertStateKey)).toBe(0);
 		});
 
@@ -359,7 +398,8 @@ describe('consumer.ts idempotency and monotonicity (integration)', () => {
 				`${entityId}:SIGNAL_LOSS:1700000000000`,
 			);
 
-			await clearSignalLossEpisode(entityId, 1_700_000_005_000, 50); // 50ms window
+			const applied = await clearSignalLossEpisode(entityId, 1_700_000_005_000, 50); // 50ms window
+			expect(applied).toBe(true);
 			expect(await redis.exists(recentLossKey)).toBe(1);
 
 			await new Promise((resolve) => setTimeout(resolve, 150));

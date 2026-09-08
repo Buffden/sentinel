@@ -1,0 +1,50 @@
+@startuml read-then-write-race
+title Why CP1's Read-Then-MULTI-Write Handoff Loses a Claim
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Position Consumer" as PC #DBEAFE
+participant "Redis\nalert-state:{entity_id}" as Redis #FEF9C3
+participant "Alert Evaluator" as AE #D1FAE5
+
+PC -> Redis : HGETALL alert-state
+Redis --> PC : composite_claim_candidate_id = ""
+
+note right of PC
+  Snapshot taken. This value is now
+  stale the instant it's read -- nothing
+  stops another client from writing
+  alert-state before the MULTI below runs.
+end note
+
+AE -> Redis : CLAIM (Lua, atomic)\ncandidate_id = "Y"
+Redis --> AE : claimed\ncomposite_claim_candidate_id = "Y"
+
+note right of Redis
+  alert-state now genuinely holds
+  candidate Y's claim.
+end note
+
+group MULTI / EXEC -- built from the STALE snapshot above
+  PC -> Redis : HSET recent-loss\ncomposite_claim_candidate_id = ""  (* stale *)
+  PC -> Redis : DEL alert-state
+end
+Redis --> PC : done
+
+note over Redis
+  recent-loss now exists with
+  composite_claim_candidate_id = ""
+  Candidate Y's claim, written AFTER
+  the HGETALL but BEFORE the MULTI,
+  is gone -- lost, not merely delayed.
+end note
+
+@enduml

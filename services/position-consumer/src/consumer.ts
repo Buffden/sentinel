@@ -372,6 +372,57 @@ export async function updateGeoCell(
 
 // ---- Signal-loss episode clearing ------------------------------------------
 
+// Lua script: atomic alert-state -> recent-loss transfer (CP3A).
+//
+// CP1's version of this handoff (HGETALL, then a separate MULTI writing
+// from that snapshot) was safe when the hash held only static episode
+// evidence. Phase 06's composite claim protocol (DATA_MODEL.md, "Composite
+// claim and decision protocol") adds mutable coordination fields --
+// composite_issued and composite_claim_candidate_id -- that the Alert
+// Evaluator can write at any time. A read-then-write handoff can silently
+// erase a claim that lands in the gap between the HGETALL and the EXEC:
+//
+//   Position Consumer HGETALL alert-state       -- sees claim empty
+//                                    Alert Evaluator CLAIM (Lua) succeeds
+//   Position Consumer MULTI(HSET recent-loss    -- from the OLD snapshot,
+//     from stale snapshot, DEL alert-state)         claim lost
+//
+// This script closes that gap by reading current field values and writing
+// them into recent-loss inside the same atomic step that deletes
+// alert-state, so Redis's own command serialization -- not apart-in-time
+// application code -- decides whether a concurrent claim lands before or
+// after the handoff. There is no other client-visible ordering.
+//
+// Returns 0 if there was no open episode (no dark_since_ms) -- a no-op.
+// Returns 1 if the transfer happened, followed by the transferred
+// dark_since_ms, signal_loss_alert_id, composite_issued, and
+// composite_claim_candidate_id (whatever they were, unconditionally
+// carried forward -- this script does not interpret or gate on them,
+// it only guarantees they move atomically).
+//
+// KEYS[1] = alert-state:{entity_id}
+// KEYS[2] = recent-loss:{entity_id}
+// ARGV[1] = resumed_at_ms (source event time of the resume, as string)
+// ARGV[2] = TTL in milliseconds (COMPOSITE_CORRELATION_WINDOW_MS)
+const SIGNAL_LOSS_HANDOFF_LUA = `
+local dark_since_ms = redis.call('HGET', KEYS[1], 'dark_since_ms')
+if not dark_since_ms then
+	return {0}
+end
+local signal_loss_alert_id = redis.call('HGET', KEYS[1], 'signal_loss_alert_id') or ''
+local composite_issued = redis.call('HGET', KEYS[1], 'composite_issued') or '0'
+local composite_claim_candidate_id = redis.call('HGET', KEYS[1], 'composite_claim_candidate_id') or ''
+redis.call('HSET', KEYS[2],
+	'dark_since_ms', dark_since_ms,
+	'resumed_at_ms', ARGV[1],
+	'signal_loss_alert_id', signal_loss_alert_id,
+	'composite_issued', composite_issued,
+	'composite_claim_candidate_id', composite_claim_candidate_id)
+redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2]))
+redis.call('DEL', KEYS[1])
+return {1, dark_since_ms, signal_loss_alert_id, composite_issued, composite_claim_candidate_id}
+`;
+
 // An accepted position means the entity has resumed transmitting. If the
 // Alert Evaluator had opened a signal-loss episode (alert-state:{entity_id}
 // exists), that episode must close: recent-loss:{entity_id} preserves the
@@ -379,56 +430,41 @@ export async function updateGeoCell(
 // windowMs so a proximity candidate arriving long after resume cannot still
 // correlate against a stale loss.
 //
-// HSET, PEXPIRE, and the alert-state DEL all run inside one MULTI/EXEC.
-// Redis applies queued commands sequentially with no other client able to
-// observe or act on an in-between state, so the logical order is still
-// "write recent-loss → attach TTL → remove active state" — but the whole
-// transition is now indivisible from any observer's point of view.
-// No conditional logic is involved here (unlike the Lua scripts elsewhere
-// in this file), so MULTI is the right primitive, not eval.
-//
-// This makes the crash boundary exactly two states instead of three:
-//   crash before EXEC reaches Redis  → none of the three commands ran;
-//                                       alert-state is untouched; safe retry
-//   EXEC reaches Redis               → all three ran; recent-loss has its
-//                                       TTL and alert-state is already gone
-// There is no window where EXEC succeeded but alert-state is still stale —
-// unlike a separate follow-up DEL, which could be skipped by a crash between
-// the two round-trips.
-//
 // windowMs defaults to the configured composite-correlation window; tests
 // pass a short value to prove real expiry without a long wait.
+//
+// Returns true if an open episode was transferred, false if there was
+// nothing to clear (safe no-op).
 export async function clearSignalLossEpisode(
 	entityId: string,
 	resumedAtMs: number,
 	windowMs: number = config.COMPOSITE_CORRELATION_WINDOW_MS,
-): Promise<void> {
+): Promise<boolean> {
 	const alertStateKey = `alert-state:${entityId}`;
-	const alertState = await redis.hgetall(alertStateKey);
-	if (!alertState || !alertState['dark_since_ms']) return;
-
 	const recentLossKey = `recent-loss:${entityId}`;
-	await redis
-		.multi()
-		.hset(
-			recentLossKey,
-			'dark_since_ms',
-			alertState['dark_since_ms'],
-			'resumed_at_ms',
-			String(resumedAtMs),
-			'signal_loss_alert_id',
-			alertState['signal_loss_alert_id'] ?? '',
-		)
-		.pexpire(recentLossKey, windowMs)
-		.del(alertStateKey)
-		.exec();
+
+	const result = (await redis.eval(
+		SIGNAL_LOSS_HANDOFF_LUA,
+		2,
+		alertStateKey,
+		recentLossKey,
+		String(resumedAtMs),
+		String(windowMs),
+	)) as [number, string?, string?, string?, string?];
+
+	const [applied, darkSinceMs, signalLossAlertId, compositeIssued, compositeClaimCandidateId] =
+		result;
+	if (applied !== 1) return false;
 
 	log('info', 'signal loss episode cleared', {
 		entity_id: entityId,
-		dark_since_ms: alertState['dark_since_ms'],
+		dark_since_ms: darkSinceMs,
 		resumed_at_ms: resumedAtMs,
-		signal_loss_alert_id: alertState['signal_loss_alert_id'],
+		signal_loss_alert_id: signalLossAlertId,
+		composite_issued: compositeIssued,
+		composite_claim_candidate_id: compositeClaimCandidateId,
 	});
+	return true;
 }
 
 // ---- Downstream publishing -------------------------------------------------
