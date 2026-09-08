@@ -39,10 +39,15 @@ A `MULTI` still requires the values to be read *before* queuing the write comman
 
 ## Diagrams
 
-Two diagrams, each earning its place for a different reason:
+Two diagrams, each earning its place for a different reason.
 
-- **The race this checkpoint fixes** (above, `read-then-write-race.svg`) — a genuinely new diagram, because it's the one thing CP1's diagram cannot show: two *concurrent* actors (Position Consumer and Alert Evaluator) both touching `alert-state`. CP1's diagram has only one actor and was never wrong to have only one — this checkpoint exists precisely because a second actor was introduced by a different checkpoint's design (Pre-CP3A).
-- **The happy-path handoff shape** (write `recent-loss` fields, attach TTL, remove `alert-state`; binary crash boundary) — unchanged by CP3A, still accurately shown by `recent-loss-handoff-sequence.svg` (CP1's concept). Not redrawn here; see [`recent-loss-handoff`](../recent-loss-handoff/recent-loss-handoff.md) for that diagram. What changed is *which Redis primitive* provides the atomicity (Lua instead of `MULTI`) and *which fields* move (five now, not three) — a code-map and prose change, not a new shape worth a second diagram.
+**The race this checkpoint fixes** (above, `read-then-write-race.svg`) — a genuinely new diagram, because it's the one thing CP1's diagram cannot show: two *concurrent* actors (Position Consumer and Alert Evaluator) both touching `alert-state`. CP1's diagram has only one actor and was never wrong to have only one — this checkpoint exists precisely because a second actor was introduced by a different checkpoint's design (Pre-CP3A).
+
+**The happy-path handoff shape** — unchanged by CP3A, still accurately shown by CP1's own diagram (`recent-loss-handoff` concept):
+
+![Recent-Loss Handoff Sequence](../../../../../diagrams/docs/implementation/phase-06-composite-correlation/concepts/recent-loss-handoff/recent-loss-handoff-sequence.svg)
+
+The three logical steps (write `recent-loss` fields, attach TTL, remove `alert-state`) and the binary crash boundary are exactly what CP3A still does — only the caption is now imprecise in one respect: read it as "one atomic Lua script" wherever it says `MULTI`/`EXEC`, and "five fields" wherever it enumerates three. See [`recent-loss-handoff`](../recent-loss-handoff/recent-loss-handoff.md) for the full original write-up. What changed is *which Redis primitive* provides the atomicity and *which fields* move — a mechanism and field-count change, not a new shape worth a second diagram of the same three steps.
 
 ---
 

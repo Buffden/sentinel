@@ -22,26 +22,19 @@ If claiming were a plain "flip `composite_issued` to `1`" before publishing, a c
 
 ### Why adding claim fields breaks CP1's existing handoff
 
-This was the least obvious finding. CP1's `alert-state` → `recent-loss` handoff was `HGETALL` (read current fields) then a separate `MULTI` (write those fields into `recent-loss`, delete `alert-state`). That was safe when the hash held only static evidence — nothing external could change it between the read and the write in a way that mattered. Once `composite_claim_candidate_id` is a live, mutable coordination field, that gap becomes a real race: an Alert Evaluator CLAIM landing between the Position Consumer's `HGETALL` and its `MULTI`/`EXEC` gets silently overwritten by the handoff's stale snapshot. Once *any* code adds mutable coordination fields to a hash another process also reads-then-writes non-atomically, that other process's read-then-write becomes wrong — not by coincidence, but by construction. The fix is a single Lua script that reads and transfers the current field values inside the same atomic step that deletes the source key, so Redis's own serialization (not apart-in-time application code) decides whether a concurrent CLAIM lands before or after the handoff. **Not yet implemented** — CP1's existing `MULTI` is currently still the read-then-write shape and will need this revision as part of implementing CP3.
+This was the least obvious finding. CP1's `alert-state` → `recent-loss` handoff was `HGETALL` (read current fields) then a separate `MULTI` (write those fields into `recent-loss`, delete `alert-state`). That was safe when the hash held only static evidence — nothing external could change it between the read and the write in a way that mattered. Once `composite_claim_candidate_id` is a live, mutable coordination field, that gap becomes a real race: an Alert Evaluator CLAIM landing between the Position Consumer's `HGETALL` and its `MULTI`/`EXEC` gets silently overwritten by the handoff's stale snapshot.
+
+![Read-Then-Write Race](../../../../../diagrams/docs/implementation/phase-06-composite-correlation/concepts/atomic-signal-loss-handoff/read-then-write-race.svg)
+
+Once *any* code adds mutable coordination fields to a hash another process also reads-then-writes non-atomically, that other process's read-then-write becomes wrong — not by coincidence, but by construction. The fix is a single Lua script that reads and transfers the current field values inside the same atomic step that deletes the source key, so Redis's own serialization (not apart-in-time application code) decides whether a concurrent CLAIM lands before or after the handoff. **Implemented as of CP3A** — see [`atomic-signal-loss-handoff`](../atomic-signal-loss-handoff/atomic-signal-loss-handoff.md).
 
 ### Why a candidate needs its own decision record, separate from the loss-episode claim
 
-The loss-episode claim alone only protects one direction of a redelivery bug. Tracing both directions by hand:
+The loss-episode claim alone only protects one direction of a redelivery bug. Tracing both directions:
 
-```text
-Direction 1 (the one the loss-episode claim alone fixes):
-  COMPOSITE published -> crash before offset commit
-  -> redelivery finds the episode already claimed/issued
-  -> without a decision record, naive logic says "not eligible"
-  -> wrongly emits a SECOND alert: UNSCHEDULED_PROXIMITY
+![Decision-Flip on Redelivery — Both Directions](../../../../../diagrams/docs/implementation/phase-06-composite-correlation/concepts/composite-claim-protocol/decision-flip-redelivery.svg)
 
-Direction 2 (the loss-episode claim does NOT fix this one):
-  No loss episode exists yet -> UNSCHEDULED_PROXIMITY published
-  -> crash before offset commit
-  -> the signal-loss scan runs in between, opening a fresh episode
-  -> redelivery now finds a qualifying episode
-  -> wrongly emits a SECOND alert: COMPOSITE
-```
+Direction 1 is the one the loss-episode claim alone fixes: a `COMPOSITE` already published, redelivered, must not downgrade to `UNSCHEDULED_PROXIMITY`. Direction 2 is the one it does **not** fix: an `UNSCHEDULED_PROXIMITY` already published, redelivered after the signal-loss scan happens to open a qualifying episode in between, must not upgrade to `COMPOSITE`.
 
 Both produce two different alert types with two different deterministic IDs for one proximity candidate — not a harmless idempotent duplicate the API can absorb, since `UNSCHEDULED_PROXIMITY` and `COMPOSITE` IDs are deliberately distinct and nothing links them. The fix has to operate at the level of "what did we decide for *this* candidate," independent of whatever the loss episode's state happens to be *now*. That's `alert-decision:{candidate_id}` — checked first, before CP2 ever runs, on every delivery of a given candidate.
 

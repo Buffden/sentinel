@@ -41,35 +41,25 @@ episode #2's candidate_id = "A:B:5000"
 | t2 | Position Consumer | `MULTI(HSET recent-loss:X from the t0 snapshot, DEL alert-state:X) EXEC` | `recent-loss:X.composite_claim_candidate_id` written as `""` — the **stale** t0 value |
 | after | — | — | candidate `Y`'s claim, written at t1, is gone — unrecoverable |
 
-This confirms the review finding directly: a read-then-write handoff loses a claim that lands in the gap between t0 and t2. The resolved design (a single Lua script performing the read-and-transfer atomically) closes this by construction — there is no t0/t2 gap for a t1 to land in, because Redis serializes the whole transfer as one operation relative to the CLAIM script. See [`atomic-signal-loss-handoff`](../atomic-signal-loss-handoff/atomic-signal-loss-handoff.md) for the implemented fix (CP3A) and its own sequence diagram of this exact race.
+![Read-Then-Write Race](../../../../../diagrams/docs/implementation/phase-06-composite-correlation/concepts/atomic-signal-loss-handoff/read-then-write-race.svg)
+
+This confirms the review finding directly: a read-then-write handoff loses a claim that lands in the gap between t0 and t2. The resolved design (a single Lua script performing the read-and-transfer atomically) closes this by construction — there is no t0/t2 gap for a t1 to land in, because Redis serializes the whole transfer as one operation relative to the CLAIM script. See [`atomic-signal-loss-handoff`](../atomic-signal-loss-handoff/atomic-signal-loss-handoff.md) for the implemented fix (CP3A) and its own real-Redis proof.
 
 | Check | Expected | Observed |
 | --- | --- | --- |
 | Read-then-write handoff can silently drop a concurrent claim | yes (this is the bug) | Confirmed by hand-trace |
-| A single atomic Lua transfer closes the gap | yes | Confirmed by construction — not yet implemented, tracked as an open item for CP3 |
+| A single atomic Lua transfer closes the gap | yes | Confirmed — implemented in CP3A, see that checkpoint's own real-Redis verification |
 
 ---
 
-## Experiment 3: trace both directions of the decision-flip bug
+## Experiment 3: trace both directions of the decision-flip bug, with the fix applied
 
-**Direction 1 — COMPOSITE already issued, redelivery must not downgrade it:**
+Without a decision record, both directions misfire — see [`composite-claim-protocol`](composite-claim-protocol.md#why-a-candidate-needs-its-own-decision-record-separate-from-the-loss-episode-claim)'s `decision-flip-redelivery.svg` for that failure mode. Tracing the same two scenarios *with* the decision-record-first flow applied:
 
-```text
-attempt 1: CP2 resolves eligible -> CLAIM succeeds -> COMPOSITE published -> crash before offset commit
-attempt 2 (redelivery): alert-decision:{candidate_id} still exists (never deleted -- offset never committed)
-  -> replay the recorded COMPOSITE decision, republish with the SAME alert_id
-  -> no UNSCHEDULED_PROXIMITY emitted
-```
-
-**Direction 2 — nothing qualified yet, redelivery must not upgrade it:**
-
-```text
-attempt 1: CP2 resolves nothing eligible -> decision = UNSCHEDULED_PROXIMITY -> published -> crash before offset commit
-           (signal-loss scan runs in between, opening a fresh alert-state for one pair member)
-attempt 2 (redelivery): alert-decision:{candidate_id} still exists from attempt 1
-  -> replay the recorded UNSCHEDULED_PROXIMITY decision, republish with the SAME alert_id
-  -> no COMPOSITE emitted, despite alert-state now existing
-```
+| Direction | Attempt 1 | Crash | Attempt 2 (redelivery) | Result |
+| --- | --- | --- | --- | --- |
+| 1 — must not downgrade | CP2 resolves eligible → CLAIM succeeds → COMPOSITE published | before `proximity.candidates` offset commits | `alert-decision:{candidate_id}` still exists (never deleted — offset never committed) → replay the recorded COMPOSITE decision, republish with the SAME alert_id | No `UNSCHEDULED_PROXIMITY` emitted |
+| 2 — must not upgrade | CP2 resolves nothing eligible → decision = UNSCHEDULED_PROXIMITY → published (the signal-loss scan runs in between, opening a fresh `alert-state` for one pair member) | before `proximity.candidates` offset commits | `alert-decision:{candidate_id}` still exists from attempt 1 → replay the recorded UNSCHEDULED_PROXIMITY decision, republish with the SAME alert_id | No `COMPOSITE` emitted, despite `alert-state` now existing |
 
 | Check | Expected | Observed |
 | --- | --- | --- |
