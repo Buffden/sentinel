@@ -76,7 +76,7 @@ Any position updates or alert events missed during the disconnected window are r
 
 ## Data flow
 
-See [`websocket-serving-flow.puml`](websocket-serving-flow.puml) for the full sequence diagram.
+![WebSocket Serving — Upgrade, Subscribe, Live Feed, and Hydration](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/websocket-serving/websocket-serving-flow.svg)
 
 **Upgrade and subscribe:**
 The browser sends an HTTP upgrade request with the `sentinel_jwt` cookie. The API validates the JWT, completes the handshake, and the connection enters the connected state. The client sends a `subscribe` message with its current bbox. The server stores the bbox for that connection.

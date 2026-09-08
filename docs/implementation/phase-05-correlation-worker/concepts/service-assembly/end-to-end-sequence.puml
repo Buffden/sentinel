@@ -1,0 +1,58 @@
+@startuml end-to-end-sequence
+title Correlation Worker — Real End-to-End Run (demo-plane-a / demo-plane-b)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "position.normalized\n(Kafka)" as PN #FCE7F3
+participant "Correlation Worker\nhandlePosition()" as CW #DBEAFE
+participant "Redis" as R #FEF9C3
+participant "Neo4j" as N #D1FAE5
+participant "proximity.candidates\n(Kafka)" as PC #FCE7F3
+
+note over R
+  demo-plane-b already seeded as a
+  geo-cell member near demo-plane-a's
+  position before this run.
+end note
+
+PN -> CW : demo-plane-a ping\n(lat=37.0, lon=-121.0)
+
+CW -> R : findProximityCandidates\ngridDisk(liveGeoCell, k) -> ZRANGEBYSCORE geo-cell:*
+R --> CW : [demo-plane-b]
+
+CW -> R : filterByDistance\nHGET entity:live:demo-plane-b (lat, lon)
+R --> CW : real distance <= PROXIMITY_THRESHOLD_METRES
+
+CW -> CW : canonicalPairKey(demo-plane-a, demo-plane-b)\n-> "demo-plane-a:demo-plane-b"
+
+CW -> R : touchProximityEpisode (Lua)\nproximity-episode:demo-plane-a:demo-plane-b
+R --> CW : isNewEpisode=true, episode_start_ms
+
+CW -> N : mergeProximityEvent (idempotency_key =\npair_key:episode_start_ms)
+N --> CW : PROXIMITY_EVENT edge created,\nmin_distance_metres recorded
+
+CW -> N : isKnownAssociate(demo-plane-a, demo-plane-b)
+N --> CW : false -- unscheduled pair
+
+CW -> R : markCandidatePending\ncandidate_published='0' (before publish)
+
+CW -> PC : produce proximity.candidates\n{pair_key, entity_a_id, entity_b_id,\nepisode_start_ms, lat, lon, distance_at_detection}
+
+CW -> R : markCandidatePublished\ncandidate_published='1' (after confirmed send)
+
+note over PN, PC
+  Every hop above was run for real against
+  the live dev stack, not simulated -- see
+  this concept's debrief for the exact
+  commands and observed Redis/Neo4j state.
+end note
+
+@enduml
