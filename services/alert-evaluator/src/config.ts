@@ -37,8 +37,12 @@ export const config = {
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 	REDIS_URL: process.env['REDIS_URL'] ?? 'redis://localhost:6379',
 
-	// Canonical Kafka topic — do not change without an ADR.
+	// Canonical Kafka topics and consumer group — do not change without an ADR.
 	ALERTS_TOPIC: 'alerts',
+	PROXIMITY_CANDIDATES_TOPIC: 'proximity.candidates',
+	GROUP_ID: 'alert-evaluator',
+
+	FROM_BEGINNING: (process.env['FROM_BEGINNING'] ?? 'false') === 'true',
 
 	// Canonical Redis key for the leader lease — do not change without an ADR.
 	LEADER_KEY: 'alert-evaluator:leader',

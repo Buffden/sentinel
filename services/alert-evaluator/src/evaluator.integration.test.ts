@@ -20,7 +20,8 @@ import { randomUUID } from 'node:crypto';
 import { Kafka } from 'kafkajs';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { config } from './config.js';
-import { producer, redis, runScan } from './evaluator.js';
+import { handleProximityCandidate, producer, redis, runScan } from './evaluator.js';
+import type { ProximityCandidateMessage } from './evaluator.js';
 
 interface AlertMessage {
 	alert_id: string;
@@ -216,6 +217,84 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 			expect(await redis.exists(`alert-state:${entityId}`)).toBe(0);
 		} finally {
 			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+		}
+	});
+
+	// ---- handleProximityCandidate ------------------------------------------
+	// Same real Redis + real `alerts` topic setup as the SIGNAL_LOSS suite
+	// above -- the guarantee under test is that a real proximity.candidates
+	// payload becomes a real, deterministic UNSCHEDULED_PROXIMITY alert.
+
+	function buildCandidate(
+		overrides: Partial<ProximityCandidateMessage> = {},
+	): ProximityCandidateMessage {
+		const a = `test-evaluator-${randomUUID()}`;
+		const b = `test-evaluator-${randomUUID()}`;
+		const [entity_a_id, entity_b_id] = a <= b ? [a, b] : [b, a];
+		return {
+			pair_key: `${entity_a_id}:${entity_b_id}`,
+			entity_a_id,
+			entity_b_id,
+			episode_start_ms: Date.now(),
+			lat: 37.0,
+			lon: -121.0,
+			distance_at_detection: 33.4,
+			...overrides,
+		};
+	}
+
+	it('emits a deterministic UNSCHEDULED_PROXIMITY alert from a proximity candidate', async () => {
+		const candidate = buildCandidate();
+		await seedLiveEntity(candidate.entity_a_id, { entity_type: 'aircraft' });
+
+		try {
+			await handleProximityCandidate(candidate);
+
+			const alert = await waitForAlert(candidate.entity_a_id);
+			expect(alert).toBeDefined();
+			expect(alert?.alert_id).toBe(
+				`${candidate.pair_key}:UNSCHEDULED_PROXIMITY:${candidate.episode_start_ms}`,
+			);
+			expect(alert?.alert_type).toBe('UNSCHEDULED_PROXIMITY');
+			expect(alert?.entity_type).toBe('aircraft');
+			expect(alert?.payload['pair_key']).toBe(candidate.pair_key);
+			expect(alert?.payload['counterparty_entity_id']).toBe(candidate.entity_b_id);
+			expect(alert?.payload['distance_metres']).toBe(candidate.distance_at_detection);
+		} finally {
+			await redis.del(`entity:live:${candidate.entity_a_id}`);
+		}
+	});
+
+	it('defaults entity_type to an empty string when the entity has no live state', async () => {
+		const candidate = buildCandidate(); // entity_a_id deliberately never seeded
+
+		const alert = (await (async () => {
+			await handleProximityCandidate(candidate);
+			return waitForAlert(candidate.entity_a_id);
+		})())!;
+
+		expect(alert.entity_type).toBe('');
+	});
+
+	it('computes the same alert_id regardless of which run produced the candidate', async () => {
+		// The Correlation Worker already canonicalizes entity_a_id/entity_b_id,
+		// so a redelivered candidate for the same episode has identical fields
+		// -- this only confirms handleProximityCandidate does not add its own
+		// nondeterminism on top (e.g. from Date.now() leaking into alert_id).
+		const candidate = buildCandidate();
+		await seedLiveEntity(candidate.entity_a_id, { entity_type: 'vessel' });
+
+		try {
+			await handleProximityCandidate(candidate);
+			const first = await waitForAlert(candidate.entity_a_id);
+
+			receivedAlerts.length = 0;
+			await handleProximityCandidate(candidate);
+			const second = await waitForAlert(candidate.entity_a_id);
+
+			expect(first?.alert_id).toBe(second?.alert_id);
+		} finally {
+			await redis.del(`entity:live:${candidate.entity_a_id}`);
 		}
 	});
 });
