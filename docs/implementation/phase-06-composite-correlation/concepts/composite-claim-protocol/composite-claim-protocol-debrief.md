@@ -34,21 +34,14 @@ episode #2's candidate_id = "A:B:5000"
 
 ## Experiment 2: trace the CP1-handoff race by hand
 
-```text
-t0: Position Consumer HGETALL alert-state:X
-    -> reads { dark_since_ms: D, composite_claim_candidate_id: "" }
-t1: Alert Evaluator CLAIM (Lua) on alert-state:X
-    -> composite_claim_candidate_id was "", candidate Y claims it
-    -> alert-state:X now has composite_claim_candidate_id: "Y"
-t2: Position Consumer MULTI(
-      HSET recent-loss:X using the t0 snapshot (composite_claim_candidate_id: "")
-      DEL alert-state:X
-    ) EXEC
-    -> recent-loss:X now exists with composite_claim_candidate_id: ""
-    -> candidate Y's claim (written at t1) is gone
-```
+| Time | Actor | Operation | `alert-state:X` / `recent-loss:X` state |
+| --- | --- | --- | --- |
+| t0 | Position Consumer | `HGETALL alert-state:X` | reads `{ dark_since_ms: D, composite_claim_candidate_id: "" }` |
+| t1 | Alert Evaluator | `CLAIM` (Lua) on `alert-state:X`, candidate `Y` | `composite_claim_candidate_id` was `""` → claim succeeds → `alert-state:X.composite_claim_candidate_id = "Y"` |
+| t2 | Position Consumer | `MULTI(HSET recent-loss:X from the t0 snapshot, DEL alert-state:X) EXEC` | `recent-loss:X.composite_claim_candidate_id` written as `""` — the **stale** t0 value |
+| after | — | — | candidate `Y`'s claim, written at t1, is gone — unrecoverable |
 
-This confirms the review finding directly: a read-then-write handoff loses a claim that lands in the gap between the read and the `MULTI`. The resolved design (a single Lua script performing the read-and-transfer atomically) closes this by construction — there is no `t0`/`t2` gap for a `t1` to land in, because Redis serializes the whole transfer as one operation relative to the CLAIM script.
+This confirms the review finding directly: a read-then-write handoff loses a claim that lands in the gap between t0 and t2. The resolved design (a single Lua script performing the read-and-transfer atomically) closes this by construction — there is no t0/t2 gap for a t1 to land in, because Redis serializes the whole transfer as one operation relative to the CLAIM script. See [`atomic-signal-loss-handoff`](../atomic-signal-loss-handoff/atomic-signal-loss-handoff.md) for the implemented fix (CP3A) and its own sequence diagram of this exact race.
 
 | Check | Expected | Observed |
 | --- | --- | --- |

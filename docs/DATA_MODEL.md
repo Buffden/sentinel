@@ -331,14 +331,13 @@ A claim is fenced against a *different* candidate (a different pair racing for t
 
 **2. `alert-state` → `recent-loss` handoff must become one atomic transfer, not read-then-write.** CP1's handoff (`recent-loss-handoff` concept) was safe when the hash held only static episode evidence. Once `composite_claim_candidate_id`/`composite_issued` are mutable, a `HGETALL` read followed by a separate `MULTI` write racing an Alert Evaluator CLAIM can silently erase a claim recorded between the read and the `EXEC`:
 
-```text
-Position Consumer: HGETALL alert-state -- sees composite_claim_candidate_id empty
-                                    Alert Evaluator: CLAIM -> composite_claim_candidate_id = X
-Position Consumer: MULTI(HSET recent-loss from the OLD snapshot, ..., DEL alert-state) EXEC
-                                    -- candidate X's claim is gone; recent-loss never got it
-```
+| Step | Actor | Operation | Result |
+| --- | --- | --- | --- |
+| 1 | Position Consumer | `HGETALL alert-state` | reads `composite_claim_candidate_id` empty |
+| 2 | Alert Evaluator | `CLAIM` (Lua) | `alert-state.composite_claim_candidate_id = X` |
+| 3 | Position Consumer | `MULTI(HSET recent-loss from step 1, ..., DEL alert-state) EXEC` | `recent-loss` written from the stale step-1 snapshot — candidate `X`'s claim, written at step 2, never arrives |
 
-The handoff must become a single Lua script that reads current field values and writes them into `recent-loss` (including whatever `composite_*` fields are present at that instant) inside the same atomic step that deletes `alert-state`, so Redis's own command serialization — not application-level timing — determines whether a concurrent CLAIM lands before or after the handoff. **This is a real consequence of adding mutable coordination fields to these hashes, not a refactor** — CP1's existing `MULTI`/`EXEC` (`HSET` + `PEXPIRE` + `DEL` from already-read values) is not sufficient once claim fields exist, and must be revised as part of implementing this protocol. Not yet implemented.
+The handoff must become a single Lua script that reads current field values and writes them into `recent-loss` (including whatever `composite_*` fields are present at that instant) inside the same atomic step that deletes `alert-state`, so Redis's own command serialization — not application-level timing — determines whether a concurrent CLAIM lands before or after the handoff. **This is a real consequence of adding mutable coordination fields to these hashes, not a refactor** — CP1's original `MULTI`/`EXEC` (`HSET` + `PEXPIRE` + `DEL` from already-read values) was not sufficient once claim fields exist. **Implemented as of CP3A** — see [`atomic-signal-loss-handoff`](implementation/phase-06-composite-correlation/concepts/atomic-signal-loss-handoff/atomic-signal-loss-handoff.md) for the Lua script, its sequence diagram of this exact race, and real-Redis proof that a seeded claim survives the transfer unchanged.
 
 **3. Candidate decision record** — "what did we decide for this exact proximity candidate?", independent of loss-episode state. This closes a second, symmetric redelivery bug beyond the one loss-episode claiming alone fixes:
 
@@ -377,13 +376,13 @@ create decision -> publish output -> finalize claim -> commit input offset -> de
 
 A crash before the offset commits leaves the decision record in place — replay-safe. A crash after the offset commits but before the delete leaves an orphaned decision record — a cleanup leak, not a correctness failure, since it is never consulted again once its owning message has been durably processed. **No TTL is set on this record.** `COMPOSITE_CORRELATION_WINDOW_MS` answers "how long can a *new* candidate correlate with this loss" — a fundamentally different lifetime than "how long must we remember a Kafka processing decision for redelivery," which must survive at least as long as the input offset can remain uncommitted. Tying the two together would silently reintroduce the decision-flip bug after any outage longer than the correlation window. A cleanup policy for orphaned records is deferred until this topic's actual `retention.ms` is an explicit, documented value — none is currently set.
 
-**Invariants established by this protocol, not yet implemented:**
+**Invariants established by this protocol:**
 
-1. One loss episode can be claimed by at most one canonical proximity candidate (`{pair_key}:{episode_start_ms}`), never a bare `pair_key`.
-2. A candidate's alert-type decision is sticky across Kafka redelivery, in both directions (COMPOSITE cannot flip to UNSCHEDULED_PROXIMITY or vice versa on replay).
-3. The `alert-state` → `recent-loss` handoff preserves claim/finalize state atomically — a single Lua transfer, not a read-then-`MULTI`-write.
-4. `recent-loss`'s TTL governs eligibility retention, never Kafka replay memory; the decision record's lifecycle is independent and tied to input-offset commit, not to `COMPOSITE_CORRELATION_WINDOW_MS`.
-5. The same candidate may resume its own pending claim; a different candidate may never steal it.
+1. One loss episode can be claimed by at most one canonical proximity candidate (`{pair_key}:{episode_start_ms}`), never a bare `pair_key`. Not yet implemented (CP3B).
+2. A candidate's alert-type decision is sticky across Kafka redelivery, in both directions (COMPOSITE cannot flip to UNSCHEDULED_PROXIMITY or vice versa on replay). Not yet implemented (CP3C, wired in CP5).
+3. The `alert-state` → `recent-loss` handoff preserves claim/finalize state atomically — a single Lua transfer, not a read-then-`MULTI`-write. **Implemented (CP3A).**
+4. `recent-loss`'s TTL governs eligibility retention, never Kafka replay memory; the decision record's lifecycle is independent and tied to input-offset commit, not to `COMPOSITE_CORRELATION_WINDOW_MS`. Not yet implemented (decision record is CP3C).
+5. The same candidate may resume its own pending claim; a different candidate may never steal it. Not yet implemented (CP3B).
 
 ### `deviation-state:{entity_id}` — hash
 
