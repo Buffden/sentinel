@@ -52,3 +52,30 @@ export async function touchProximityEpisode(
 		episodeStartMs: Number(episodeStartMs),
 	};
 }
+
+// candidate_published is written only for unscheduled pairs -- a known
+// associate's episode never gets this field at all, so its absence on an
+// existing episode is how a later ping recognizes "this pair was already
+// established as known" without re-checking KNOWN_ASSOCIATE every time.
+export type CandidatePublishState = '0' | '1' | null;
+
+export async function getCandidatePublishState(
+	redis: Redis,
+	pairKey: string,
+): Promise<CandidatePublishState> {
+	const value = await redis.hget(`proximity-episode:${pairKey}`, 'candidate_published');
+	return value as CandidatePublishState;
+}
+
+// Set before attempting the Kafka publish. If the process crashes or the
+// publish fails before markCandidatePublished runs, this stays '0' and the
+// next qualifying ping for the same episode retries -- see
+// getCandidatePublishState's use in the caller.
+export async function markCandidatePending(redis: Redis, pairKey: string): Promise<void> {
+	await redis.hset(`proximity-episode:${pairKey}`, 'candidate_published', '0');
+}
+
+// Set only after the Kafka publish is confirmed sent.
+export async function markCandidatePublished(redis: Redis, pairKey: string): Promise<void> {
+	await redis.hset(`proximity-episode:${pairKey}`, 'candidate_published', '1');
+}
