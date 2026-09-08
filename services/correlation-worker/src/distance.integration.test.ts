@@ -26,12 +26,25 @@ const seededKeys = new Set<string>();
 
 async function seedPosition(entityId: string, lat: number, lon: number): Promise<void> {
 	seededKeys.add(`entity:live:${entityId}`);
-	await redis.hset(`entity:live:${entityId}`, 'lat', String(lat), 'lon', String(lon));
+	await redis.hset(
+		`entity:live:${entityId}`,
+		'lat',
+		String(lat),
+		'lon',
+		String(lon),
+		'entity_type',
+		'aircraft',
+	);
 }
 
 async function seedNoPosition(entityId: string): Promise<void> {
 	seededKeys.add(`entity:live:${entityId}`);
 	await redis.hset(`entity:live:${entityId}`, 'entity_type', 'aircraft');
+}
+
+async function seedPositionWithoutType(entityId: string, lat: number, lon: number): Promise<void> {
+	seededKeys.add(`entity:live:${entityId}`);
+	await redis.hset(`entity:live:${entityId}`, 'lat', String(lat), 'lon', String(lon));
 }
 
 afterEach(async () => {
@@ -60,6 +73,9 @@ describe('filterByDistance', () => {
 
 		expect(result).toHaveLength(1);
 		expect(result[0]!.entityId).toBe(near);
+		expect(result[0]!.entityType).toBe('aircraft');
+		expect(result[0]!.lat).toBe(NEAR_LAT);
+		expect(result[0]!.lon).toBe(ORIGIN_LON);
 		expect(result[0]!.distanceMetres).toBeGreaterThan(90);
 		expect(result[0]!.distanceMetres).toBeLessThan(110);
 	});
@@ -88,6 +104,21 @@ describe('filterByDistance', () => {
 			ORIGIN_LAT,
 			ORIGIN_LON,
 			[ghost],
+			config.PROXIMITY_THRESHOLD_METRES,
+		);
+
+		expect(result).toEqual([]);
+	});
+
+	it('skips a candidate with a position but no entity_type', async () => {
+		const untyped = testId();
+		await seedPositionWithoutType(untyped, NEAR_LAT, ORIGIN_LON);
+
+		const result = await filterByDistance(
+			redis,
+			ORIGIN_LAT,
+			ORIGIN_LON,
+			[untyped],
 			config.PROXIMITY_THRESHOLD_METRES,
 		);
 

@@ -29,7 +29,8 @@ position.normalized → Correlation Worker → H3 candidates → exact distance 
 | Canonical pair ordering — `canonicalPairKey`: `min(a,b):max(a,b)` so A/B and B/A triggering resolve to one identity | Done |
 | Neo4j proximity evidence — `mergeProximityEvent`: idempotent, direction-safe `MERGE` of one `PROXIMITY_EVENT` edge per episode | Done |
 | Proximity episode state — `touchProximityEpisode`: `proximity-episode:{pair_key}` hash, TTL-based encounter gap detection, atomic via Lua | Done |
-| Candidate publication + `KNOWN_ASSOCIATE` filtering — `evaluateProximityEncounter`: evidence always recorded, publish decision gated on known-associate status and publish-confirmation state, retry via `candidate_published` | Done (decision logic only — Kafka publish call and consumer wiring not yet built) |
+| Candidate publication + `KNOWN_ASSOCIATE` filtering — `evaluateProximityEncounter`: evidence always recorded, publish decision gated on known-associate status and publish-confirmation state, retry via `candidate_published` | Done |
+| Service assembly — `handlePosition`/`worker.ts`: real Kafka consumer/producer wiring the full pipeline together; proven end-to-end against the real dev stack | Done |
 | Alert Evaluator integration — consume `proximity.candidates`, emit `UNSCHEDULED_PROXIMITY` (or `COMPOSITE` per existing signal-loss correlation) | Not started |
 | Exit verification — full path proven end-to-end; all required failure experiments below | Not started |
 

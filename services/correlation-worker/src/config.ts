@@ -12,18 +12,35 @@ function requirePositiveInt(name: string, raw: string | undefined, def: number):
 }
 
 export const config = {
+	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 	REDIS_URL: process.env['REDIS_URL'] ?? 'redis://localhost:6379',
 
 	NEO4J_URI: process.env['NEO4J_URI'] ?? 'bolt://localhost:7687',
 	NEO4J_USER: process.env['NEO4J_USER'] ?? 'neo4j',
 	NEO4J_PASSWORD: process.env['NEO4J_PASSWORD'] ?? 'sentinel-dev',
 
-	// Must match Position Consumer's LIVE_H3_RESOLUTION -- geo-cell:{cell_id}
-	// keys are only meaningful candidates if both services use the same resolution.
-	LIVE_H3_RESOLUTION: requirePositiveInt(
-		'LIVE_H3_RESOLUTION',
-		process.env['LIVE_H3_RESOLUTION'],
-		7,
+	// Canonical topics and consumer group -- do not change without an ADR.
+	SOURCE_TOPIC: 'position.normalized',
+	CANDIDATES_TOPIC: 'proximity.candidates',
+	GROUP_ID: 'correlation-worker',
+
+	FROM_BEGINNING: (process.env['FROM_BEGINNING'] ?? 'false') === 'true',
+
+	// Architectural constant matching Position Consumer's LIVE_H3_RESOLUTION.
+	// Not env-configurable: geo-cell:{cell_id} keys are only meaningful
+	// candidates if both services compute cells at the same resolution, so
+	// this cannot be tuned independently per service.
+	LIVE_H3_RESOLUTION: 7,
+
+	// How stale a candidate's last known position may be before it's excluded
+	// from the search entirely (ZRANGEBYSCORE lower bound). Matches
+	// PROXIMITY_EPISODE_GAP_MS's timescale by default -- both express "how
+	// long is this pair still plausibly relevant" -- but are independent
+	// knobs and may need to diverge once tuned against real data.
+	CANDIDATE_FRESHNESS_MS: requirePositiveInt(
+		'CANDIDATE_FRESHNESS_MS',
+		process.env['CANDIDATE_FRESHNESS_MS'],
+		60_000,
 	),
 
 	// V1 experimental rule threshold, not an aviation-safety constant.
