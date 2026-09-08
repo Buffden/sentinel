@@ -10,5 +10,6 @@ Concept notes and debrief records for Phase 06 checkpoints, in the order you'd r
 | [composite-eligibility-resolution/](composite-eligibility-resolution/) | `resolveCompositeEligibility` returns the correct winner (or `null`) against real seeded Redis state, and leaves that state byte-for-byte unchanged |
 | [composite-claim-protocol/](composite-claim-protocol/) | Design-only: the crash-safe claim/decision protocol traced by hand against every redelivery scenario, resolved and documented in `DATA_MODEL.md` before any code exists against it |
 | [atomic-signal-loss-handoff/](atomic-signal-loss-handoff/) | A claim seeded on `alert-state` survives the `recent-loss` handoff byte-for-byte, via a single Lua script replacing the CP1-era read-then-`MULTI`-write |
+| [composite-episode-claim/](composite-episode-claim/) | Two concurrent different-candidate claims against real Redis: exactly one wins; the winner's own retry still succeeds; the loser cannot finalize |
 
-Checkpoints not yet in this list (CP3B onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.
+Checkpoints not yet in this list (CP3C onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.

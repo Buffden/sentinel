@@ -134,3 +134,138 @@ export async function resolveCompositeEligibility(
 	]);
 	return selectWinningEpisode(a, b);
 }
+
+// Composite episode claim / finalize
+//
+// Coordination primitives only: no Kafka work, no alert-decision records,
+// not wired into handleProximityCandidate. See DATA_MODEL.md's "Composite
+// claim and decision protocol" for the accepted design this implements.
+//
+// Both operations locate the logical episode by entityId + a source-time
+// identity (expectedDarkSinceMs), never by which Redis key currently holds
+// it. CP3A's atomic handoff can move an episode from alert-state to
+// recent-loss at any time -- including between CP2's read-only snapshot and
+// a CLAIM/FINALIZE call -- so both scripts search both representations
+// atomically inside one script rather than assuming one.
+//
+// candidateId is the caller's proximity-episode identity,
+// {pair_key}:{episode_start_ms} -- never a bare pair_key, since the same
+// pair can produce multiple distinct proximity episodes over time (see
+// composite-claim-protocol's "canonical claim identity" note).
+
+// KEYS[1] = alert-state:{entity_id}
+// KEYS[2] = recent-loss:{entity_id}
+// ARGV[1] = expected dark_since_ms (string)
+// ARGV[2] = candidate_id
+//
+// Finds whichever of the two keys currently has a matching dark_since_ms
+// (never assumes which one). Succeeds when that episode's composite_issued
+// is '0' and its claim is empty or already equals this candidate_id -- the
+// same candidate can retry a CLAIM it already holds (redelivery-safe); a
+// different candidate cannot take it. On success, sets
+// composite_claim_candidate_id to candidate_id. Never touches any TTL --
+// coordination is not a reason to extend eligibility retention.
+const CLAIM_COMPOSITE_EPISODE_LUA = `
+local function find_match(key)
+	local dark_since_ms = redis.call('HGET', key, 'dark_since_ms')
+	if dark_since_ms == ARGV[1] then
+		return key
+	end
+	return nil
+end
+local matched_key = find_match(KEYS[1])
+if not matched_key then
+	matched_key = find_match(KEYS[2])
+end
+if not matched_key then
+	return {0, 'NO_EPISODE'}
+end
+if redis.call('HGET', matched_key, 'composite_issued') == '1' then
+	return {0, 'ALREADY_ISSUED'}
+end
+local claim = redis.call('HGET', matched_key, 'composite_claim_candidate_id')
+if claim and claim ~= '' and claim ~= ARGV[2] then
+	return {0, 'CLAIMED_BY_OTHER'}
+end
+redis.call('HSET', matched_key, 'composite_claim_candidate_id', ARGV[2])
+return {1, 'SUCCESS'}
+`;
+
+// Same representation-independent lookup as CLAIM. Succeeds only for the
+// candidate that already holds the claim, and is idempotent for that same
+// candidate: if the episode is already composite_issued=1 under this
+// candidate's own claim, this returns success without re-mutating anything.
+// That idempotency is required for the real failure case it exists to
+// cover -- publish COMPOSITE, FINALIZE succeeds, crash before the
+// proximity.candidates input offset commits, Kafka redelivers -- the
+// redelivered candidate must recognize its own operation already reached
+// the finalized state, not fail. A different candidateId is always
+// rejected, even one that happens to match the episode's dark_since_ms.
+// Never touches any TTL.
+const FINALIZE_COMPOSITE_EPISODE_LUA = `
+local function find_match(key)
+	local dark_since_ms = redis.call('HGET', key, 'dark_since_ms')
+	if dark_since_ms == ARGV[1] then
+		return key
+	end
+	return nil
+end
+local matched_key = find_match(KEYS[1])
+if not matched_key then
+	matched_key = find_match(KEYS[2])
+end
+if not matched_key then
+	return {0, 'NO_EPISODE'}
+end
+local claim = redis.call('HGET', matched_key, 'composite_claim_candidate_id')
+if claim ~= ARGV[2] then
+	return {0, 'NOT_CLAIMED'}
+end
+if redis.call('HGET', matched_key, 'composite_issued') == '1' then
+	return {1, 'SUCCESS'}
+end
+redis.call('HSET', matched_key, 'composite_issued', '1')
+return {1, 'SUCCESS'}
+`;
+
+// Claims one signal-loss episode for candidateId so a different candidate
+// cannot also turn it into a COMPOSITE. See the module-level comment above
+// for why the episode is identified by entityId + expectedDarkSinceMs
+// rather than by Redis representation, and why a same-candidate retry
+// succeeds.
+export async function claimCompositeEpisode(
+	redis: Redis,
+	entityId: string,
+	expectedDarkSinceMs: number,
+	candidateId: string,
+): Promise<boolean> {
+	const result = (await redis.eval(
+		CLAIM_COMPOSITE_EPISODE_LUA,
+		2,
+		`alert-state:${entityId}`,
+		`recent-loss:${entityId}`,
+		String(expectedDarkSinceMs),
+		candidateId,
+	)) as [number, string];
+	return result[0] === 1;
+}
+
+// Marks a claimed episode composite_issued=1, only for the candidate that
+// already holds the claim. See the module-level comment above for why this
+// is idempotent for that same candidate and representation-independent.
+export async function finalizeCompositeEpisode(
+	redis: Redis,
+	entityId: string,
+	expectedDarkSinceMs: number,
+	candidateId: string,
+): Promise<boolean> {
+	const result = (await redis.eval(
+		FINALIZE_COMPOSITE_EPISODE_LUA,
+		2,
+		`alert-state:${entityId}`,
+		`recent-loss:${entityId}`,
+		String(expectedDarkSinceMs),
+		candidateId,
+	)) as [number, string];
+	return result[0] === 1;
+}
