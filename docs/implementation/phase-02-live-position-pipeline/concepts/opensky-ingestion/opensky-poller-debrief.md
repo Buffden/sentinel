@@ -13,6 +13,12 @@
 
 ---
 
+The full observed run, time-ordered — startup, three poll cycles, and graceful shutdown all trace through this one interaction:
+
+![OpenSky Ingestion Poller — Observed Interaction](../../../../../diagrams/docs/implementation/phase-02-live-position-pipeline/concepts/opensky-ingestion/polling-sequence.svg)
+
+---
+
 ## 1. Poller startup
 
 ```bash

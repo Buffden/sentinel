@@ -1,0 +1,43 @@
+@startuml candidate-publication-state
+title Candidate Publication Gate — proximity-episode:{pair_key} candidate_published
+
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam stateArrowColor #333333
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+[*] --> NO_EPISODE
+
+NO_EPISODE --> NEW_EPISODE : confirming ping,\nno existing episode\n(touchProximityEpisode)
+
+NEW_EPISODE --> KNOWN_ASSOCIATE : KNOWN_ASSOCIATE check\n(Neo4j, once per episode)\n-- relationship exists
+NEW_EPISODE --> PENDING : KNOWN_ASSOCIATE check\n-- no relationship\n(candidate_published = '0',\nset BEFORE the Kafka publish attempt)
+
+PENDING --> PUBLISHED : Kafka publish\nconfirmed successful\n(candidate_published = '1')
+PENDING --> PENDING : later confirming ping,\npublish still not confirmed\n-- retry
+
+KNOWN_ASSOCIATE --> KNOWN_ASSOCIATE : later confirming ping\n-- candidate_published field\nstays absent, never checked again
+
+PUBLISHED --> [*] : TTL gap expires,\nepisode ends
+KNOWN_ASSOCIATE --> [*] : TTL gap expires,\nepisode ends
+
+note right of KNOWN_ASSOCIATE
+  No dedicated boolean field for this.
+  candidate_published is simply never
+  written for a known-associate episode --
+  its ABSENCE on an existing episode is
+  what means "already established as
+  known associate," distinct from '0'
+  (unscheduled, not yet published).
+end note
+
+note right of PENDING
+  Written before the Kafka publish is
+  even attempted. A crash here leaves
+  candidate_published='0' -- indistinguishable
+  from "never tried," so the next confirming
+  ping retries correctly.
+end note
+
+@enduml

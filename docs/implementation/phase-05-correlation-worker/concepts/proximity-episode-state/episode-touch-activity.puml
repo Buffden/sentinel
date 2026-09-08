@@ -1,0 +1,54 @@
+@startuml episode-touch-activity
+title touchProximityEpisode — One Atomic Check-and-Act
+
+skinparam linetype ortho
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:confirming ping for pairKey\nat observedAtMs;
+
+:Lua: HGET proximity-episode:{pairKey} episode_start_ms;
+
+if (episode exists?) then (no)
+  :HSET episode_start_ms = observedAtMs\nHSET last_seen_ms = observedAtMs;
+  :PEXPIRE proximity-episode:{pairKey} gapMs;
+  :return isNewEpisode = true;
+  note right
+    A second Correlation Worker instance
+    processing the same pair at nearly the
+    same instant CANNOT also see "no episode"
+    here -- this whole branch is one Lua
+    script, not a separate EXISTS then HSET.
+  end note
+  stop
+else (yes)
+endif
+
+if (observedAtMs >= stored last_seen_ms?) then (yes)
+  :HSET last_seen_ms = observedAtMs;
+  note right: moves forward
+else (no)
+  :leave last_seen_ms unchanged;
+  note right
+    out-of-order confirmation --
+    still real evidence the encounter
+    is active, just not the newest ping
+  end note
+endif
+
+:PEXPIRE proximity-episode:{pairKey} gapMs\n(renewed regardless of the branch above);
+
+:return isNewEpisode = false,\nepisode_start_ms unchanged;
+
+stop
+
+@enduml

@@ -14,6 +14,10 @@ TimescaleDB running
   → verify schema
 ```
 
+The full sequence, including the six migrations in order and the manual `psql` verification steps covered in §11 and §14 below:
+
+![TimescaleDB Migration Flow](../../../../diagrams/docs/implementation/phase-01-infrastructure/concepts/cp-02-migration-flow.svg)
+
 ---
 
 ## 2. Transactions in DDL

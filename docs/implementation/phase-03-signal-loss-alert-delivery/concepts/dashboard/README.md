@@ -181,8 +181,9 @@ reaching React.
 Both `last_seen_ms` (REST) and `timestamp_ms` (WebSocket) map to a single `eventTimeMs`
 field in the frontend model. React never knows which field name the backend used.
 
-See [`network-boundary-adapter.puml`](network-boundary-adapter.puml) for the full sequence:
-wire JSON → validator → adapter → domain model → React, including the malformed-frame discard path.
+The full sequence — wire JSON → validator → adapter → domain model → React, including the malformed-frame discard path:
+
+![Network Boundary — Adapter Strategy](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/dashboard/network-boundary-adapter.svg)
 
 ---
 
@@ -252,8 +253,9 @@ know what an aircraft is. `features/live-feed` knows: position-updates, alert-ev
 subscribe bbox. It does not know how to render a marker. One WebSocket per page — two
 connections would double position-update delivery.
 
-See [`ws-separation-flow.puml`](ws-separation-flow.puml) for the full sequence including
-subscribe, reconnect, demo expiry, and cleanup.
+The full sequence including subscribe, reconnect, demo expiry, and cleanup:
+
+![WebSocket Separation — Layer Ownership](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/dashboard/ws-separation-flow.svg)
 
 ---
 

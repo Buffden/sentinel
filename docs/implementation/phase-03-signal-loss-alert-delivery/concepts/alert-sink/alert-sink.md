@@ -63,7 +63,7 @@ KafkaJS maintains a committed offset per consumer group per topic partition. The
 
 ## Data flow
 
-See [`alert-sink-flow.puml`](alert-sink-flow.puml) for the full sequence diagram.
+![Alert Sink — Kafka Consume, Persist, Publish, Commit](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/alert-sink/alert-sink-flow.svg)
 
 The Alert Evaluator produces to the `alerts` Kafka topic. The API consumer (group `api`) polls each message, parses it, writes to TimescaleDB with `ON CONFLICT (alert_id) DO NOTHING`, publishes to Redis `alert-events`, then commits the offset.
 

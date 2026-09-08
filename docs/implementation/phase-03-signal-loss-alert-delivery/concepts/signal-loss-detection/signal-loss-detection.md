@@ -4,7 +4,7 @@ Plain language first, then technical depth, then the code. Use this to understan
 
 ---
 
-![Signal-Loss Detection Flow](../../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/signal-loss-flow.svg)
+![Signal-Loss Detection Flow](../../../../../diagrams/docs/implementation/phase-03-signal-loss-alert-delivery/concepts/signal-loss-flow.svg)
 
 ## What this checkpoint adds
 
