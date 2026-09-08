@@ -5,7 +5,7 @@ const router = Router();
 
 router.get('/', async (_req, res) => {
 	const result = await pool.query(
-		`SELECT alert_id, entity_id, entity_type, alert_type, priority, status,
+		`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status,
 						payload, detected_at, updated_at, acknowledged_at, resolved_at
 		 FROM alerts
 		 WHERE status IN ('NEW', 'ACKNOWLEDGED')
