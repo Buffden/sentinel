@@ -69,6 +69,16 @@ export const config = {
 	// of longer per-step latency.
 	REDIS_SCAN_COUNT: requirePositiveInt('REDIS_SCAN_COUNT', process.env['REDIS_SCAN_COUNT'], 100),
 
+	// Bounded window (Phase 06 composite correlation): a proximity candidate
+	// arriving within this long of an entity's resume still qualifies against
+	// the signal-loss episode that just closed. Same setting as Position
+	// Consumer's config, which writes this as the TTL on recent-loss:{entity_id}.
+	COMPOSITE_CORRELATION_WINDOW_MS: requirePositiveInt(
+		'COMPOSITE_CORRELATION_WINDOW_MS',
+		process.env['COMPOSITE_CORRELATION_WINDOW_MS'],
+		120_000,
+	),
+
 	// Leader lease TTL and renewal interval.
 	// Invariant enforced above: LEADER_RENEWAL_INTERVAL_MS < LEADER_LEASE_TTL_MS.
 	LEADER_LEASE_TTL_MS,

@@ -370,6 +370,67 @@ export async function updateGeoCell(
 	await redis.zadd(`geo-cell:${newCell}`, lastSeenMs, entityId);
 }
 
+// ---- Signal-loss episode clearing ------------------------------------------
+
+// An accepted position means the entity has resumed transmitting. If the
+// Alert Evaluator had opened a signal-loss episode (alert-state:{entity_id}
+// exists), that episode must close: recent-loss:{entity_id} preserves the
+// closed episode's identity for Phase 06 composite correlation, bounded by
+// windowMs so a proximity candidate arriving long after resume cannot still
+// correlate against a stale loss.
+//
+// HSET, PEXPIRE, and the alert-state DEL all run inside one MULTI/EXEC.
+// Redis applies queued commands sequentially with no other client able to
+// observe or act on an in-between state, so the logical order is still
+// "write recent-loss → attach TTL → remove active state" — but the whole
+// transition is now indivisible from any observer's point of view.
+// No conditional logic is involved here (unlike the Lua scripts elsewhere
+// in this file), so MULTI is the right primitive, not eval.
+//
+// This makes the crash boundary exactly two states instead of three:
+//   crash before EXEC reaches Redis  → none of the three commands ran;
+//                                       alert-state is untouched; safe retry
+//   EXEC reaches Redis               → all three ran; recent-loss has its
+//                                       TTL and alert-state is already gone
+// There is no window where EXEC succeeded but alert-state is still stale —
+// unlike a separate follow-up DEL, which could be skipped by a crash between
+// the two round-trips.
+//
+// windowMs defaults to the configured composite-correlation window; tests
+// pass a short value to prove real expiry without a long wait.
+export async function clearSignalLossEpisode(
+	entityId: string,
+	resumedAtMs: number,
+	windowMs: number = config.COMPOSITE_CORRELATION_WINDOW_MS,
+): Promise<void> {
+	const alertStateKey = `alert-state:${entityId}`;
+	const alertState = await redis.hgetall(alertStateKey);
+	if (!alertState || !alertState['dark_since_ms']) return;
+
+	const recentLossKey = `recent-loss:${entityId}`;
+	await redis
+		.multi()
+		.hset(
+			recentLossKey,
+			'dark_since_ms',
+			alertState['dark_since_ms'],
+			'resumed_at_ms',
+			String(resumedAtMs),
+			'signal_loss_alert_id',
+			alertState['signal_loss_alert_id'] ?? '',
+		)
+		.pexpire(recentLossKey, windowMs)
+		.del(alertStateKey)
+		.exec();
+
+	log('info', 'signal loss episode cleared', {
+		entity_id: entityId,
+		dark_since_ms: alertState['dark_since_ms'],
+		resumed_at_ms: resumedAtMs,
+		signal_loss_alert_id: alertState['signal_loss_alert_id'],
+	});
+}
+
 // ---- Downstream publishing -------------------------------------------------
 
 // Publish the canonical normalized position to position.normalized.
@@ -616,36 +677,8 @@ async function handleMessage(
 		await publishPositionUpdate(position, live_geo_cell);
 
 		// Step 7: clear signal-loss episode state if the entity was previously dark.
-		// An accepted position means the entity has resumed transmitting. If the
-		// Alert Evaluator emitted a SIGNAL_LOSS alert for this entity, the episode
-		// gate (alert-state:{entity_id}) must be cleared so a future silence can
-		// open a new episode with a new alert_id.
-		//
-		// recent-loss is written first so Phase 06 (composite correlation) can
-		// read the prior episode's dark_since_ms and signal_loss_alert_id.
-		// alert-state is deleted second. A crash between the two leaves both keys
-		// present; the next accepted position for this entity will complete the
-		// cleanup — recent-loss HSET is idempotent and DEL on a missing key is safe.
-		const alertStateKey = `alert-state:${position.entity_id}`;
-		const alertState = await redis.hgetall(alertStateKey);
-		if (alertState && alertState['dark_since_ms']) {
-			await redis.hset(
-				`recent-loss:${position.entity_id}`,
-				'dark_since_ms',
-				alertState['dark_since_ms'],
-				'resumed_at_ms',
-				String(position.timestamp_ms),
-				'signal_loss_alert_id',
-				alertState['signal_loss_alert_id'] ?? '',
-			);
-			await redis.del(alertStateKey);
-			log('info', 'signal loss episode cleared', {
-				entity_id: position.entity_id,
-				dark_since_ms: alertState['dark_since_ms'],
-				resumed_at_ms: position.timestamp_ms,
-				signal_loss_alert_id: alertState['signal_loss_alert_id'],
-			});
-		}
+		// See clearSignalLossEpisode for the atomicity and ordering rationale.
+		await clearSignalLossEpisode(position.entity_id, position.timestamp_ms);
 	} else {
 		// Stale event: a newer position for this entity is already in Redis.
 		// position_history still received the row (idempotent by observed_at),

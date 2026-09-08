@@ -37,6 +37,17 @@ export const config = {
 	// PostgreSQL connection pool maximum connections.
 	PG_POOL_MAX: requirePositiveInt('PG_POOL_MAX', process.env['PG_POOL_MAX'], 10),
 
+	// Bounded window (Phase 06 composite correlation): a proximity candidate
+	// arriving within this long of an entity's resume is still eligible to
+	// correlate against the signal-loss episode that just closed. This is the
+	// TTL applied to recent-loss:{entity_id} — same setting as Alert Evaluator's
+	// config, which reads (not writes) that key against this same window.
+	COMPOSITE_CORRELATION_WINDOW_MS: requirePositiveInt(
+		'COMPOSITE_CORRELATION_WINDOW_MS',
+		process.env['COMPOSITE_CORRELATION_WINDOW_MS'],
+		120_000,
+	),
+
 	// H3 resolution for position_history.geo_cell. ~252 km² per cell at resolution 5.
 	// Architectural constant — changing requires a data migration. Not env-configurable.
 	HISTORY_H3_RESOLUTION: 5,

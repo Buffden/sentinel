@@ -15,6 +15,7 @@ import {
 	writePositionHistory,
 	updateLiveState,
 	updateGeoCell,
+	clearSignalLossEpisode,
 } from './consumer.js';
 
 function buildPosition(overrides: Partial<NormalizedPosition> = {}): NormalizedPosition {
@@ -302,6 +303,68 @@ describe('consumer.ts idempotency and monotonicity (integration)', () => {
 			expect(members).toEqual([entityId]);
 			const score = await redis.zscore(`geo-cell:${cellA}`, entityId);
 			expect(score).toBe('1700000060000');
+		});
+	});
+
+	describe('clearSignalLossEpisode — atomic alert-state → recent-loss handoff', () => {
+		const entityId = `test-entity-${randomUUID()}`;
+		const alertStateKey = `alert-state:${entityId}`;
+		const recentLossKey = `recent-loss:${entityId}`;
+
+		afterEach(async () => {
+			await redis.del(alertStateKey, recentLossKey);
+		});
+
+		it('no-ops when there is no open signal-loss episode', async () => {
+			await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+
+			expect(await redis.exists(recentLossKey)).toBe(0);
+		});
+
+		it('converts an open episode into a TTL-bounded recent-loss and clears alert-state', async () => {
+			await redis.hset(
+				alertStateKey,
+				'dark_since_ms',
+				'1699999940000',
+				'signal_loss_alert_id',
+				`${entityId}:SIGNAL_LOSS:1699999940000`,
+				'composite_issued',
+				'0',
+			);
+
+			await clearSignalLossEpisode(entityId, 1_700_000_000_000, 60_000);
+
+			const recentLoss = await redis.hgetall(recentLossKey);
+			expect(recentLoss).toEqual({
+				dark_since_ms: '1699999940000',
+				resumed_at_ms: '1700000000000',
+				signal_loss_alert_id: `${entityId}:SIGNAL_LOSS:1699999940000`,
+			});
+
+			// Proves the TTL was attached in the same MULTI that made the key
+			// visible — not a separate, potentially-skipped follow-up call.
+			const ttlMs = await redis.pttl(recentLossKey);
+			expect(ttlMs).toBeGreaterThan(0);
+			expect(ttlMs).toBeLessThanOrEqual(60_000);
+
+			expect(await redis.exists(alertStateKey)).toBe(0);
+		});
+
+		it('recent-loss actually disappears from Redis once the window elapses', async () => {
+			await redis.hset(
+				alertStateKey,
+				'dark_since_ms',
+				'1700000000000',
+				'signal_loss_alert_id',
+				`${entityId}:SIGNAL_LOSS:1700000000000`,
+			);
+
+			await clearSignalLossEpisode(entityId, 1_700_000_005_000, 50); // 50ms window
+			expect(await redis.exists(recentLossKey)).toBe(1);
+
+			await new Promise((resolve) => setTimeout(resolve, 150));
+
+			expect(await redis.exists(recentLossKey)).toBe(0);
 		});
 	});
 });
