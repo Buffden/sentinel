@@ -6,6 +6,8 @@ Standardize observability across the complete system and verify behavior under f
 
 Observability has existed throughout earlier phases. This phase **completes and validates it system-wide**.
 
+**No mandatory feature-UI checkpoint.** Every other user-facing phase in this roadmap (07–09) must reach a dedicated frontend checkpoint before it's considered done, per `IMPLEMENTATION_WORKFLOW.md`'s vertical-slice rule — this phase is the explicit exception, because it adds no new operator-facing capability. Its own "vertical slice" is end-to-end diagnosability and failure evidence, not a UI: the exit criteria below already express that (the developer can diagnose the system from operational signals, not "an operator can click a new button").
+
 ## Observability Completion
 
 Standardize:
