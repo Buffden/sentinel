@@ -84,6 +84,13 @@ Later alert types reuse this serving path rather than redesigning it.
 
 Phase boundaries matter: final-state use-case diagrams may show features delivered in later phases. The current phase file determines what must be implemented now.
 
+**Vertical phases, horizontally decomposed correctness checkpoints.** These are different scopes, not competing rules:
+
+- An individual *checkpoint* may stay horizontally scoped — one service, one correctness concern (replay safety, concurrency, persistence, coordination) — exactly like Phase 06's CP1–CP3C, none of which touched a UI. That's the right shape for proving a distributed-systems guarantee in isolation.
+- A *phase* that changes what an operator can do is not complete until that capability is visible and usable in the dashboard. Backend-only completion is a checkpoint milestone inside the phase, not the phase's exit criterion.
+
+Concretely: a user-facing phase's checkpoints run backend correctness first (however many horizontally-scoped checkpoints that takes), then a dedicated frontend checkpoint, then an end-to-end verification checkpoint that exercises the capability *through the UI*, not just via API/DB inspection. Every checkpoint that changes operator-visible UI still goes through `CLAUDE.md`'s existing mockup → approval → implementation gate — this rule doesn't relax that, it just says a phase can't skip reaching the UI at all. Phase 10 (production hardening) is the one exception: its "vertical slice" is diagnosability and failure evidence, not new operator-facing functionality, so it carries no mandatory feature-UI checkpoint.
+
 ---
 
 ## Delivery and Idempotency Mental Model
