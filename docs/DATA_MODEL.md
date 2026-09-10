@@ -157,6 +157,8 @@ COMPOSITE
 
 These type-specific identities avoid collisions between two simultaneous pair incidents involving the same primary entity.
 
+`priority` mapping by `alert_type`: `SIGNAL_LOSS` and `UNSCHEDULED_PROXIMITY` are `STANDARD`. `COMPOSITE` is `ELEVATED`, reflecting US-06's intent that correlating a signal-loss episode with an unscheduled-proximity episode produces "one elevated incident," not two disconnected standard-priority signals. `ROUTE_DEVIATION` is not yet implemented; its priority is undecided.
+
 Lifecycle:
 
 - operator path: `NEW → ACKNOWLEDGED → RESOLVED`, with optional `NEW → RESOLVED`;
@@ -166,7 +168,86 @@ Lifecycle:
 
 When a COMPOSITE is persisted, the API atomically inserts it and marks referenced active individual alerts (`NEW` or `ACKNOWLEDGED`) `SUPERSEDED`. A resolved alert is not retroactively superseded.
 
-**Supersession must converge regardless of which message the API consumes first.** The Alert Evaluator's signal-loss scan writes `alert-state` to Redis before its own `SIGNAL_LOSS` Kafka publish completes, and the proximity-candidate consumer runs concurrently — it is possible for a `COMPOSITE` referencing a `SIGNAL_LOSS` `alert_id` to reach the API before that `SIGNAL_LOSS` message does (the producer has no idempotence guarantee on send-order). A plain `UPDATE ... WHERE alert_id = X` in that case affects zero rows, and the late-arriving `SIGNAL_LOSS` then persists as `NEW` forever — never superseded. Whichever order the two messages arrive in, the API must reach the identical durable state: the referenced alert row exists with `status = SUPERSEDED` and `superseded_by` set to the composite's `alert_id`. Design of the specific mechanism (e.g. an upsert/placeholder pattern) is Phase 06's Pre-CP5B — resolved before CP5B is implemented, not invented inline.
+**Supersession must converge regardless of which message the API consumes first.** The Alert Evaluator's signal-loss scan writes `alert-state` to Redis before its own `SIGNAL_LOSS` Kafka publish completes, and the proximity-candidate consumer runs concurrently: it is possible for a `COMPOSITE` referencing a `SIGNAL_LOSS` `alert_id` to reach the API before that `SIGNAL_LOSS` message does (the producer has no idempotence guarantee on send-order). A plain `UPDATE ... WHERE alert_id = X` in that case affects zero rows, and the late-arriving `SIGNAL_LOSS` would then persist as `NEW` forever, never superseded. Whichever order the two messages arrive in, the API must reach the identical durable state: the referenced alert row exists with `status = SUPERSEDED` and `superseded_by` set to the composite's `alert_id`. Resolved below (Pre-CP5B), before any CP5B code depends on it.
+
+### Pre-CP5B: composite supersession convergence protocol
+
+**a. A small additive table records a supersession that has to wait for its target to exist.** Placeholder rows were rejected: `alerts` has several `NOT NULL` canonical columns (`detected_at` chief among them) that a `COMPOSITE` message cannot honestly supply for the individual alert it references, `COMPOSITE`'s own `detected_at_ms` is a different processing-time event than the original alert's detection, and `SIGNAL_LOSS`'s own payload evidence (callsign, last-known position) isn't carried in `COMPOSITE`'s payload at all. A placeholder would either fabricate these or require a fragile conditional upsert to backfill them later, and if the real message never arrives, the fabricated row is wrong forever rather than simply absent. A cross-system (Redis) pending marker was also rejected: it can't share a transaction with the composite's own Postgres commit, so a crash between the two systems reopens the exact convergence bug this exists to close. The accepted design is one small, purely additive table, consulted only on the side that needs to wait:
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_alert_supersessions (
+    referenced_alert_id TEXT PRIMARY KEY,
+    composite_alert_id  TEXT NOT NULL REFERENCES alerts (alert_id),
+    created_at           TIMESTAMPTZ NOT NULL
+);
+```
+
+`referenced_alert_id` is deliberately not an FK (the row it names doesn't exist yet by definition); `composite_alert_id` is, and is always satisfiable, the composite row is inserted earlier in the same transaction that creates a pending entry referencing it.
+
+**b. A per-`alert_id` transaction-scoped advisory lock closes the race Postgres row-locking cannot.** Row-level locking only protects rows that exist; the out-of-order case is defined by the referenced row not existing yet, so `UPDATE` (0 rows) followed by a existence-check `SELECT` is not serialized against a concurrent transaction inserting that exact row in between, and can independently reach the same "doesn't exist yet" conclusion that's already stale by the time it's acted on. Every alert persisted, individual or composite, acquires `pg_advisory_xact_lock($namespace, hashtext($alert_id))` on its own `alert_id` before reading or writing anything about that id; a `COMPOSITE` message additionally acquires one per entry in `supersedes_alert_ids`, sorted, before touching any of them (the standard deadlock-avoidance rule for a transaction that takes more than one lock). The lock and every statement it protects run on one checked-out `pg.PoolClient`, never the bare pool, an advisory-transaction lock is scoped to the connection that took it. The lock releases automatically at `COMMIT`/`ROLLBACK`, no manual unlock, no leak on crash.
+
+```ts
+const ALERT_SUPERSESSION_LOCK_NAMESPACE = 1001; // reserves this int4 space; nothing else in the codebase uses pg_advisory_xact_lock today
+```
+
+**c. Transaction sequence, referenced alert already exists when `COMPOSITE` arrives:**
+
+```text
+BEGIN;
+  lock every referenced alert_id (sorted);
+  INSERT composite ON CONFLICT (alert_id) DO NOTHING RETURNING *;   -- capture row
+  UPDATE alerts SET status='SUPERSEDED', superseded_by=$composite_id, updated_at=now()
+    WHERE alert_id=$ref_id AND status IN ('NEW','ACKNOWLEDGED')
+    RETURNING *;                                                     -- capture row if matched
+  -- 0 rows: SELECT * FROM alerts WHERE alert_id=$ref_id; see (e) for what this branch does
+COMMIT;
+publish the captured composite row, then each captured referenced row;
+```
+
+**Transaction sequence, `COMPOSITE` arrives before the referenced alert exists:**
+
+```text
+BEGIN;
+  lock every referenced alert_id (sorted);
+  INSERT composite ON CONFLICT (alert_id) DO NOTHING RETURNING *;    -- capture row
+  UPDATE ... WHERE alert_id=$ref_id AND status IN ('NEW','ACKNOWLEDGED') RETURNING *;
+  -- 0 rows -> SELECT * FROM alerts WHERE alert_id=$ref_id;
+  --   absent -> conflict-aware pending upsert, see (e); nothing to publish for this id yet
+COMMIT;
+publish the captured composite row; publish any referenced rows already SUPERSEDED by it;
+
+-- the referenced alert, arriving later (possibly much later, or redelivered):
+BEGIN;
+  lock this alert_id;
+  DELETE FROM pending_alert_supersessions WHERE referenced_alert_id=$alert_id
+    RETURNING composite_alert_id;
+  -- row -> INSERT ... status='SUPERSEDED', superseded_by=$returned_composite_id ...
+  --   ON CONFLICT (alert_id) DO NOTHING RETURNING *;  (fallback SELECT on redelivery)
+  -- no row -> INSERT ... status='NEW' (the message's own status) ... RETURNING *;  (fallback SELECT)
+COMMIT;
+publish the captured row's actual persisted state, never the raw incoming Kafka bytes,
+  a pending-consumed row is SUPERSEDED, not the NEW the message carried;
+```
+
+**d. Post-commit publication republishes canonical current state on every delivery, never "what this attempt changed."** A `COMPOSITE` message can require multiple Redis publishes after one DB commit (the composite row, each referenced row it supersedes); if publish 1 succeeds and publish 2 throws, the Kafka offset never commits and the message redelivers, but the redelivered transaction is now idempotent by construction and may mutate nothing at all, so deriving "what to publish" from "what this attempt mutated" would silently drop the un-published event forever. Every row this message concerns is instead captured (via `RETURNING *`, or a plain `SELECT` when it already existed as-is) inside the transaction, before `COMMIT`, while its lock is still held; after commit, every captured row is published unconditionally, on every delivery attempt, whether or not that attempt itself changed anything. Duplicates are expected and already accepted (`DATA_MODEL.md`'s WebSocket contract requires idempotent-by-`alert_id` rendering); a lost lifecycle event is not.
+
+**e. Ownership conflicts are idempotent only when the existing owner matches; a different owner is an invariant failure, symmetrically at both the pending-row level and the row level.** Two different composites both claiming to supersede the same individual alert should be structurally impossible (a signal-loss episode can be claimed by at most one composite, per the Alert Evaluator's own claim protocol), so encountering it is an invariant violation, not a routine outcome, the same fail-closed posture as `CandidateDecisionConflictError`/`CompositeFinalizeInvariantError` upstream:
+
+```sql
+-- pending-row conflict:
+INSERT INTO pending_alert_supersessions (referenced_alert_id, composite_alert_id, created_at)
+VALUES ($1, $2, now())
+ON CONFLICT (referenced_alert_id) DO UPDATE
+  SET composite_alert_id = EXCLUDED.composite_alert_id
+  WHERE pending_alert_supersessions.composite_alert_id = EXCLUDED.composite_alert_id
+RETURNING referenced_alert_id;
+-- a row comes back: fresh insert, or a redelivery of the same composite (idempotent).
+-- no row comes back: a different composite_alert_id is already pending for this id, throw.
+```
+
+The same rule applies one step later, at the row itself: when the existence-check `SELECT` in (c) finds the referenced alert already `SUPERSEDED`, it must also compare `superseded_by`. Equal to this composite's own `alert_id`: idempotent replay, capture and publish as usual. Set to a *different* `alert_id`: the same invariant violation as the pending-row case, throw and roll back (releasing the locks) rather than silently leaving the earlier, conflicting supersession in place or overwriting it. `RESOLVED` rows are never subject to this check at all, they are excluded by the `UPDATE`'s own `WHERE status IN ('NEW','ACKNOWLEDGED')` and are never touched or published by composite processing, terminal per the existing lifecycle rule above.
+
+**f. CP5B guarantees durable DB convergence and replay-safe publication; it does not guarantee ordering between Redis publishes originating from different, separately committed API transactions.** A `SIGNAL_LOSS` message's own transaction commits and publishes independently of a later `COMPOSITE` message's transaction; the two publishes happen on their own schedules, and Redis pub/sub plus WebSocket delivery carry no cross-message ordering guarantee (`DATA_MODEL.md`'s existing at-least-once, duplicate-safe delivery model already accepts this for a single alert's own lifecycle, this extends it across two related alerts). A client can therefore observe a stale `NEW` event for the referenced alert arriving *after* it has already rendered that same alert as `SUPERSEDED`, if the two underlying transactions' publishes happen to interleave that way. **CP5C must make alert lifecycle merging monotonic**: a client-side merge that never lets a terminal or superseded status regress on top of an already-rendered later state, keyed by `alert_id` and comparing the incoming status against what's currently rendered, not simply "last write wins" by arrival order. `GET /alerts` (REST) remains the durable reconciliation source of truth; WebSocket delivery is a live, best-effort stream on top of it, not the thing a client should trust for absolute ordering.
 
 Indexes:
 
@@ -370,23 +451,76 @@ Fields:
   resumed_at_ms         (COMPOSITE only, RECENT source)
 ```
 
-Once a decision record exists for a `proximity.candidates` message, that message's processing **replays the recorded decision** rather than re-resolving CP2 against current (possibly changed) Redis state. Lifecycle: created before the Kafka publish it protects, deleted only after that message's own Kafka offset commits.
+Once a decision record exists for a `proximity.candidates` message, that message's processing **replays the recorded decision** rather than re-resolving CP2 against current (possibly changed) Redis state. Replaying a `COMPOSITE` decision is not just rebuilding and republishing the alert: it also calls FINALIZE for the decision's selected episode (idempotent if some earlier attempt already finalized it, required if it didn't), the same as a fresh `COMPOSITE` decision does. Lifecycle for CP5A: created before the Kafka publish it protects; **retained**, not deleted, after that message's own Kafka offset commits. See Pre-CP5A(d) for why immediate post-commit deletion was rejected and what CP5A does instead.
 
 ```text
-create decision -> publish output -> finalize claim -> commit input offset -> delete decision
+create decision -> publish output -> finalize claim -> commit input offset
+(no deletion step in CP5A's own runtime path, see Pre-CP5A(d))
 ```
 
-A crash before the offset commits leaves the decision record in place — replay-safe. A crash after the offset commits but before the delete leaves an orphaned decision record — a cleanup leak, not a correctness failure, since it is never consulted again once its owning message has been durably processed. **No TTL is set on this record.** `COMPOSITE_CORRELATION_WINDOW_MS` answers "how long can a *new* candidate correlate with this loss" — a fundamentally different lifetime than "how long must we remember a Kafka processing decision for redelivery," which must survive at least as long as the input offset can remain uncommitted. Tying the two together would silently reintroduce the decision-flip bug after any outage longer than the correlation window. A cleanup policy for orphaned records is deferred until this topic's actual `retention.ms` is an explicit, documented value — none is currently set.
+A crash before the offset commits leaves the decision record in place, replay-safe. Once the offset commits, CP5A leaves the record exactly where it is: it is never consulted again for this `candidate_id` under normal operation, but nothing in CP5A actively removes it either. Reclamation is a separate, deferred concern, not part of this checkpoint; see Pre-CP5A(d).
 
-**`readCandidateDecision`/`writeCandidateDecisionIfAbsent` implemented as of CP3C** — see [`candidate-decision-record`](implementation/phase-06-composite-correlation/concepts/candidate-decision-record/candidate-decision-record.md) for the write-once atomic create, real concurrent-conflicting-write proof, and why a conflict throws rather than silently overwriting. The lifecycle diagram above (`create decision -> ... -> delete decision`) is the accepted design; only the `delete decision` step is unbuilt — CP3C intentionally has no deletion logic, since correct deletion timing depends on the input-offset commit CP5A owns (at the candidate-consumer session boundary, not inside `handleProximityCandidate` itself).
+**`readCandidateDecision`/`writeCandidateDecisionIfAbsent` implemented as of CP3C**, see [`candidate-decision-record`](implementation/phase-06-composite-correlation/concepts/candidate-decision-record/candidate-decision-record.md) for the write-once atomic create, real concurrent-conflicting-write proof, and why a conflict throws rather than silently overwriting. Only wiring this into `handleProximityCandidate` is unbuilt; that is CP5A's job, resolved below. Deletion is explicitly out of CP5A's scope, not merely unbuilt, see Pre-CP5A(d).
+
+**Pre-CP5A resolutions** (design decided here, before CP5A's code depends on them; not yet implemented):
+
+**a. Any CLAIM failure decides `UNSCHEDULED_PROXIMITY`, with no fallback to the other pair member.** `claimCompositeEpisode` collapses three distinct Lua outcomes (`CLAIMED_BY_OTHER`, `ALREADY_ISSUED`, `NO_EPISODE`) into a single `false`, and all three are reachable here even though CP2 already confirmed eligibility, because CP2's read and CLAIM's atomic check are two separate Redis round trips: CP2 is a snapshot, not a lock. Whichever of the three reasons caused the failure, the outcome is the same: this candidate resolves as `UNSCHEDULED_PROXIMITY`. It does not retry against the non-selected pair member's episode, even if that episode independently qualifies. The deterministic tie-break already picked a single winner over a Redis snapshot, and re-deciding after losing a race would make the final correlation depend on concurrency timing rather than the accepted source-time tie-break. `claimCompositeEpisode` does not need to expose which of the three reasons applied; all three collapse to this identical outcome.
+
+**b. A `CandidateDecisionConflictError` reachable after this process's own CLAIM already mutated Redis must release that claim, then adopt and execute the canonical decision, never simply propagate.** This is reachable under the same leader-overlap ADR-005 already accepts (worked race below), not merely hypothetical. When `writeCandidateDecisionIfAbsent` throws, the caller must: (1) if it holds a live, unfinalized claim on some episode as a result of its own CP2 resolution, release it; (2) adopt `err.existing` (the canonical decision the error already carries) and process it exactly like the standard existing-decision replay path: build the alert from `err.existing`, publish, and if `err.existing.decision === 'COMPOSITE'`, **call FINALIZE for that decision's episode**, even though this process was not the one that originally wrote it. Claim and finalize ownership is keyed by `candidate_id`, not by which process instance calls the Lua: both processes racing here are handling the same Kafka message and therefore the same `candidate_id`, so FINALIZE is exactly as legitimate for the adopting process as it would have been for the original writer, idempotent either way if the original writer already finalized it too.
+
+Release is a new representation-independent Lua primitive, symmetric to CLAIM/FINALIZE, searching both `alert-state`/`recent-loss` the same way:
+
+```text
+RELEASE (Lua, atomic, best-effort cleanup after a lost decision race):
+  find the episode matching this expected dark_since_ms, same
+    representation-independent search as CLAIM/FINALIZE
+  if no matching episode is found -> nothing to release, treat as success
+  if composite_issued == '1' -> leave untouched, report (should not happen:
+    this candidate never reached FINALIZE on this episode)
+  if composite_claim_candidate_id != candidate_id -> leave untouched, report
+    (should not happen: this candidate is the one that placed this claim)
+  otherwise -> atomically clear composite_claim_candidate_id back to empty
+```
+
+All three preconditions (matching `dark_since_ms`, `composite_issued == '0'`, `composite_claim_candidate_id == candidate_id`) must hold before RELEASE clears anything; it never overwrites a claim it doesn't recognize as its own caller's. Its own result does not gate whether the caller proceeds to adopt `err.existing`: RELEASE is best-effort cleanup of this process's own stray state, not a precondition for convergence, so the caller adopts and processes `err.existing` regardless of what RELEASE reports, logging a warning if RELEASE did not actually clear anything.
+
+*Worked race* (replaces two earlier, invalid versions of this example: the first had a third candidate FINALIZE episode A before CLAIM(A) subsequently succeeded, and the second had a third candidate FINALIZE episode A after P1 already held A's claim; both are impossible, since CLAIM re-validates `composite_issued` in real time and a held claim fences every other `candidate_id` from ever completing a claim-to-finalize cycle against the same episode). This version needs no third candidate at all, only `recent-loss`'s own TTL:
+
+- P1 processes `candidate_id = X` while `recent-loss:A` still exists. CP2 selects A (the `RECENT`-source episode). P1 calls `CLAIM(A, X)`, which succeeds: nobody else is contesting A, so no other `candidate_id` is involved. P1 is then delayed, not crashed, before it reaches its own `writeCandidateDecisionIfAbsent` call: a GC pause, a slow Redis round trip, or exactly the kind of stall that causes a lease to be lost in the first place.
+- While P1 is delayed, `recent-loss:A`'s TTL elapses and the key expires.
+- P2 processes the same `candidate_id X` (redelivered during the leader-overlap window ADR-005 already accepts, while P1 is still alive and has not yet written anything). P2's CP2 resolution no longer finds A at all (the key is gone), so it resolves against whatever else qualifies: entity B (`CLAIM(B, X)` succeeds, nobody contests B either, giving `COMPOSITE/B`) or nothing (`UNSCHEDULED_PROXIMITY/X`).
+- P1 (still holding its live, unfinalized claim on A) now reaches its own write: `COMPOSITE/A`. Whichever of P1's `COMPOSITE/A` or P2's decision reaches `writeCandidateDecisionIfAbsent` second hits a genuine conflict: two different decisions for the same `candidate_id X`, neither one ever having attempted a second CLAIM on an already-issued episode.
+
+The loser here is always P1 in this construction (it is the one delayed), and it always holds a live, unfinalized claim on A (`alert-state:A`/`recent-loss:A`'s claim fields, or, having expired, possibly nothing left to release at all if the key vanished entirely before P1 ever attempts the release). Per (b), P1 must attempt to release its claim on A regardless (the release primitive is a no-op if the key is already gone) before adopting whichever decision won, and must FINALIZE that adopted decision if it is `COMPOSITE`.
+
+**c. FINALIZE's `NO_EPISODE` outcome is representation-independent, not limited to decisions recorded as `RECENT`.** A decision frozen with `loss_source='ACTIVE'` (`resumed_at_ms=null`) at write time can still resolve to `NO_EPISODE` at FINALIZE time: the entity can resume between decision-write and FINALIZE, CP3A's atomic handoff moves the claim from `alert-state` to `recent-loss` (preserving `composite_claim_candidate_id`/`composite_issued`/`dark_since_ms` byte for byte), and if FINALIZE is delayed long enough after that handoff (a crash-and-redelivery gap exceeding `recent-loss`'s TTL), the key can expire before FINALIZE ever runs. What matters for `NO_EPISODE` is the representation FINALIZE actually finds *at call time* (searching both `alert-state` and `recent-loss`, exactly as CLAIM already does), never the `loss_source` frozen in the decision record, which only describes the representation true *at decision-write time*.
+
+FINALIZE's caller must handle its three outcomes differently, not collapse them to `boolean`:
+
+```text
+FINALIZE SUCCESS      -> proceed normally
+FINALIZE NO_EPISODE   -> log a warning; still safe to commit. The key is gone
+                          entirely, so no other candidate can reuse or corrupt
+                          it either; the alert already published stands as the
+                          only evidence.
+FINALIZE NOT_CLAIMED  -> invariant violation; throw, do not commit. The episode
+                          still exists but ownership no longer matches this
+                          candidate_id, so silently proceeding risks permitting
+                          a second composite over the same episode.
+```
+
+**d. Immediate post-commit deletion is not safe under the leader-overlap ADR-005 already accepts, and a TTL does not fix it if the key is still deleted explicitly.** Consider: P1 and P2 both read decision `X` as absent (the same overlap as the worked race above). P1 races ahead through write, publish, finalize, commit, and *deletes* decision `X`. P2, already in flight and merely slower (not crashed, not stale, just behind), reaches its own `writeCandidateDecisionIfAbsent(X, ...)` call *after* P1's delete. `writeCandidateDecisionIfAbsent`'s Lua checks `EXISTS` first: if the key is genuinely gone, P2's write is treated as a fresh creation, not a redelivery replay and not a conflict, since there is nothing left to compare against. If P2's independently-computed decision differs from P1's (exactly the divergence in the worked race above), P2 proceeds to build and publish a second, differently-identified alert for the same encounter: the exact double-alert corruption this whole mechanism exists to prevent, now reachable through premature deletion rather than through Kafka redelivery. An earlier draft of this resolution tried to fix this with a TTL while still deleting the key immediately after commit in the common case; that does not work. A TTL only helps if the key is still *present* for P2 to find; explicitly deleting it the moment P1 commits removes it immediately regardless of what TTL was set, so "best-effort delete, TTL as backstop" gives zero actual protection whenever the delete succeeds, which is the common case, not the rare one.
+
+**CP5A's actual resolution: do not delete `alert-decision:*` records at all, and do not add a TTL either.** Once an offset commits, CP5A leaves the record in place, permanently, for this checkpoint. This keeps the fix entirely within CP5A's own scope (Alert Evaluator only) and avoids a second, half-solved dependency: introducing a TTL whose correctness would depend on `proximity.candidates`' own topic `retention.ms`, which is not currently an explicit, documented value, and which Kafka enforces at the segment level rather than as an exact per-record expiry, meaning any TTL derived from it today would be a guess dressed up as a bound. The accepted trade-off for CP5A is that `alert-decision:*` keys accumulate in Redis without bound over the service's lifetime, one per `proximity.candidates` message ever processed. That is a known, deliberate limitation of this checkpoint, not an oversight: reclaiming these records safely is deferred to a later checkpoint (GC or production-hardening scope), once `proximity.candidates` has an explicit, documented retention/replay contract this record's own lifetime can be soundly bounded against. `deleteCandidateDecision` is not part of CP5A's implementation surface.
 
 **Invariants established by this protocol:**
 
 1. One loss episode can be claimed by at most one canonical proximity candidate (`{pair_key}:{episode_start_ms}`), never a bare `pair_key`. **Implemented (CP3B)** — proven with real concurrent different-candidate claims against Redis; exactly one wins.
 2. A candidate's alert-type decision is sticky across Kafka redelivery, in both directions (COMPOSITE cannot flip to UNSCHEDULED_PROXIMITY or vice versa on replay). **Implemented (CP3C)** — the write-once record and its conflict detection exist and are tested; not yet wired into the redelivery path itself, since nothing calls `handleProximityCandidate` with this logic yet (CP5A).
 3. The `alert-state` → `recent-loss` handoff preserves claim/finalize state atomically — a single Lua transfer, not a read-then-`MULTI`-write. **Implemented (CP3A).**
-4. `recent-loss`'s TTL governs eligibility retention, never Kafka replay memory — **implemented**: CLAIM, FINALIZE, and the decision record never touch any TTL. The decision record's *deletion*, tied to input-offset commit, is **not yet implemented** — CP3C intentionally stops at write-once creation; deletion timing is CP5A's responsibility once it owns the offset-commit boundary.
+4. `recent-loss`'s TTL governs eligibility retention, never Kafka replay memory. **Implemented**: CLAIM and FINALIZE never touch any TTL, and neither does the decision record itself. For CP5A, the decision record is never deleted and carries no TTL, it is retained indefinitely once written, and reclaiming it is explicitly out of scope until `proximity.candidates` has a documented retention/replay contract (Pre-CP5A(d)).
 5. The same candidate may resume its own pending claim; a different candidate may never steal it. **Implemented (CP3B)** — proven directly: the winning candidate's own retry succeeds, a losing candidate's finalize attempt fails.
+6. Any CLAIM failure resolves the candidate as `UNSCHEDULED_PROXIMITY`, never a retry against the other pair member (Pre-CP5A(a)); a decision-write conflict after a successful CLAIM releases that claim and adopts the canonical decision, finalizing it if `COMPOSITE` (Pre-CP5A(b)); FINALIZE's `NO_EPISODE`/`NOT_CLAIMED` outcomes are handled differently, not collapsed to `boolean` (Pre-CP5A(c)); decision records are retained indefinitely after commit, never deleted, in CP5A, reclamation deferred until `proximity.candidates` has an explicit retention contract (Pre-CP5A(d)). **Design decided (Pre-CP5A); not yet implemented.**
 
 ### `deviation-state:{entity_id}` — hash
 

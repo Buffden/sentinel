@@ -11,6 +11,14 @@ import { defineConfig } from 'vitest/config';
 // reliably reaches the real local services regardless.
 export default defineConfig({
 	test: {
+		// Integration files share one real Redis instance and its alert-events/
+		// position-updates channels. Vitest's default file parallelism lets
+		// wsServer's own tests (asserting "no message arrives in this window")
+		// observe an unrelated publish from alertSink's tests running
+		// concurrently in another worker, a cross-file interference, not a
+		// logic bug in either file. Files still run in isolated module
+		// registries; only the across-file concurrency is removed.
+		fileParallelism: false,
 		env: {
 			JWT_SECRET: 'test-secret-not-for-production',
 			PG_URL: 'postgresql://sentinel:sentinel-dev@localhost:5433/sentinel',

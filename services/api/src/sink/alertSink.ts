@@ -1,10 +1,14 @@
-import { Kafka } from 'kafkajs';
-import { pool } from '../db.js';
+import { Kafka, type Consumer } from 'kafkajs';
 import { redis } from '../redis.js';
 import { config } from '../config.js';
+import {
+	persistCompositeAlert,
+	persistIndividualAlert,
+	validateSupersedesAlertIds,
+	type PublishedAlert,
+} from './compositeSupersession.js';
 
 const kafka = new Kafka({ brokers: config.KAFKA_BROKERS });
-const consumer = kafka.consumer({ groupId: config.API_GROUP_ID });
 
 export interface AlertMessage {
 	alert_id: string;
@@ -18,37 +22,38 @@ export interface AlertMessage {
 	payload: Record<string, unknown>;
 }
 
-// Idempotent persistence + WebSocket fan-out publish for one alert.
-// ON CONFLICT (alert_id) DO NOTHING: the Alert Evaluator computes a
-// deterministic, type-specific alert_id per episode — this is the durable
-// backstop that makes a redelivered or independently re-detected alert for
-// the same episode a no-op instead of a duplicate row.
+// Idempotent DB persistence for one alert. ON CONFLICT (alert_id) DO
+// NOTHING: the Alert Evaluator computes a deterministic, type-specific
+// alert_id per episode, this is the durable backstop that makes a
+// redelivered or independently re-detected alert for the same episode a
+// no-op instead of a duplicate row.
 //
-// raw is republished verbatim (not re-serialized from `alert`) so WebSocket
-// subscribers see exactly the bytes the Alert Evaluator produced.
-export async function persistAlert(alert: AlertMessage, raw: string): Promise<void> {
-	await pool.query(
-		`INSERT INTO alerts
-			 (alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-		 ON CONFLICT (alert_id) DO NOTHING`,
-		[
-			alert.alert_id,
-			alert.entity_id,
-			alert.counterparty_entity_id ?? null,
-			alert.entity_type,
-			alert.alert_type,
-			alert.priority,
-			alert.status,
-			JSON.stringify(alert.payload),
-			new Date(alert.detected_at_ms),
-		],
-	);
-
-	await redis.publish(config.ALERT_EVENTS_CHANNEL, raw);
+// Returns the canonical current state of every row this message concerns
+// (itself, plus every alert a COMPOSITE actually supersedes), for the
+// caller to publish after commit. Never returns "what changed this call",
+// a COMPOSITE redelivery whose DB work is now entirely a no-op still
+// returns the same rows, so the caller can always republish them, closing
+// the gap where a prior delivery's later publish attempt failed after an
+// earlier one succeeded (DATA_MODEL.md's Pre-CP5B(d)).
+export async function persistAlert(alert: AlertMessage): Promise<PublishedAlert[]> {
+	if (alert.alert_type === 'COMPOSITE') {
+		return persistCompositeAlert(alert);
+	}
+	const published = await persistIndividualAlert(alert);
+	return [published];
 }
 
-export async function startAlertSink(): Promise<void> {
+export interface AlertSinkSession {
+	consumer: Consumer;
+	stop: () => Promise<void>;
+}
+
+// groupId defaults to the production group; tests pass a disposable one so
+// they never join the real alert-events consumer group.
+export async function startAlertSink(
+	groupId: string = config.API_GROUP_ID,
+): Promise<AlertSinkSession> {
+	const consumer = kafka.consumer({ groupId });
 	await consumer.connect();
 	await consumer.subscribe({ topic: config.ALERTS_TOPIC, fromBeginning: false });
 	console.log(
@@ -57,7 +62,7 @@ export async function startAlertSink(): Promise<void> {
 			msg: 'alert sink consumer started',
 			brokers: config.KAFKA_BROKERS,
 			topic: config.ALERTS_TOPIC,
-			group: config.API_GROUP_ID,
+			group: groupId,
 		}),
 	);
 
@@ -105,10 +110,44 @@ export async function startAlertSink(): Promise<void> {
 				return;
 			}
 
-			// Steps 1-2: persist idempotently, then publish for WebSocket fan-out (CP6).
-			await persistAlert(alert, raw);
+			// COMPOSITE has its own required contract on top of the generic
+			// fields above: supersedes_alert_ids must be an array of at least
+			// one non-empty string. A message that fails this can never become
+			// valid on retry, same policy as the generic checks above, log,
+			// skip, commit the offset.
+			if (alert.alert_type === 'COMPOSITE') {
+				const supersedesError = validateSupersedesAlertIds(alert.payload);
+				if (supersedesError) {
+					console.error(
+						JSON.stringify({
+							level: 'error',
+							msg: `COMPOSITE validation failed: ${supersedesError}`,
+							alert_id: alert.alert_id,
+							raw,
+						}),
+					);
+					await consumer.commitOffsets([
+						{ topic, partition, offset: String(Number(message.offset) + 1) },
+					]);
+					return;
+				}
+			}
 
-			// Step 3: commit offset — last, so a crash before here causes safe redeliver.
+			// Persist idempotently first. The returned rows are this message's
+			// canonical current state, not merely what this call happened to
+			// mutate, so publishing them below is safe to redo on every
+			// redelivery even when this attempt's own DB work was a no-op.
+			const publishedAlerts = await persistAlert(alert);
+
+			// Publish every row after commit, unconditionally, one at a time.
+			// If any publish throws, the offset below is never reached, so
+			// Kafka redelivers and every one of these publishes is retried,
+			// not only whichever one failed (DATA_MODEL.md's Pre-CP5B(d)).
+			for (const publishedAlert of publishedAlerts) {
+				await redis.publish(config.ALERT_EVENTS_CHANNEL, JSON.stringify(publishedAlert));
+			}
+
+			// Commit offset last, so a crash or publish failure before here causes safe redelivery.
 			await consumer.commitOffsets([
 				{ topic, partition, offset: String(Number(message.offset) + 1) },
 			]);
@@ -123,4 +162,11 @@ export async function startAlertSink(): Promise<void> {
 			);
 		},
 	});
+
+	let stopPromise: Promise<void> | null = null;
+	const stop = (): Promise<void> => {
+		if (!stopPromise) stopPromise = consumer.disconnect();
+		return stopPromise;
+	};
+	return { consumer, stop };
 }

@@ -6,6 +6,7 @@
 // handleProximityCandidate and actually claiming/emitting a COMPOSITE are
 // later checkpoints.
 import type { Redis } from 'ioredis';
+import type { ProximityCandidateMessage } from './evaluator.js';
 
 export type LossEpisodeSource = 'ACTIVE' | 'RECENT';
 
@@ -250,6 +251,35 @@ export async function claimCompositeEpisode(
 	return result[0] === 1;
 }
 
+// The caller has to handle these three outcomes differently, not collapse
+// them to a boolean. SUCCESS proceeds normally. NO_EPISODE is safe to
+// log and continue: the key is gone entirely (this is representation
+// independent, so it can happen even for a decision originally recorded
+// ACTIVE, if the entity resumed and recent-loss's TTL elapsed before
+// FINALIZE ran), so no other candidate can reuse or corrupt it either; the
+// alert already published stands as the only evidence. NOT_CLAIMED means
+// the episode still exists but ownership no longer matches this
+// candidate_id, an invariant violation, so the caller throws rather than
+// commits, since silently proceeding risks permitting a second composite
+// over the same episode.
+export type FinalizeResult = 'SUCCESS' | 'NO_EPISODE' | 'NOT_CLAIMED';
+
+// Thrown by the caller (not by this function) when FINALIZE returns
+// NOT_CLAIMED. Defined here since it names this module's own invariant.
+export class CompositeFinalizeInvariantError extends Error {
+	constructor(
+		public readonly entityId: string,
+		public readonly expectedDarkSinceMs: number,
+		public readonly candidateId: string,
+	) {
+		super(
+			`FINALIZE invariant violation: candidate ${candidateId} does not hold the claim on ` +
+				`entity ${entityId}'s episode (dark_since_ms=${expectedDarkSinceMs}) at finalize time`,
+		);
+		this.name = 'CompositeFinalizeInvariantError';
+	}
+}
+
 // Marks a claimed episode composite_issued=1, only for the candidate that
 // already holds the claim. See the module-level comment above for why this
 // is idempotent for that same candidate and representation-independent.
@@ -258,9 +288,79 @@ export async function finalizeCompositeEpisode(
 	entityId: string,
 	expectedDarkSinceMs: number,
 	candidateId: string,
-): Promise<boolean> {
+): Promise<FinalizeResult> {
 	const result = (await redis.eval(
 		FINALIZE_COMPOSITE_EPISODE_LUA,
+		2,
+		`alert-state:${entityId}`,
+		`recent-loss:${entityId}`,
+		String(expectedDarkSinceMs),
+		candidateId,
+	)) as [number, string];
+	return result[1] as FinalizeResult;
+}
+
+// Composite episode claim release
+//
+// Best-effort cleanup for a stray claim discovered after this candidate_id
+// lost a decision-write conflict: this process's own eligibility resolution
+// won a CLAIM on some episode, but a differently-decided candidate for the
+// same candidate_id reached writeCandidateDecisionIfAbsent first. Symmetric
+// to CLAIM/FINALIZE, same representation-independent search across
+// alert-state/recent-loss, same candidate_id-keyed ownership check.
+//
+// All three preconditions must hold before this clears anything:
+// dark_since_ms still matches the episode this process actually claimed,
+// composite_issued is still '0' (never finalized; if it were, releasing
+// would corrupt a real, already-issued composite's claim bookkeeping), and
+// composite_claim_candidate_id still equals candidateId (never overwrite a
+// claim this process does not recognize as its own). A missing episode
+// that already expired is treated as nothing to release, not a failure.
+//
+// The caller does not gate on this function's result: adopting the
+// canonical decision proceeds regardless of whether release actually
+// cleared anything, since release is cleanup of this process's own stray
+// state, not a precondition for convergence.
+const RELEASE_COMPOSITE_CLAIM_LUA = `
+local function find_match(key)
+	local dark_since_ms = redis.call('HGET', key, 'dark_since_ms')
+	if dark_since_ms == ARGV[1] then
+		return key
+	end
+	return nil
+end
+local matched_key = find_match(KEYS[1])
+if not matched_key then
+	matched_key = find_match(KEYS[2])
+end
+if not matched_key then
+	return {1, 'NO_EPISODE'}
+end
+if redis.call('HGET', matched_key, 'composite_issued') == '1' then
+	return {0, 'ALREADY_ISSUED'}
+end
+local claim = redis.call('HGET', matched_key, 'composite_claim_candidate_id')
+if claim ~= ARGV[2] then
+	return {0, 'NOT_CLAIMED'}
+end
+redis.call('HSET', matched_key, 'composite_claim_candidate_id', '')
+return {1, 'RELEASED'}
+`;
+
+// Returns true when the claim was actually released or there was nothing to
+// release (the episode already expired). Returns false when the episode
+// exists but this candidateId does not recognize it as a claim it can
+// safely clear (ALREADY_ISSUED or NOT_CLAIMED). Neither should happen in
+// the flow this exists for, but both are reported rather than silently
+// overwritten.
+export async function releaseCompositeClaim(
+	redis: Redis,
+	entityId: string,
+	expectedDarkSinceMs: number,
+	candidateId: string,
+): Promise<boolean> {
+	const result = (await redis.eval(
+		RELEASE_COMPOSITE_CLAIM_LUA,
 		2,
 		`alert-state:${entityId}`,
 		`recent-loss:${entityId}`,
@@ -491,4 +591,112 @@ export async function writeCandidateDecisionIfAbsent(
 
 	if (success === 1) return stored;
 	throw new CandidateDecisionConflictError(decision, stored);
+}
+
+// Composite alert builder
+// Pure: no Redis, no Kafka, no config, no clock. Every operational field
+// (entityType, detectedAtMs, correlationWindowMs) is a caller-supplied
+// argument rather than read internally, so "same inputs -> same output"
+// holds for the function itself; it does not depend on this process's
+// config or wall clock. Determinism of the eventual Kafka message
+// additionally depends on the caller passing a stable detectedAtMs and
+// correlationWindowMs across a redelivery, which is the caller's own
+// responsibility, not this function's.
+//
+// DATA_MODEL.md specifies COMPOSITE's payload as "nested signal-loss +
+// proximity evidence", taken literally as two distinct sub-objects, not
+// flattened, even though UNSCHEDULED_PROXIMITY's payload happens to be flat.
+
+export interface CompositeAlertPayload {
+	signal_loss: {
+		dark_since_ms: number;
+		loss_source: LossEpisodeSource;
+		resumed_at_ms: number | null;
+		signal_loss_alert_id: string;
+	};
+	proximity: {
+		pair_key: string;
+		entity_a_id: string;
+		entity_b_id: string;
+		lat: number;
+		lon: number;
+		distance_metres: number;
+		episode_start_ms: number;
+	};
+	correlation_window_ms: number;
+	supersedes_alert_ids: string[];
+}
+
+export interface CompositeAlert {
+	alert_id: string;
+	entity_id: string;
+	counterparty_entity_id: string;
+	entity_type: string;
+	alert_type: 'COMPOSITE';
+	priority: 'ELEVATED';
+	status: 'NEW';
+	detected_at_ms: number;
+	payload: CompositeAlertPayload;
+}
+
+// decision.selected_entity_id is the primary entity_id: it is the pair
+// member whose signal-loss episode this composite is anchored to; the other
+// pair member becomes counterparty_entity_id. Throws rather than guessing if
+// selected_entity_id matches neither candidate pair member, since that can
+// only mean the decision record and the candidate message do not actually
+// describe the same encounter, an invariant violation this function must
+// not silently paper over (same fail-closed posture as
+// CandidateDecisionConflictError above).
+export function buildCompositeAlert(
+	decision: CompositeCandidateDecision,
+	candidate: ProximityCandidateMessage,
+	entityType: string,
+	detectedAtMs: number,
+	correlationWindowMs: number,
+): CompositeAlert {
+	let counterpartyEntityId: string;
+	if (decision.selected_entity_id === candidate.entity_a_id) {
+		counterpartyEntityId = candidate.entity_b_id;
+	} else if (decision.selected_entity_id === candidate.entity_b_id) {
+		counterpartyEntityId = candidate.entity_a_id;
+	} else {
+		throw new Error(
+			`composite decision entity ${decision.selected_entity_id} is not a member of ` +
+				`candidate pair ${candidate.pair_key}`,
+		);
+	}
+
+	return {
+		alert_id: `${candidate.pair_key}:COMPOSITE:${decision.dark_since_ms}`,
+		entity_id: decision.selected_entity_id,
+		counterparty_entity_id: counterpartyEntityId,
+		entity_type: entityType,
+		alert_type: 'COMPOSITE',
+		// ELEVATED, not STANDARD: per DATA_MODEL.md's priority-by-alert_type
+		// mapping, COMPOSITE is the one case where correlated evidence is
+		// meant to read as a single elevated incident (US-06), not a
+		// disconnected standard-priority signal.
+		priority: 'ELEVATED',
+		status: 'NEW',
+		detected_at_ms: detectedAtMs,
+		payload: {
+			signal_loss: {
+				dark_since_ms: decision.dark_since_ms,
+				loss_source: decision.loss_source,
+				resumed_at_ms: decision.resumed_at_ms,
+				signal_loss_alert_id: decision.signal_loss_alert_id,
+			},
+			proximity: {
+				pair_key: candidate.pair_key,
+				entity_a_id: candidate.entity_a_id,
+				entity_b_id: candidate.entity_b_id,
+				lat: candidate.lat,
+				lon: candidate.lon,
+				distance_metres: candidate.distance_at_detection,
+				episode_start_ms: candidate.episode_start_ms,
+			},
+			correlation_window_ms: correlationWindowMs,
+			supersedes_alert_ids: [decision.signal_loss_alert_id],
+		},
+	};
 }
