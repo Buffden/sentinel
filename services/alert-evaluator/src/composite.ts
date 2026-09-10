@@ -251,21 +251,21 @@ export async function claimCompositeEpisode(
 	return result[0] === 1;
 }
 
-// Pre-CP5A(c): the caller must handle these three outcomes differently, not
-// collapse them to a boolean. SUCCESS proceeds normally. NO_EPISODE is safe
-// to log-and-continue: the key is gone entirely (representation-independent
-// -- reachable for a decision originally recorded ACTIVE too, if the entity
-// resumed and recent-loss's TTL elapsed before FINALIZE ran), so no other
-// candidate can reuse or corrupt it either; the alert already published
-// stands as the only evidence. NOT_CLAIMED is an invariant violation: the
-// episode still exists but ownership no longer matches this candidate_id,
-// so the caller must throw rather than commit, since silently proceeding
-// risks permitting a second composite over the same episode.
+// The caller has to handle these three outcomes differently, not collapse
+// them to a boolean. SUCCESS proceeds normally. NO_EPISODE is safe to
+// log and continue: the key is gone entirely (this is representation
+// independent, so it can happen even for a decision originally recorded
+// ACTIVE, if the entity resumed and recent-loss's TTL elapsed before
+// FINALIZE ran), so no other candidate can reuse or corrupt it either; the
+// alert already published stands as the only evidence. NOT_CLAIMED means
+// the episode still exists but ownership no longer matches this
+// candidate_id, an invariant violation, so the caller throws rather than
+// commits, since silently proceeding risks permitting a second composite
+// over the same episode.
 export type FinalizeResult = 'SUCCESS' | 'NO_EPISODE' | 'NOT_CLAIMED';
 
 // Thrown by the caller (not by this function) when FINALIZE returns
-// NOT_CLAIMED -- see the FinalizeResult contract above. Defined here since
-// it names this module's own invariant.
+// NOT_CLAIMED. Defined here since it names this module's own invariant.
 export class CompositeFinalizeInvariantError extends Error {
 	constructor(
 		public readonly entityId: string,
@@ -300,27 +300,27 @@ export async function finalizeCompositeEpisode(
 	return result[1] as FinalizeResult;
 }
 
-// ---- Composite episode claim release (Pre-CP5A(b)) --------------------------
+// Composite episode claim release
 //
 // Best-effort cleanup for a stray claim discovered after this candidate_id
-// lost a decision-write conflict: this process's own CP2 resolution won a
-// CLAIM on some episode, but a differently-decided candidate for the same
-// candidate_id reached writeCandidateDecisionIfAbsent first. Symmetric to
-// CLAIM/FINALIZE -- same representation-independent search across
+// lost a decision-write conflict: this process's own eligibility resolution
+// won a CLAIM on some episode, but a differently-decided candidate for the
+// same candidate_id reached writeCandidateDecisionIfAbsent first. Symmetric
+// to CLAIM/FINALIZE, same representation-independent search across
 // alert-state/recent-loss, same candidate_id-keyed ownership check.
 //
 // All three preconditions must hold before this clears anything:
-// dark_since_ms still matches (the episode this process actually claimed),
-// composite_issued is still '0' (never finalized -- if it were, releasing
+// dark_since_ms still matches the episode this process actually claimed,
+// composite_issued is still '0' (never finalized; if it were, releasing
 // would corrupt a real, already-issued composite's claim bookkeeping), and
 // composite_claim_candidate_id still equals candidateId (never overwrite a
 // claim this process does not recognize as its own). A missing episode
-// (already expired) is treated as nothing-to-release, not a failure.
+// that already expired is treated as nothing to release, not a failure.
 //
 // The caller does not gate on this function's result: adopting the
-// canonical decision (Pre-CP5A(b)) proceeds regardless of whether release
-// actually cleared anything, since release is cleanup of this process's own
-// stray state, not a precondition for convergence.
+// canonical decision proceeds regardless of whether release actually
+// cleared anything, since release is cleanup of this process's own stray
+// state, not a precondition for convergence.
 const RELEASE_COMPOSITE_CLAIM_LUA = `
 local function find_match(key)
 	local dark_since_ms = redis.call('HGET', key, 'dark_since_ms')
@@ -348,10 +348,11 @@ return {1, 'RELEASED'}
 `;
 
 // Returns true when the claim was actually released or there was nothing to
-// release (the episode already expired); false when the episode exists but
-// this candidateId does not recognize it as a claim it can safely clear
-// (ALREADY_ISSUED or NOT_CLAIMED -- both should not happen in the flow this
-// exists for, but are reported, never silently overwritten).
+// release (the episode already expired). Returns false when the episode
+// exists but this candidateId does not recognize it as a claim it can
+// safely clear (ALREADY_ISSUED or NOT_CLAIMED). Neither should happen in
+// the flow this exists for, but both are reported rather than silently
+// overwritten.
 export async function releaseCompositeClaim(
 	redis: Redis,
 	entityId: string,
@@ -595,15 +596,15 @@ export async function writeCandidateDecisionIfAbsent(
 // Composite alert builder
 // Pure: no Redis, no Kafka, no config, no clock. Every operational field
 // (entityType, detectedAtMs, correlationWindowMs) is a caller-supplied
-// argument rather than read internally, so "same inputs -> same output" holds
-// for the function itself -- it does not depend on this process's config or
-// wall clock. Determinism of the eventual Kafka message additionally depends
-// on the caller (CP5A) passing a stable detectedAtMs and correlationWindowMs
-// across a redelivery, which is that checkpoint's responsibility, not this
-// function's.
+// argument rather than read internally, so "same inputs -> same output"
+// holds for the function itself; it does not depend on this process's
+// config or wall clock. Determinism of the eventual Kafka message
+// additionally depends on the caller passing a stable detectedAtMs and
+// correlationWindowMs across a redelivery, which is the caller's own
+// responsibility, not this function's.
 //
 // DATA_MODEL.md specifies COMPOSITE's payload as "nested signal-loss +
-// proximity evidence" -- taken literally as two distinct sub-objects, not
+// proximity evidence", taken literally as two distinct sub-objects, not
 // flattened, even though UNSCHEDULED_PROXIMITY's payload happens to be flat.
 
 export interface CompositeAlertPayload {
@@ -638,13 +639,14 @@ export interface CompositeAlert {
 	payload: CompositeAlertPayload;
 }
 
-// decision.selected_entity_id is the primary entity_id -- it is the pair
+// decision.selected_entity_id is the primary entity_id: it is the pair
 // member whose signal-loss episode this composite is anchored to; the other
 // pair member becomes counterparty_entity_id. Throws rather than guessing if
-// selected_entity_id matches neither candidate pair member: that can only
-// mean the decision record and the candidate message do not actually
-// describe the same encounter, an invariant violation this function must not
-// silently paper over (same fail-closed posture as CandidateDecisionConflictError above).
+// selected_entity_id matches neither candidate pair member, since that can
+// only mean the decision record and the candidate message do not actually
+// describe the same encounter, an invariant violation this function must
+// not silently paper over (same fail-closed posture as
+// CandidateDecisionConflictError above).
 export function buildCompositeAlert(
 	decision: CompositeCandidateDecision,
 	candidate: ProximityCandidateMessage,

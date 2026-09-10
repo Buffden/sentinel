@@ -198,8 +198,8 @@ function parseProximityCandidate(rawValue: string): ProximityCandidateMessage | 
 }
 
 // proximity.candidates already means "exact proximity confirmed, new
-// episode, no KNOWN_ASSOCIATE relationship" -- the Correlation Worker did
-// that work before publishing, so this does not repeat a Neo4j check.
+// episode, no KNOWN_ASSOCIATE relationship", since the Correlation Worker
+// did that work before publishing, so this does not repeat a Neo4j check.
 //
 // entity_a_id is always canonicalized (lexicographically smaller) by the
 // Correlation Worker, so UNSCHEDULED_PROXIMITY's primary/counterparty
@@ -211,8 +211,8 @@ async function publishUnscheduledProximityAlert(
 ): Promise<void> {
 	const alertId = `${candidate.pair_key}:UNSCHEDULED_PROXIMITY:${candidate.episode_start_ms}`;
 
-	// entity_type isn't on the candidate message -- entity:live:* is the one
-	// place last-known entity facts live. Default to '' (never null) to
+	// entity_type isn't on the candidate message, so entity:live:* is the
+	// one place last-known entity facts live. Default to '' (never null) to
 	// match the alerts table's NOT NULL entity_type column.
 	const entityType =
 		(await redis.hget(`entity:live:${candidate.entity_a_id}`, 'entity_type')) ?? '';
@@ -248,12 +248,12 @@ async function publishUnscheduledProximityAlert(
 }
 
 // DATA_MODEL.md's composite claim and decision protocol: builds and
-// publishes via CP4's buildCompositeAlert (entityType/detectedAtMs/
+// publishes via buildCompositeAlert (entityType/detectedAtMs/
 // correlationWindowMs supplied here, not read inside the pure builder),
 // then FINALIZEs the decision's own episode. Called for a fresh COMPOSITE
 // decision, an existing-decision replay, and a post-conflict adopted
-// decision alike -- FINALIZE must run in all three cases, idempotent if an
-// earlier attempt already reached it (CP3B).
+// decision alike; FINALIZE must run in all three cases, idempotent if an
+// earlier attempt already reached it.
 async function publishCompositeAlert(
 	decision: CompositeCandidateDecision,
 	candidate: ProximityCandidateMessage,
@@ -274,11 +274,11 @@ async function publishCompositeAlert(
 		messages: [{ key: candidate.pair_key, value: JSON.stringify(alert) }],
 	});
 
-	// Pre-CP5A(c): NO_EPISODE and NOT_CLAIMED are not equivalent. NO_EPISODE
-	// means the key is gone entirely -- nothing else can reuse or corrupt
-	// it, safe to warn and let the input offset commit. NOT_CLAIMED means
-	// the episode still exists but ownership no longer matches this
-	// candidate_id -- an invariant violation; the caller must not commit.
+	// NO_EPISODE and NOT_CLAIMED are not equivalent. NO_EPISODE means the
+	// key is gone entirely, nothing else can reuse or corrupt it, so it's
+	// safe to warn and let the input offset commit. NOT_CLAIMED means the
+	// episode still exists but ownership no longer matches this
+	// candidate_id, an invariant violation, so the caller must not commit.
 	const result = await finalizeCompositeEpisode(
 		redis,
 		decision.selected_entity_id,
@@ -296,7 +296,7 @@ async function publishCompositeAlert(
 	if (result === 'NO_EPISODE') {
 		console.warn(
 			{ instanceId, candidateId: decision.candidate_id, entityId: decision.selected_entity_id },
-			'FINALIZE found no retained episode -- already expired; the published alert stands as the only evidence',
+			'FINALIZE found no retained episode, already expired; the published alert stands as the only evidence',
 		);
 	}
 
@@ -322,7 +322,7 @@ export async function handleProximityCandidate(
 ): Promise<void> {
 	const candidateId = `${candidate.pair_key}:${candidate.episode_start_ms}`;
 
-	// Pre-CP5A: checked first, before CP2 ever runs. A candidate that
+	// Checked first, before eligibility is ever resolved. A candidate that
 	// already has a decision replays it rather than re-resolving eligibility
 	// against Redis state that may have changed since.
 	const existing = await readCandidateDecision(redis, candidateId);
@@ -339,12 +339,12 @@ export async function handleProximityCandidate(
 		config.COMPOSITE_CORRELATION_WINDOW_MS,
 	);
 
-	// Pre-CP5A(a): any CLAIM failure, for any reason (CLAIMED_BY_OTHER,
-	// ALREADY_ISSUED, or NO_EPISODE -- claimCompositeEpisode does not
-	// distinguish them, since all three collapse to this identical
-	// outcome), decides UNSCHEDULED_PROXIMITY. No fallback to the other pair
-	// member: the deterministic tie-break already picked a single winner
-	// over a Redis snapshot.
+	// Any CLAIM failure, for any reason (CLAIMED_BY_OTHER, ALREADY_ISSUED,
+	// or NO_EPISODE; claimCompositeEpisode does not distinguish them, since
+	// all three collapse to this identical outcome), decides
+	// UNSCHEDULED_PROXIMITY. No fallback to the other pair member: the
+	// deterministic tie-break already picked a single winner over a Redis
+	// snapshot.
 	let decision: CandidateDecision;
 	if (winner) {
 		const claimed = await claimCompositeEpisode(
@@ -374,12 +374,12 @@ export async function handleProximityCandidate(
 	} catch (err) {
 		if (!(err instanceof CandidateDecisionConflictError)) throw err;
 
-		// Pre-CP5A(b): a decision-write conflict after this process's own
-		// CLAIM already mutated Redis. Release only the locally-acquired
-		// stray claim -- never anything this process did not itself claim --
-		// then adopt the canonical decision and process it exactly like a
-		// normal existing-decision replay. Release is best-effort: its
-		// result does not gate adopting the canonical decision.
+		// A decision-write conflict after this process's own CLAIM already
+		// mutated Redis. Release only the locally-acquired stray claim,
+		// never anything this process did not itself claim, then adopt the
+		// canonical decision and process it exactly like a normal
+		// existing-decision replay. Release is best-effort: its result does
+		// not gate adopting the canonical decision.
 		if (decision.decision === 'COMPOSITE') {
 			const released = await releaseCompositeClaim(
 				redis,
