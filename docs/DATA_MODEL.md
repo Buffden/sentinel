@@ -168,7 +168,86 @@ Lifecycle:
 
 When a COMPOSITE is persisted, the API atomically inserts it and marks referenced active individual alerts (`NEW` or `ACKNOWLEDGED`) `SUPERSEDED`. A resolved alert is not retroactively superseded.
 
-**Supersession must converge regardless of which message the API consumes first.** The Alert Evaluator's signal-loss scan writes `alert-state` to Redis before its own `SIGNAL_LOSS` Kafka publish completes, and the proximity-candidate consumer runs concurrently — it is possible for a `COMPOSITE` referencing a `SIGNAL_LOSS` `alert_id` to reach the API before that `SIGNAL_LOSS` message does (the producer has no idempotence guarantee on send-order). A plain `UPDATE ... WHERE alert_id = X` in that case affects zero rows, and the late-arriving `SIGNAL_LOSS` then persists as `NEW` forever — never superseded. Whichever order the two messages arrive in, the API must reach the identical durable state: the referenced alert row exists with `status = SUPERSEDED` and `superseded_by` set to the composite's `alert_id`. Design of the specific mechanism (e.g. an upsert/placeholder pattern) is Phase 06's Pre-CP5B — resolved before CP5B is implemented, not invented inline.
+**Supersession must converge regardless of which message the API consumes first.** The Alert Evaluator's signal-loss scan writes `alert-state` to Redis before its own `SIGNAL_LOSS` Kafka publish completes, and the proximity-candidate consumer runs concurrently: it is possible for a `COMPOSITE` referencing a `SIGNAL_LOSS` `alert_id` to reach the API before that `SIGNAL_LOSS` message does (the producer has no idempotence guarantee on send-order). A plain `UPDATE ... WHERE alert_id = X` in that case affects zero rows, and the late-arriving `SIGNAL_LOSS` would then persist as `NEW` forever, never superseded. Whichever order the two messages arrive in, the API must reach the identical durable state: the referenced alert row exists with `status = SUPERSEDED` and `superseded_by` set to the composite's `alert_id`. Resolved below (Pre-CP5B), before any CP5B code depends on it.
+
+### Pre-CP5B: composite supersession convergence protocol
+
+**a. A small additive table records a supersession that has to wait for its target to exist.** Placeholder rows were rejected: `alerts` has several `NOT NULL` canonical columns (`detected_at` chief among them) that a `COMPOSITE` message cannot honestly supply for the individual alert it references, `COMPOSITE`'s own `detected_at_ms` is a different processing-time event than the original alert's detection, and `SIGNAL_LOSS`'s own payload evidence (callsign, last-known position) isn't carried in `COMPOSITE`'s payload at all. A placeholder would either fabricate these or require a fragile conditional upsert to backfill them later, and if the real message never arrives, the fabricated row is wrong forever rather than simply absent. A cross-system (Redis) pending marker was also rejected: it can't share a transaction with the composite's own Postgres commit, so a crash between the two systems reopens the exact convergence bug this exists to close. The accepted design is one small, purely additive table, consulted only on the side that needs to wait:
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_alert_supersessions (
+    referenced_alert_id TEXT PRIMARY KEY,
+    composite_alert_id  TEXT NOT NULL REFERENCES alerts (alert_id),
+    created_at           TIMESTAMPTZ NOT NULL
+);
+```
+
+`referenced_alert_id` is deliberately not an FK (the row it names doesn't exist yet by definition); `composite_alert_id` is, and is always satisfiable, the composite row is inserted earlier in the same transaction that creates a pending entry referencing it.
+
+**b. A per-`alert_id` transaction-scoped advisory lock closes the race Postgres row-locking cannot.** Row-level locking only protects rows that exist; the out-of-order case is defined by the referenced row not existing yet, so `UPDATE` (0 rows) followed by a existence-check `SELECT` is not serialized against a concurrent transaction inserting that exact row in between, and can independently reach the same "doesn't exist yet" conclusion that's already stale by the time it's acted on. Every alert persisted, individual or composite, acquires `pg_advisory_xact_lock($namespace, hashtext($alert_id))` on its own `alert_id` before reading or writing anything about that id; a `COMPOSITE` message additionally acquires one per entry in `supersedes_alert_ids`, sorted, before touching any of them (the standard deadlock-avoidance rule for a transaction that takes more than one lock). The lock and every statement it protects run on one checked-out `pg.PoolClient`, never the bare pool, an advisory-transaction lock is scoped to the connection that took it. The lock releases automatically at `COMMIT`/`ROLLBACK`, no manual unlock, no leak on crash.
+
+```ts
+const ALERT_SUPERSESSION_LOCK_NAMESPACE = 1001; // reserves this int4 space; nothing else in the codebase uses pg_advisory_xact_lock today
+```
+
+**c. Transaction sequence, referenced alert already exists when `COMPOSITE` arrives:**
+
+```text
+BEGIN;
+  lock every referenced alert_id (sorted);
+  INSERT composite ON CONFLICT (alert_id) DO NOTHING RETURNING *;   -- capture row
+  UPDATE alerts SET status='SUPERSEDED', superseded_by=$composite_id, updated_at=now()
+    WHERE alert_id=$ref_id AND status IN ('NEW','ACKNOWLEDGED')
+    RETURNING *;                                                     -- capture row if matched
+  -- 0 rows: SELECT * FROM alerts WHERE alert_id=$ref_id; see (e) for what this branch does
+COMMIT;
+publish the captured composite row, then each captured referenced row;
+```
+
+**Transaction sequence, `COMPOSITE` arrives before the referenced alert exists:**
+
+```text
+BEGIN;
+  lock every referenced alert_id (sorted);
+  INSERT composite ON CONFLICT (alert_id) DO NOTHING RETURNING *;    -- capture row
+  UPDATE ... WHERE alert_id=$ref_id AND status IN ('NEW','ACKNOWLEDGED') RETURNING *;
+  -- 0 rows -> SELECT * FROM alerts WHERE alert_id=$ref_id;
+  --   absent -> conflict-aware pending upsert, see (e); nothing to publish for this id yet
+COMMIT;
+publish the captured composite row; publish any referenced rows already SUPERSEDED by it;
+
+-- the referenced alert, arriving later (possibly much later, or redelivered):
+BEGIN;
+  lock this alert_id;
+  DELETE FROM pending_alert_supersessions WHERE referenced_alert_id=$alert_id
+    RETURNING composite_alert_id;
+  -- row -> INSERT ... status='SUPERSEDED', superseded_by=$returned_composite_id ...
+  --   ON CONFLICT (alert_id) DO NOTHING RETURNING *;  (fallback SELECT on redelivery)
+  -- no row -> INSERT ... status='NEW' (the message's own status) ... RETURNING *;  (fallback SELECT)
+COMMIT;
+publish the captured row's actual persisted state, never the raw incoming Kafka bytes,
+  a pending-consumed row is SUPERSEDED, not the NEW the message carried;
+```
+
+**d. Post-commit publication republishes canonical current state on every delivery, never "what this attempt changed."** A `COMPOSITE` message can require multiple Redis publishes after one DB commit (the composite row, each referenced row it supersedes); if publish 1 succeeds and publish 2 throws, the Kafka offset never commits and the message redelivers, but the redelivered transaction is now idempotent by construction and may mutate nothing at all, so deriving "what to publish" from "what this attempt mutated" would silently drop the un-published event forever. Every row this message concerns is instead captured (via `RETURNING *`, or a plain `SELECT` when it already existed as-is) inside the transaction, before `COMMIT`, while its lock is still held; after commit, every captured row is published unconditionally, on every delivery attempt, whether or not that attempt itself changed anything. Duplicates are expected and already accepted (`DATA_MODEL.md`'s WebSocket contract requires idempotent-by-`alert_id` rendering); a lost lifecycle event is not.
+
+**e. Ownership conflicts are idempotent only when the existing owner matches; a different owner is an invariant failure, symmetrically at both the pending-row level and the row level.** Two different composites both claiming to supersede the same individual alert should be structurally impossible (a signal-loss episode can be claimed by at most one composite, per the Alert Evaluator's own claim protocol), so encountering it is an invariant violation, not a routine outcome, the same fail-closed posture as `CandidateDecisionConflictError`/`CompositeFinalizeInvariantError` upstream:
+
+```sql
+-- pending-row conflict:
+INSERT INTO pending_alert_supersessions (referenced_alert_id, composite_alert_id, created_at)
+VALUES ($1, $2, now())
+ON CONFLICT (referenced_alert_id) DO UPDATE
+  SET composite_alert_id = EXCLUDED.composite_alert_id
+  WHERE pending_alert_supersessions.composite_alert_id = EXCLUDED.composite_alert_id
+RETURNING referenced_alert_id;
+-- a row comes back: fresh insert, or a redelivery of the same composite (idempotent).
+-- no row comes back: a different composite_alert_id is already pending for this id, throw.
+```
+
+The same rule applies one step later, at the row itself: when the existence-check `SELECT` in (c) finds the referenced alert already `SUPERSEDED`, it must also compare `superseded_by`. Equal to this composite's own `alert_id`: idempotent replay, capture and publish as usual. Set to a *different* `alert_id`: the same invariant violation as the pending-row case, throw and roll back (releasing the locks) rather than silently leaving the earlier, conflicting supersession in place or overwriting it. `RESOLVED` rows are never subject to this check at all, they are excluded by the `UPDATE`'s own `WHERE status IN ('NEW','ACKNOWLEDGED')` and are never touched or published by composite processing, terminal per the existing lifecycle rule above.
+
+**f. CP5B guarantees durable DB convergence and replay-safe publication; it does not guarantee ordering between Redis publishes originating from different, separately committed API transactions.** A `SIGNAL_LOSS` message's own transaction commits and publishes independently of a later `COMPOSITE` message's transaction; the two publishes happen on their own schedules, and Redis pub/sub plus WebSocket delivery carry no cross-message ordering guarantee (`DATA_MODEL.md`'s existing at-least-once, duplicate-safe delivery model already accepts this for a single alert's own lifecycle, this extends it across two related alerts). A client can therefore observe a stale `NEW` event for the referenced alert arriving *after* it has already rendered that same alert as `SUPERSEDED`, if the two underlying transactions' publishes happen to interleave that way. **CP5C must make alert lifecycle merging monotonic**: a client-side merge that never lets a terminal or superseded status regress on top of an already-rendered later state, keyed by `alert_id` and comparing the incoming status against what's currently rendered, not simply "last write wins" by arrival order. `GET /alerts` (REST) remains the durable reconciliation source of truth; WebSocket delivery is a live, best-effort stream on top of it, not the thing a client should trust for absolute ordering.
 
 Indexes:
 
