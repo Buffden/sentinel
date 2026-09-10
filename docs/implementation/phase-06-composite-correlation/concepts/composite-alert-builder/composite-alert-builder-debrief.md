@@ -1,6 +1,6 @@
 # Composite Alert Builder Debrief
 
-CP4, commit hash filled in once committed.
+CP4, commit `3ce8844`.
 
 ---
 
