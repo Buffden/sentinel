@@ -12,5 +12,6 @@ Concept notes and debrief records for Phase 06 checkpoints, in the order you'd r
 | [atomic-signal-loss-handoff/](atomic-signal-loss-handoff/) | A claim seeded on `alert-state` survives the `recent-loss` handoff byte-for-byte, via a single Lua script replacing the CP1-era read-then-`MULTI`-write |
 | [composite-episode-claim/](composite-episode-claim/) | Two concurrent different-candidate claims against real Redis: exactly one wins; the winner's own retry still succeeds; the loser cannot finalize |
 | [candidate-decision-record/](candidate-decision-record/) | Two concurrent conflicting decisions for the same candidate against real Redis: exactly one becomes canonical, the loser throws, and replaying the winner stays idempotent |
+| [composite-alert-builder/](composite-alert-builder/) | `buildCompositeAlert` returns the literal nested `COMPOSITE` payload `DATA_MODEL.md` specifies; identical explicit inputs produce byte-for-byte identical output; a mismatched `selected_entity_id` throws instead of guessing a counterparty |
 
-Checkpoints not yet in this list (CP4 onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.
+Checkpoints not yet in this list (CP5A onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.

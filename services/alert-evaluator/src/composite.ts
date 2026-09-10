@@ -6,6 +6,7 @@
 // handleProximityCandidate and actually claiming/emitting a COMPOSITE are
 // later checkpoints.
 import type { Redis } from 'ioredis';
+import type { ProximityCandidateMessage } from './evaluator.js';
 
 export type LossEpisodeSource = 'ACTIVE' | 'RECENT';
 
@@ -491,4 +492,107 @@ export async function writeCandidateDecisionIfAbsent(
 
 	if (success === 1) return stored;
 	throw new CandidateDecisionConflictError(decision, stored);
+}
+
+// Composite alert builder
+// Pure: no Redis, no Kafka, no config, no clock. Every operational field
+// (entityType, detectedAtMs, correlationWindowMs) is a caller-supplied
+// argument rather than read internally, so "same inputs -> same output" holds
+// for the function itself -- it does not depend on this process's config or
+// wall clock. Determinism of the eventual Kafka message additionally depends
+// on the caller (CP5A) passing a stable detectedAtMs and correlationWindowMs
+// across a redelivery, which is that checkpoint's responsibility, not this
+// function's.
+//
+// DATA_MODEL.md specifies COMPOSITE's payload as "nested signal-loss +
+// proximity evidence" -- taken literally as two distinct sub-objects, not
+// flattened, even though UNSCHEDULED_PROXIMITY's payload happens to be flat.
+
+export interface CompositeAlertPayload {
+	signal_loss: {
+		dark_since_ms: number;
+		loss_source: LossEpisodeSource;
+		resumed_at_ms: number | null;
+		signal_loss_alert_id: string;
+	};
+	proximity: {
+		pair_key: string;
+		entity_a_id: string;
+		entity_b_id: string;
+		lat: number;
+		lon: number;
+		distance_metres: number;
+		episode_start_ms: number;
+	};
+	correlation_window_ms: number;
+	supersedes_alert_ids: string[];
+}
+
+export interface CompositeAlert {
+	alert_id: string;
+	entity_id: string;
+	counterparty_entity_id: string;
+	entity_type: string;
+	alert_type: 'COMPOSITE';
+	priority: 'STANDARD';
+	status: 'NEW';
+	detected_at_ms: number;
+	payload: CompositeAlertPayload;
+}
+
+// decision.selected_entity_id is the primary entity_id -- it is the pair
+// member whose signal-loss episode this composite is anchored to; the other
+// pair member becomes counterparty_entity_id. Throws rather than guessing if
+// selected_entity_id matches neither candidate pair member: that can only
+// mean the decision record and the candidate message do not actually
+// describe the same encounter, an invariant violation this function must not
+// silently paper over (same fail-closed posture as CandidateDecisionConflictError above).
+export function buildCompositeAlert(
+	decision: CompositeCandidateDecision,
+	candidate: ProximityCandidateMessage,
+	entityType: string,
+	detectedAtMs: number,
+	correlationWindowMs: number,
+): CompositeAlert {
+	let counterpartyEntityId: string;
+	if (decision.selected_entity_id === candidate.entity_a_id) {
+		counterpartyEntityId = candidate.entity_b_id;
+	} else if (decision.selected_entity_id === candidate.entity_b_id) {
+		counterpartyEntityId = candidate.entity_a_id;
+	} else {
+		throw new Error(
+			`composite decision entity ${decision.selected_entity_id} is not a member of ` +
+				`candidate pair ${candidate.pair_key}`,
+		);
+	}
+
+	return {
+		alert_id: `${candidate.pair_key}:COMPOSITE:${decision.dark_since_ms}`,
+		entity_id: decision.selected_entity_id,
+		counterparty_entity_id: counterpartyEntityId,
+		entity_type: entityType,
+		alert_type: 'COMPOSITE',
+		priority: 'STANDARD',
+		status: 'NEW',
+		detected_at_ms: detectedAtMs,
+		payload: {
+			signal_loss: {
+				dark_since_ms: decision.dark_since_ms,
+				loss_source: decision.loss_source,
+				resumed_at_ms: decision.resumed_at_ms,
+				signal_loss_alert_id: decision.signal_loss_alert_id,
+			},
+			proximity: {
+				pair_key: candidate.pair_key,
+				entity_a_id: candidate.entity_a_id,
+				entity_b_id: candidate.entity_b_id,
+				lat: candidate.lat,
+				lon: candidate.lon,
+				distance_metres: candidate.distance_at_detection,
+				episode_start_ms: candidate.episode_start_ms,
+			},
+			correlation_window_ms: correlationWindowMs,
+			supersedes_alert_ids: [decision.signal_loss_alert_id],
+		},
+	};
 }
