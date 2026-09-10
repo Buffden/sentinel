@@ -1,6 +1,6 @@
 # Composite Supersession Convergence Debrief
 
-CP5B, commit hash filled in once committed.
+CP5B, commit `799c79b`.
 
 ---
 
