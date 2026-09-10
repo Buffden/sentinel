@@ -81,3 +81,6 @@ dump.rdb
 
 # Insights
 insights/
+
+# graphify generated output
+graphify-out/
