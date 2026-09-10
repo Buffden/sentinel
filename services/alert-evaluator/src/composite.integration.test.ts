@@ -13,6 +13,7 @@ import {
 	claimCompositeEpisode,
 	finalizeCompositeEpisode,
 	readCandidateDecision,
+	releaseCompositeClaim,
 	resolveCompositeEligibility,
 	resolveEntityLossEpisode,
 	selectWinningEpisode,
@@ -601,53 +602,71 @@ describe('composite.ts claim/finalize primitives (integration)', () => {
 	});
 
 	describe('finalizeCompositeEpisode', () => {
-		it('fails when there is no prior claim', async () => {
+		it('returns NOT_CLAIMED when there is no prior claim', async () => {
 			await seedActive();
 
-			const finalized = await finalizeCompositeEpisode(
+			const result = await finalizeCompositeEpisode(
 				redis,
 				entityId,
 				darkSinceMs,
 				'a:b:1700000030000',
 			);
-			expect(finalized).toBe(false);
+			expect(result).toBe('NOT_CLAIMED');
 
 			const state = await redis.hgetall(alertStateKey);
 			expect(state['composite_issued']).toBe('0');
 		});
 
-		it('fails for a candidate that does not hold the claim', async () => {
+		it('returns NOT_CLAIMED for a candidate that does not hold the claim', async () => {
 			await seedActive();
 			const claimant = 'a:b:1700000030000';
 			const impostor = 'c:d:1700000031000';
 			await claimCompositeEpisode(redis, entityId, darkSinceMs, claimant);
 
-			const finalized = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, impostor);
-			expect(finalized).toBe(false);
+			const result = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, impostor);
+			expect(result).toBe('NOT_CLAIMED');
 
 			const state = await redis.hgetall(alertStateKey);
 			expect(state['composite_issued']).toBe('0');
 		});
 
-		it('succeeds for the candidate that holds the claim', async () => {
+		it('returns NO_EPISODE when the underlying key has expired since CLAIM', async () => {
 			await seedActive();
 			const candidateId = 'a:b:1700000030000';
 			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
 
-			const finalized = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
-			expect(finalized).toBe(true);
+			// Representation-independent per Pre-CP5A(c): simulate the key
+			// vanishing entirely (e.g. recent-loss's TTL elapsing after a
+			// CP3A handoff), not merely moving representation.
+			await redis.del(alertStateKey);
+
+			const result = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+			expect(result).toBe('NO_EPISODE');
+		});
+
+		it('returns SUCCESS for the candidate that holds the claim', async () => {
+			await seedActive();
+			const candidateId = 'a:b:1700000030000';
+			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+
+			const result = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+			expect(result).toBe('SUCCESS');
 
 			const state = await redis.hgetall(alertStateKey);
 			expect(state['composite_issued']).toBe('1');
 		});
 
-		it('is idempotent: the same candidate finalizing twice succeeds both times', async () => {
+		it('is idempotent: the same candidate finalizing twice returns SUCCESS both times', async () => {
 			await seedActive();
 			const candidateId = 'a:b:1700000030000';
 			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
 
-			expect(await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId)).toBe(true);
-			expect(await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId)).toBe(true);
+			expect(await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId)).toBe(
+				'SUCCESS',
+			);
+			expect(await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId)).toBe(
+				'SUCCESS',
+			);
 
 			const state = await redis.hgetall(alertStateKey);
 			expect(state['composite_issued']).toBe('1');
@@ -660,8 +679,8 @@ describe('composite.ts claim/finalize primitives (integration)', () => {
 
 			await simulateCp3aHandoff();
 
-			const finalized = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
-			expect(finalized).toBe(true);
+			const result = await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+			expect(result).toBe('SUCCESS');
 
 			expect(await redis.exists(alertStateKey)).toBe(0);
 			const state = await redis.hgetall(recentLossKey);
@@ -675,6 +694,85 @@ describe('composite.ts claim/finalize primitives (integration)', () => {
 			const ttlBefore = await redis.pttl(recentLossKey);
 
 			await finalizeCompositeEpisode(redis, entityId, darkSinceMs, 'a:b:1700000030000');
+
+			const ttlAfter = await redis.pttl(recentLossKey);
+			expect(ttlAfter).toBeGreaterThan(0);
+			expect(ttlAfter).toBeLessThanOrEqual(ttlBefore);
+		});
+	});
+
+	// Pre-CP5A(b): best-effort cleanup for a stray claim discovered after
+	// this candidate_id lost a decision-write conflict.
+	describe('releaseCompositeClaim', () => {
+		it('clears a live claim held by this candidate', async () => {
+			await seedActive();
+			const candidateId = 'a:b:1700000030000';
+			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+
+			const released = await releaseCompositeClaim(redis, entityId, darkSinceMs, candidateId);
+			expect(released).toBe(true);
+
+			const state = await redis.hgetall(alertStateKey);
+			expect(state['composite_claim_candidate_id']).toBe('');
+		});
+
+		it('finds and releases the claim after it moved to recent-loss', async () => {
+			await seedActive();
+			const candidateId = 'a:b:1700000030000';
+			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+			await simulateCp3aHandoff();
+
+			const released = await releaseCompositeClaim(redis, entityId, darkSinceMs, candidateId);
+			expect(released).toBe(true);
+
+			expect(await redis.exists(alertStateKey)).toBe(0);
+			const state = await redis.hgetall(recentLossKey);
+			expect(state['composite_claim_candidate_id']).toBe('');
+		});
+
+		it('treats an already-expired episode as nothing to release', async () => {
+			const released = await releaseCompositeClaim(
+				redis,
+				entityId,
+				darkSinceMs,
+				'a:b:1700000030000',
+			);
+			expect(released).toBe(true);
+		});
+
+		it('does not clear a claim held by a different candidate_id', async () => {
+			await seedActive();
+			const owner = 'a:b:1700000030000';
+			const impostor = 'c:d:1700000031000';
+			await claimCompositeEpisode(redis, entityId, darkSinceMs, owner);
+
+			const released = await releaseCompositeClaim(redis, entityId, darkSinceMs, impostor);
+			expect(released).toBe(false);
+
+			const state = await redis.hgetall(alertStateKey);
+			expect(state['composite_claim_candidate_id']).toBe(owner);
+		});
+
+		it('does not clear an already-finalized (composite_issued=1) episode', async () => {
+			await seedActive();
+			const candidateId = 'a:b:1700000030000';
+			await claimCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+			await finalizeCompositeEpisode(redis, entityId, darkSinceMs, candidateId);
+
+			const released = await releaseCompositeClaim(redis, entityId, darkSinceMs, candidateId);
+			expect(released).toBe(false);
+
+			const state = await redis.hgetall(alertStateKey);
+			expect(state['composite_claim_candidate_id']).toBe(candidateId);
+			expect(state['composite_issued']).toBe('1');
+		});
+
+		it('does not touch recent-loss TTL', async () => {
+			await seedRecent({ composite_claim_candidate_id: 'a:b:1700000030000' });
+			await redis.pexpire(recentLossKey, 60_000);
+			const ttlBefore = await redis.pttl(recentLossKey);
+
+			await releaseCompositeClaim(redis, entityId, darkSinceMs, 'a:b:1700000030000');
 
 			const ttlAfter = await redis.pttl(recentLossKey);
 			expect(ttlAfter).toBeGreaterThan(0);

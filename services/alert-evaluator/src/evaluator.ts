@@ -4,6 +4,18 @@ import { Kafka, Partitioners, type Consumer } from 'kafkajs';
 import { Redis } from 'ioredis';
 import { LeaderElection } from './leader.js';
 import { config } from './config.js';
+import {
+	CandidateDecisionConflictError,
+	CompositeFinalizeInvariantError,
+	buildCompositeAlert,
+	claimCompositeEpisode,
+	finalizeCompositeEpisode,
+	readCandidateDecision,
+	releaseCompositeClaim,
+	resolveCompositeEligibility,
+	writeCandidateDecisionIfAbsent,
+} from './composite.js';
+import type { CandidateDecision, CompositeCandidateDecision } from './composite.js';
 
 // ---- Kafka setup -----------------------------------------------------------
 
@@ -186,24 +198,22 @@ function parseProximityCandidate(rawValue: string): ProximityCandidateMessage | 
 }
 
 // proximity.candidates already means "exact proximity confirmed, new
-// episode, no KNOWN_ASSOCIATE relationship" -- the Correlation Worker did
-// that work before publishing, so this does not repeat a Neo4j check.
-// Composite correlation (checking alert-state/recent-loss for a qualifying
-// signal-loss episode on either entity) is a later phase; every candidate
-// becomes UNSCHEDULED_PROXIMITY here.
+// episode, no KNOWN_ASSOCIATE relationship", since the Correlation Worker
+// did that work before publishing, so this does not repeat a Neo4j check.
 //
-// entity_a_id is always the alert's primary entity_id and entity_b_id the
-// counterparty -- both are already canonically ordered by the Correlation
-// Worker, so this assignment is deterministic across redelivery.
-export async function handleProximityCandidate(
+// entity_a_id is always canonicalized (lexicographically smaller) by the
+// Correlation Worker, so UNSCHEDULED_PROXIMITY's primary/counterparty
+// assignment below is deterministic across redelivery. COMPOSITE's primary
+// entity is whichever pair member's loss episode qualified (composite.ts's
+// buildCompositeAlert), not always entity_a_id.
+async function publishUnscheduledProximityAlert(
 	candidate: ProximityCandidateMessage,
 ): Promise<void> {
 	const alertId = `${candidate.pair_key}:UNSCHEDULED_PROXIMITY:${candidate.episode_start_ms}`;
 
-	// entity_type isn't on the candidate message -- entity:live:* is already
-	// read here for signal-loss, for the same reason: it's the one place
-	// last-known entity facts live. Default to '' (never null) to match the
-	// alerts table's NOT NULL entity_type column, same as the signal-loss path.
+	// entity_type isn't on the candidate message, so entity:live:* is the
+	// one place last-known entity facts live. Default to '' (never null) to
+	// match the alerts table's NOT NULL entity_type column.
 	const entityType =
 		(await redis.hget(`entity:live:${candidate.entity_a_id}`, 'entity_type')) ?? '';
 
@@ -235,6 +245,160 @@ export async function handleProximityCandidate(
 		{ instanceId, alertId, pairKey: candidate.pair_key },
 		'unscheduled proximity alert emitted',
 	);
+}
+
+// DATA_MODEL.md's composite claim and decision protocol: builds and
+// publishes via buildCompositeAlert (entityType/detectedAtMs/
+// correlationWindowMs supplied here, not read inside the pure builder),
+// then FINALIZEs the decision's own episode. Called for a fresh COMPOSITE
+// decision, an existing-decision replay, and a post-conflict adopted
+// decision alike; FINALIZE must run in all three cases, idempotent if an
+// earlier attempt already reached it.
+async function publishCompositeAlert(
+	decision: CompositeCandidateDecision,
+	candidate: ProximityCandidateMessage,
+): Promise<void> {
+	const entityType =
+		(await redis.hget(`entity:live:${decision.selected_entity_id}`, 'entity_type')) ?? '';
+
+	const alert = buildCompositeAlert(
+		decision,
+		candidate,
+		entityType,
+		Date.now(),
+		config.COMPOSITE_CORRELATION_WINDOW_MS,
+	);
+
+	await producer.send({
+		topic: config.ALERTS_TOPIC,
+		messages: [{ key: candidate.pair_key, value: JSON.stringify(alert) }],
+	});
+
+	// NO_EPISODE and NOT_CLAIMED are not equivalent. NO_EPISODE means the
+	// key is gone entirely, nothing else can reuse or corrupt it, so it's
+	// safe to warn and let the input offset commit. NOT_CLAIMED means the
+	// episode still exists but ownership no longer matches this
+	// candidate_id, an invariant violation, so the caller must not commit.
+	const result = await finalizeCompositeEpisode(
+		redis,
+		decision.selected_entity_id,
+		decision.dark_since_ms,
+		decision.candidate_id,
+	);
+
+	if (result === 'NOT_CLAIMED') {
+		throw new CompositeFinalizeInvariantError(
+			decision.selected_entity_id,
+			decision.dark_since_ms,
+			decision.candidate_id,
+		);
+	}
+	if (result === 'NO_EPISODE') {
+		console.warn(
+			{ instanceId, candidateId: decision.candidate_id, entityId: decision.selected_entity_id },
+			'FINALIZE found no retained episode, already expired; the published alert stands as the only evidence',
+		);
+	}
+
+	console.info(
+		{ instanceId, alertId: alert.alert_id, pairKey: candidate.pair_key },
+		'composite alert emitted',
+	);
+}
+
+async function publishDecision(
+	decision: CandidateDecision,
+	candidate: ProximityCandidateMessage,
+): Promise<void> {
+	if (decision.decision === 'UNSCHEDULED_PROXIMITY') {
+		await publishUnscheduledProximityAlert(candidate);
+	} else {
+		await publishCompositeAlert(decision, candidate);
+	}
+}
+
+export async function handleProximityCandidate(
+	candidate: ProximityCandidateMessage,
+): Promise<void> {
+	const candidateId = `${candidate.pair_key}:${candidate.episode_start_ms}`;
+
+	// Checked first, before eligibility is ever resolved. A candidate that
+	// already has a decision replays it rather than re-resolving eligibility
+	// against Redis state that may have changed since.
+	const existing = await readCandidateDecision(redis, candidateId);
+	if (existing) {
+		await publishDecision(existing, candidate);
+		return;
+	}
+
+	const winner = await resolveCompositeEligibility(
+		redis,
+		candidate.entity_a_id,
+		candidate.entity_b_id,
+		candidate.episode_start_ms,
+		config.COMPOSITE_CORRELATION_WINDOW_MS,
+	);
+
+	// Any CLAIM failure, for any reason (CLAIMED_BY_OTHER, ALREADY_ISSUED,
+	// or NO_EPISODE; claimCompositeEpisode does not distinguish them, since
+	// all three collapse to this identical outcome), decides
+	// UNSCHEDULED_PROXIMITY. No fallback to the other pair member: the
+	// deterministic tie-break already picked a single winner over a Redis
+	// snapshot.
+	let decision: CandidateDecision;
+	if (winner) {
+		const claimed = await claimCompositeEpisode(
+			redis,
+			winner.entity_id,
+			winner.dark_since_ms,
+			candidateId,
+		);
+		decision = claimed
+			? {
+					decision: 'COMPOSITE',
+					candidate_id: candidateId,
+					selected_entity_id: winner.entity_id,
+					loss_source: winner.source,
+					dark_since_ms: winner.dark_since_ms,
+					signal_loss_alert_id: winner.signal_loss_alert_id,
+					resumed_at_ms: winner.resumed_at_ms,
+				}
+			: { decision: 'UNSCHEDULED_PROXIMITY', candidate_id: candidateId };
+	} else {
+		decision = { decision: 'UNSCHEDULED_PROXIMITY', candidate_id: candidateId };
+	}
+
+	let stored: CandidateDecision;
+	try {
+		stored = await writeCandidateDecisionIfAbsent(redis, decision);
+	} catch (err) {
+		if (!(err instanceof CandidateDecisionConflictError)) throw err;
+
+		// A decision-write conflict after this process's own CLAIM already
+		// mutated Redis. Release only the locally-acquired stray claim,
+		// never anything this process did not itself claim, then adopt the
+		// canonical decision and process it exactly like a normal
+		// existing-decision replay. Release is best-effort: its result does
+		// not gate adopting the canonical decision.
+		if (decision.decision === 'COMPOSITE') {
+			const released = await releaseCompositeClaim(
+				redis,
+				decision.selected_entity_id,
+				decision.dark_since_ms,
+				candidateId,
+			);
+			if (!released) {
+				console.warn(
+					{ instanceId, candidateId, entityId: decision.selected_entity_id },
+					'could not release stray composite claim after losing a decision-write conflict',
+				);
+			}
+		}
+
+		stored = err.existing;
+	}
+
+	await publishDecision(stored, candidate);
 }
 
 // ---- Candidate consumer session --------------------------------------------

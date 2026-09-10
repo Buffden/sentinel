@@ -86,6 +86,8 @@ When a COMPOSITE is consumed, the API performs one DB transaction:
 
 A referenced alert that is already `RESOLVED` remains resolved.
 
+**Update (Pre-CP5B):** the sequence above assumes the referenced individual alert already exists when `COMPOSITE` arrives. It does not always: the signal-loss scan and the proximity-candidate consumer run concurrently in the Alert Evaluator, so `COMPOSITE` can reach the API before the `SIGNAL_LOSS` it references does. That case, the pending-supersession table and advisory-lock protocol that make it converge to the identical durable state regardless of arrival order, and the rule that post-commit publication must republish canonical current state on every delivery rather than only what a given attempt mutated, is resolved in full in `DATA_MODEL.md`'s "Pre-CP5B: composite supersession convergence protocol". This ADR's decision to keep durable alert state in PostgreSQL and to publish only after the DB transaction commits is unchanged; Pre-CP5B extends the mechanism, it doesn't revise the decision.
+
 ---
 
 ## Delivery Semantics
@@ -114,6 +116,6 @@ Redis remains appropriate for ephemeral in-loop state such as `alert-state`, `re
 
 - API is the only writer of durable alert lifecycle state.
 - Alert Evaluator never reads lifecycle status to perform operator workflow.
-- Composite supersession is transactional.
-- Clients must tolerate duplicate lifecycle notifications.
-- Tests must cover replay after DB write/before Kafka offset commit and ACKNOWLEDGED → SUPERSEDED behavior.
+- Composite supersession is transactional, including the out-of-order arrival case (Pre-CP5B).
+- Clients must tolerate duplicate lifecycle notifications, and must merge them monotonically: WebSocket delivery ordering between separately committed transactions is not guaranteed, so a stale `NEW` event can arrive after `SUPERSEDED`; `GET /alerts` remains the durable reconciliation source.
+- Tests must cover replay after DB write/before Kafka offset commit, ACKNOWLEDGED → SUPERSEDED behavior, both arrival orders for composite supersession, concurrent-instance convergence under the advisory-lock protocol, and a Redis-publish failure between a composite's multiple post-commit publishes.
