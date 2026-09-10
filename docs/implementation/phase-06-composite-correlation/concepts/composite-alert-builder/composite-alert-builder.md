@@ -32,6 +32,10 @@ Note what this guarantee does *not* claim by itself: CP4 doesn't guarantee the c
 
 `entity_type` deliberately does **not** appear inside either nested object, even though it's readily available at build time. It already exists as a top-level field on the alert (`entity_type`, alongside `entity_id`); duplicating it inside `payload.signal_loss` or `payload.proximity` would just create a second value that could drift from the first with no mechanism keeping them in sync.
 
+### Why `priority` is `ELEVATED`, not `STANDARD`
+
+`DATA_MODEL.md` defines `priority` as `STANDARD` or `ELEVATED` but did not originally state which `alert_type` gets which value; `SIGNAL_LOSS` and `UNSCHEDULED_PROXIMITY` both hardcode `STANDARD` in `evaluator.ts`. The first implementation pass copied that pattern for `COMPOSITE` without checking whether it actually fit. It didn't: US-06 (`docs/use-cases/US-06-composite-alert/composite-alert.md`) states the story explicitly, correlating a signal-loss episode with an unscheduled-proximity episode into "one elevated incident," and `ELEVATED` was, until this checkpoint, unused anywhere in the codebase. `DATA_MODEL.md` now documents the mapping explicitly (`SIGNAL_LOSS`/`UNSCHEDULED_PROXIMITY` are `STANDARD`, `COMPOSITE` is `ELEVATED`) so this is an accepted contract other alert types can be checked against later, not an implicit default buried in this one builder.
+
 ### Why `entity_id`/`counterparty_entity_id` come from the decision, and fail closed on mismatch
 
 `decision.selected_entity_id` is the pair member whose signal-loss episode this composite is anchored to: that's the entity the whole correlation is *about*, so it becomes the alert's primary `entity_id`, the same convention `UNSCHEDULED_PROXIMITY` already uses for its own primary/counterparty split. The other pair member becomes `counterparty_entity_id`, found by comparing `selected_entity_id` against `candidate.entity_a_id`/`entity_b_id`.
@@ -66,6 +70,7 @@ If `selected_entity_id` matches neither, that's not a case to guess through: it 
 3. Why does `entity_type` not appear inside `payload.signal_loss` or `payload.proximity`, even though it would be easy to include?
 4. Walk through what would happen, concretely, downstream, if the counterparty-mismatch guard silently picked `candidate.entity_a_id` instead of throwing.
 5. Why is `alert_id` built from `dark_since_ms` rather than `episode_start_ms`?
+6. Why is `COMPOSITE`'s `priority` `ELEVATED` when `SIGNAL_LOSS` and `UNSCHEDULED_PROXIMITY` are both `STANDARD`, and what accepted document justifies that?
 
 ---
 
@@ -75,4 +80,5 @@ If `selected_entity_id` matches neither, that's not a case to guess through: it 
 - [ ] I can explain why `entity_type` is deliberately excluded from the nested payload
 - [ ] I can explain why the mismatch guard throws instead of defaulting to a counterparty
 - [ ] I can explain why COMPOSITE's `alert_id` anchors to the loss episode's `dark_since_ms`, not the proximity candidate's `episode_start_ms`
+- [ ] I can explain why `COMPOSITE`'s priority is `ELEVATED` and where that rule is now documented
 - [ ] I ran the unit test suite and the manual inspection myself and can interpret both

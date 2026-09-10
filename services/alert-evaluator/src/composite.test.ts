@@ -41,7 +41,7 @@ describe('buildCompositeAlert', () => {
 			counterparty_entity_id: 'entity-b',
 			entity_type: 'aircraft',
 			alert_type: 'COMPOSITE',
-			priority: 'STANDARD',
+			priority: 'ELEVATED',
 			status: 'NEW',
 			detected_at_ms: 1_700_000_031_000,
 			payload: {
@@ -116,6 +116,18 @@ describe('buildCompositeAlert', () => {
 
 		expect(alert.payload.signal_loss.loss_source).toBe('RECENT');
 		expect(alert.payload.signal_loss.resumed_at_ms).toBe(1_700_000_010_000);
+	});
+
+	it("sets priority to ELEVATED, per DATA_MODEL.md's priority-by-alert_type mapping (US-06: correlated evidence reads as one elevated incident)", () => {
+		const alert = buildCompositeAlert(
+			activeDecision,
+			candidate,
+			'aircraft',
+			1_700_000_031_000,
+			120_000,
+		);
+
+		expect(alert.priority).toBe('ELEVATED');
 	});
 
 	it('derives alert_id from pair_key and the decision dark_since_ms, not the candidate episode_start_ms', () => {

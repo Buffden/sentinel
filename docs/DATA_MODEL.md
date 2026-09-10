@@ -157,6 +157,8 @@ COMPOSITE
 
 These type-specific identities avoid collisions between two simultaneous pair incidents involving the same primary entity.
 
+`priority` mapping by `alert_type`: `SIGNAL_LOSS` and `UNSCHEDULED_PROXIMITY` are `STANDARD`. `COMPOSITE` is `ELEVATED`, reflecting US-06's intent that correlating a signal-loss episode with an unscheduled-proximity episode produces "one elevated incident," not two disconnected standard-priority signals. `ROUTE_DEVIATION` is not yet implemented; its priority is undecided.
+
 Lifecycle:
 
 - operator path: `NEW → ACKNOWLEDGED → RESOLVED`, with optional `NEW → RESOLVED`;

@@ -534,7 +534,7 @@ export interface CompositeAlert {
 	counterparty_entity_id: string;
 	entity_type: string;
 	alert_type: 'COMPOSITE';
-	priority: 'STANDARD';
+	priority: 'ELEVATED';
 	status: 'NEW';
 	detected_at_ms: number;
 	payload: CompositeAlertPayload;
@@ -572,7 +572,11 @@ export function buildCompositeAlert(
 		counterparty_entity_id: counterpartyEntityId,
 		entity_type: entityType,
 		alert_type: 'COMPOSITE',
-		priority: 'STANDARD',
+		// ELEVATED, not STANDARD: per DATA_MODEL.md's priority-by-alert_type
+		// mapping, COMPOSITE is the one case where correlated evidence is
+		// meant to read as a single elevated incident (US-06), not a
+		// disconnected standard-priority signal.
+		priority: 'ELEVATED',
 		status: 'NEW',
 		detected_at_ms: detectedAtMs,
 		payload: {

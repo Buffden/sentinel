@@ -22,12 +22,12 @@ npx vitest run --exclude '**/*.integration.test.ts'
 
 ```text
  Test Files  2 passed (2)
-      Tests  15 passed (15)
-   Start at  20:56:00
-   Duration  119ms
+      Tests  16 passed (16)
+   Start at  21:12:04
+   Duration  107ms
 ```
 
-6 new tests in `composite.test.ts`, covering every scenario required:
+7 new tests in `composite.test.ts`, covering every scenario required:
 
 | Test | Proves |
 | --- | --- |
@@ -35,10 +35,13 @@ npx vitest run --exclude '**/*.integration.test.ts'
 | identical explicit inputs produce byte-for-byte identical output | The core purity guarantee |
 | `entity_id`/`counterparty_entity_id` follow `selected_entity_id`, for either pair member | Primary/counterparty assignment doesn't hardcode which side qualified |
 | `RECENT` `loss_source`/`resumed_at_ms` pass through unchanged | `ACTIVE` isn't the only path exercised |
+| `priority` is `ELEVATED` | `DATA_MODEL.md`'s priority-by-alert_type mapping; COMPOSITE reads as one elevated incident (US-06), not a standard-priority signal |
 | `alert_id` derives from `dark_since_ms`, not `episode_start_ms` | Identity anchors to the loss episode being upgraded |
 | throws when `selected_entity_id` isn't a member of the candidate pair | Fail-closed mismatch guard |
 
-`leader.test.ts`'s existing 9 tests are unaffected (15 total, unchanged from before this checkpoint plus the 6 new ones).
+`leader.test.ts`'s existing 9 tests are unaffected (16 total, unchanged from before this checkpoint plus the 7 new ones).
+
+**Correction after external review:** the first implementation pass hardcoded `priority: 'STANDARD'`, mirroring the adjacent `SIGNAL_LOSS`/`UNSCHEDULED_PROXIMITY` builders in `evaluator.ts` without checking whether that pattern actually applied to `COMPOSITE`. `DATA_MODEL.md` defines `priority` as `STANDARD` or `ELEVATED` but, at the time, stated no per-`alert_type` mapping; `ELEVATED` was unused anywhere in the codebase. US-06 (`docs/use-cases/US-06-composite-alert/composite-alert.md`) states the story explicitly: "correlated into one elevated incident." `DATA_MODEL.md` now documents the mapping explicitly (`SIGNAL_LOSS`/`UNSCHEDULED_PROXIMITY` are `STANDARD`, `COMPOSITE` is `ELEVATED`, `ROUTE_DEVIATION` undecided pending its own implementation) so this is an accepted contract, not an implicit code-level default.
 
 ---
 
@@ -80,7 +83,7 @@ Observed:
   "counterparty_entity_id": "demo-entity-b",
   "entity_type": "aircraft",
   "alert_type": "COMPOSITE",
-  "priority": "STANDARD",
+  "priority": "ELEVATED",
   "status": "NEW",
   "detected_at_ms": 1700000031000,
   "payload": {
@@ -119,6 +122,7 @@ mismatch guard threw as expected: composite decision entity someone-else is not 
 | `alert_id` is `{pair_key}:COMPOSITE:{dark_since_ms}` | yes | PASS |
 | Payload is nested (`signal_loss` / `proximity` sub-objects) | yes | PASS |
 | `entity_type` absent from both nested sub-objects | yes | PASS |
+| `priority` is `ELEVATED` | yes | PASS |
 | `entity_id` = `selected_entity_id`, counterparty = the other pair member | yes | PASS |
 | Repeated call with identical arguments is byte-for-byte identical | yes | PASS |
 | Mismatched `selected_entity_id` throws rather than guessing | yes | PASS |
@@ -161,7 +165,7 @@ CP5A: wire CP2 → CP3B → CP3C → CP4 into `handleProximityCandidate`, publis
 
 | Concept | Observed |
 | --- | --- |
-| Automated suite | 15/15 PASS, 6 new tests |
+| Automated suite | 16/16 PASS, 7 new tests |
 | Real output inspection | Nested payload, correct identity, correct primary/counterparty, no `entity_type` duplication |
 | Determinism | Repeated call with identical arguments produced byte-for-byte identical JSON |
 | Fail-closed guard | Mismatched `selected_entity_id` threw with a clear message rather than producing a wrong-but-valid-looking alert |
