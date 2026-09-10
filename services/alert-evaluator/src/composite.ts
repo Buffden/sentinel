@@ -251,6 +251,35 @@ export async function claimCompositeEpisode(
 	return result[0] === 1;
 }
 
+// Pre-CP5A(c): the caller must handle these three outcomes differently, not
+// collapse them to a boolean. SUCCESS proceeds normally. NO_EPISODE is safe
+// to log-and-continue: the key is gone entirely (representation-independent
+// -- reachable for a decision originally recorded ACTIVE too, if the entity
+// resumed and recent-loss's TTL elapsed before FINALIZE ran), so no other
+// candidate can reuse or corrupt it either; the alert already published
+// stands as the only evidence. NOT_CLAIMED is an invariant violation: the
+// episode still exists but ownership no longer matches this candidate_id,
+// so the caller must throw rather than commit, since silently proceeding
+// risks permitting a second composite over the same episode.
+export type FinalizeResult = 'SUCCESS' | 'NO_EPISODE' | 'NOT_CLAIMED';
+
+// Thrown by the caller (not by this function) when FINALIZE returns
+// NOT_CLAIMED -- see the FinalizeResult contract above. Defined here since
+// it names this module's own invariant.
+export class CompositeFinalizeInvariantError extends Error {
+	constructor(
+		public readonly entityId: string,
+		public readonly expectedDarkSinceMs: number,
+		public readonly candidateId: string,
+	) {
+		super(
+			`FINALIZE invariant violation: candidate ${candidateId} does not hold the claim on ` +
+				`entity ${entityId}'s episode (dark_since_ms=${expectedDarkSinceMs}) at finalize time`,
+		);
+		this.name = 'CompositeFinalizeInvariantError';
+	}
+}
+
 // Marks a claimed episode composite_issued=1, only for the candidate that
 // already holds the claim. See the module-level comment above for why this
 // is idempotent for that same candidate and representation-independent.
@@ -259,9 +288,78 @@ export async function finalizeCompositeEpisode(
 	entityId: string,
 	expectedDarkSinceMs: number,
 	candidateId: string,
-): Promise<boolean> {
+): Promise<FinalizeResult> {
 	const result = (await redis.eval(
 		FINALIZE_COMPOSITE_EPISODE_LUA,
+		2,
+		`alert-state:${entityId}`,
+		`recent-loss:${entityId}`,
+		String(expectedDarkSinceMs),
+		candidateId,
+	)) as [number, string];
+	return result[1] as FinalizeResult;
+}
+
+// ---- Composite episode claim release (Pre-CP5A(b)) --------------------------
+//
+// Best-effort cleanup for a stray claim discovered after this candidate_id
+// lost a decision-write conflict: this process's own CP2 resolution won a
+// CLAIM on some episode, but a differently-decided candidate for the same
+// candidate_id reached writeCandidateDecisionIfAbsent first. Symmetric to
+// CLAIM/FINALIZE -- same representation-independent search across
+// alert-state/recent-loss, same candidate_id-keyed ownership check.
+//
+// All three preconditions must hold before this clears anything:
+// dark_since_ms still matches (the episode this process actually claimed),
+// composite_issued is still '0' (never finalized -- if it were, releasing
+// would corrupt a real, already-issued composite's claim bookkeeping), and
+// composite_claim_candidate_id still equals candidateId (never overwrite a
+// claim this process does not recognize as its own). A missing episode
+// (already expired) is treated as nothing-to-release, not a failure.
+//
+// The caller does not gate on this function's result: adopting the
+// canonical decision (Pre-CP5A(b)) proceeds regardless of whether release
+// actually cleared anything, since release is cleanup of this process's own
+// stray state, not a precondition for convergence.
+const RELEASE_COMPOSITE_CLAIM_LUA = `
+local function find_match(key)
+	local dark_since_ms = redis.call('HGET', key, 'dark_since_ms')
+	if dark_since_ms == ARGV[1] then
+		return key
+	end
+	return nil
+end
+local matched_key = find_match(KEYS[1])
+if not matched_key then
+	matched_key = find_match(KEYS[2])
+end
+if not matched_key then
+	return {1, 'NO_EPISODE'}
+end
+if redis.call('HGET', matched_key, 'composite_issued') == '1' then
+	return {0, 'ALREADY_ISSUED'}
+end
+local claim = redis.call('HGET', matched_key, 'composite_claim_candidate_id')
+if claim ~= ARGV[2] then
+	return {0, 'NOT_CLAIMED'}
+end
+redis.call('HSET', matched_key, 'composite_claim_candidate_id', '')
+return {1, 'RELEASED'}
+`;
+
+// Returns true when the claim was actually released or there was nothing to
+// release (the episode already expired); false when the episode exists but
+// this candidateId does not recognize it as a claim it can safely clear
+// (ALREADY_ISSUED or NOT_CLAIMED -- both should not happen in the flow this
+// exists for, but are reported, never silently overwritten).
+export async function releaseCompositeClaim(
+	redis: Redis,
+	entityId: string,
+	expectedDarkSinceMs: number,
+	candidateId: string,
+): Promise<boolean> {
+	const result = (await redis.eval(
+		RELEASE_COMPOSITE_CLAIM_LUA,
 		2,
 		`alert-state:${entityId}`,
 		`recent-loss:${entityId}`,

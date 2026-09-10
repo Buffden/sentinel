@@ -13,5 +13,6 @@ Concept notes and debrief records for Phase 06 checkpoints, in the order you'd r
 | [composite-episode-claim/](composite-episode-claim/) | Two concurrent different-candidate claims against real Redis: exactly one wins; the winner's own retry still succeeds; the loser cannot finalize |
 | [candidate-decision-record/](candidate-decision-record/) | Two concurrent conflicting decisions for the same candidate against real Redis: exactly one becomes canonical, the loser throws, and replaying the winner stays idempotent |
 | [composite-alert-builder/](composite-alert-builder/) | `buildCompositeAlert` returns the literal nested `COMPOSITE` payload `DATA_MODEL.md` specifies; identical explicit inputs produce byte-for-byte identical output; a mismatched `selected_entity_id` throws instead of guessing a counterparty |
+| [composite-candidate-wiring/](composite-candidate-wiring/) | A real `proximity.candidates` message becomes a real, deterministic `COMPOSITE` or `UNSCHEDULED_PROXIMITY` alert against real Redis and Kafka; a decision-write conflict after a successful CLAIM releases the stray claim and converges on one decision under a genuine `Promise.all` race |
 
-Checkpoints not yet in this list (CP5A onward) are still unimplemented — see the phase [`README.md`](../README.md) checkpoint table.
+Checkpoints not yet in this list (Pre-CP5B onward) are still unimplemented, see the phase [`README.md`](../README.md) checkpoint table.
