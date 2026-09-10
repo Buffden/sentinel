@@ -24,10 +24,10 @@ npx vitest run
 
 ```text
 Test Files  5 passed (5)
-     Tests  48 passed (48)
+     Tests  54 passed (54)
 ```
 
-21 tests in `alertSink.integration.test.ts` (5 baseline persistence tests, 11 Pre-CP5B convergence tests, 3 advisory-locking tests, 2 full-consumer-loop tests), against the existing suite (all still passing, none touched in behavior). Full run repeated 3 consecutive times with no flakiness after fixing a real cross-file interference bug found while first running the whole suite (see below).
+27 tests in `alertSink.integration.test.ts` (5 baseline persistence tests, 11 Pre-CP5B convergence tests, 6 supersedes_alert_ids validation tests added in the hardening pass below, 3 advisory-locking tests, 2 full-consumer-loop tests), against the existing suite (all still passing, none touched in behavior beyond what the hardening pass itself changed). Full run repeated 3 consecutive times with no flakiness.
 
 | Test | Proves |
 | --- | --- |
@@ -97,13 +97,38 @@ Database confirmed clean afterward (`SELECT * FROM alerts WHERE alert_id LIKE '%
 
 ---
 
+## Experiment 3: hardening pass (post-review)
+
+Two gaps surfaced in review after the core implementation had already passed: `payload.supersedes_alert_ids` was silently coerced to `[]` for any malformed shape (not an array, empty, non-string or empty-string entries), and `persistCompositeAlert` never locked the composite's own `alert_id`, even though `DATA_MODEL.md`'s Pre-CP5B(b) states every alert does, individual or composite.
+
+**Validation, run via `tsx` directly against real Postgres:**
+
+```text
+missing field: threw "invalid COMPOSITE payload: payload.supersedes_alert_ids must be an array"
+missing field: row created? false
+non-array: threw "invalid COMPOSITE payload: payload.supersedes_alert_ids must be an array"
+non-array: row created? false
+empty array: threw "invalid COMPOSITE payload: payload.supersedes_alert_ids must contain at least one entry"
+empty array: row created? false
+non-string entry: threw "invalid COMPOSITE payload: payload.supersedes_alert_ids must contain only non-empty strings"
+non-string entry: row created? false
+empty string entry: threw "invalid COMPOSITE payload: payload.supersedes_alert_ids must contain only non-empty strings"
+empty string entry: row created? false
+```
+
+All five malformed shapes rejected, none ever wrote a row. `validateSupersedesAlertIds` is now called both at the `alertSink.ts` boundary (`eachMessage`, applying the sink's existing malformed-message policy: log, skip, commit the offset, never retry a message that can't become valid) and internally by `persistCompositeAlert` as a defense-in-depth backstop for any other caller. A dedicated integration test proves the boundary policy end to end: a malformed `COMPOSITE` is produced to the real topic, no row is ever created for it, and a follow-up valid message on the same partition is still reached, which is only possible if the malformed message's offset actually committed rather than blocking the partition.
+
+**Lock ordering fix:** `persistCompositeAlert` now acquires the composite's own `alert_id` lock before the sorted referenced-id locks, matching the documented contract exactly. This closes a design/code drift, not a reachable race: composites are never themselves a `supersedes_alert_ids` target in the accepted design, so no other transaction ever contends for a composite's own id via this lock namespace today. The full 54-test suite (including the real-concurrency and advisory-lock tests) still passes unchanged, confirming the added lock introduces no new contention or deadlock risk.
+
+---
+
 ## Engineering debrief
 
-**Data flow:** `persistAlert` dispatches by `alert_type`. `COMPOSITE` locks every referenced `alert_id` (sorted), inserts itself idempotently, then for each referenced id either updates it directly (if it exists and is `NEW`/`ACKNOWLEDGED`), recognizes an idempotent replay or invariant violation (if it exists and is already `SUPERSEDED`), leaves it alone (if `RESOLVED`), or records a pending supersession (if it doesn't exist yet). Any other alert type locks its own id, consumes a pending entry if one exists, and persists directly, all inside one transaction via `withTransaction`. `startAlertSink` publishes every row `persistAlert` returns, unconditionally, after commit, then commits the Kafka offset last.
+**Data flow:** `persistAlert` dispatches by `alert_type`. `COMPOSITE` locks its own `alert_id` first, then every referenced `alert_id` (sorted), inserts itself idempotently, then for each referenced id either updates it directly (if it exists and is `NEW`/`ACKNOWLEDGED`), recognizes an idempotent replay or invariant violation (if it exists and is already `SUPERSEDED`), leaves it alone (if `RESOLVED`), or records a pending supersession (if it doesn't exist yet). Any other alert type locks its own id, consumes a pending entry if one exists, and persists directly, all inside one transaction via `withTransaction`. `startAlertSink` validates `COMPOSITE`'s `supersedes_alert_ids` contract before persisting anything, then publishes every row `persistAlert` returns, unconditionally, after commit, then commits the Kafka offset last.
 
 **Trade-off:** the pending-supersession table is small and purely additive, no change to `alerts`' existing constraints, but it does mean an out-of-order `COMPOSITE` leaves a real row lingering in a second table until its referenced alert eventually arrives (or forever, if it never does, which is the accepted, honest failure mode, a missing row rather than a wrong one).
 
-**Failure behaviour:** an ownership conflict, at the pending-row level or the row level, throws `AlertSupersessionInvariantError` and rolls back the entire transaction, including the conflicting composite's own insert, rather than partially applying a corrupted supersession. A Redis publish failure partway through a multi-publish fan-out leaves the Kafka offset uncommitted; redelivery republishes every row the message concerns from its current durable state, not just the one that previously failed, even when the retry's own SQL statements touch nothing.
+**Failure behaviour:** an ownership conflict, at the pending-row level or the row level, throws `AlertSupersessionInvariantError` and rolls back the entire transaction, including the conflicting composite's own insert, rather than partially applying a corrupted supersession. A malformed `supersedes_alert_ids` is caught before any transaction starts, at the same boundary as every other unfixable-by-retry message. A Redis publish failure partway through a multi-publish fan-out leaves the Kafka offset uncommitted; redelivery republishes every row the message concerns from its current durable state, not just the one that previously failed, even when the retry's own SQL statements touch nothing.
 
 ## Manual inspection commands
 
@@ -125,6 +150,8 @@ docker exec sentinel-redpanda rpk topic consume alerts -n 1
 3. Why does an ownership conflict roll back the composite's own insert too, rather than just skipping the one conflicting referenced id?
 4. Why can't "publish what this SQL statement's `RETURNING` clause returned" be the rule for what gets published after commit?
 5. What did the consumer-group-readiness bug and the cross-file Vitest interference bug have in common, and how are they different from a correctness bug in the persistence logic itself?
+6. Why does an empty `supersedes_alert_ids` array need to be rejected rather than silently accepted as "a composite that supersedes nothing"?
+7. Why does `persistCompositeAlert` validate `supersedes_alert_ids` internally when `alertSink.ts`'s `eachMessage` already checks it before ever calling that function?
 
 ## Optional manual tweak
 
@@ -140,8 +167,9 @@ CP5C: a low-fidelity SVG mockup, developer approval, then a minimal `COMPOSITE`/
 
 | Concept | Observed |
 | --- | --- |
-| Automated suite | 48/48 PASS across the full API service, repeated runs with no flakiness after both real bugs were fixed |
-| Real output inspection | Both arrival orders, the invariant-violation throw, and clean final DB state all observed directly against real Postgres |
+| Automated suite | 54/54 PASS across the full API service, repeated runs with no flakiness after both real bugs (fixed in the core pass) and the hardening pass's own tests were added |
+| Real output inspection | Both arrival orders, the invariant-violation throw, clean final DB state, and all five malformed `supersedes_alert_ids` shapes all observed directly against real Postgres |
 | No fabricated data | The out-of-order referenced alert never exists as a row until its real message arrives; only a pending-table entry exists in the meantime |
-| Advisory locking | Proven as genuine mutual exclusion (a real blocked transaction), not merely inferred from correct outcomes |
+| Advisory locking | Proven as genuine mutual exclusion (a real blocked transaction), not merely inferred from correct outcomes; the composite's own-id lock added in hardening changed no observed outcome |
 | Replay-safe publication | A simulated mid-fan-out Redis failure, followed by redelivery, republished every durable event even though the retry's own DB work was a no-op |
+| Malformed-message policy | A structurally invalid `COMPOSITE` is logged, skipped, and its offset committed, proven by reaching a follow-up valid message on the same partition afterward, not merely by absence of a crash |

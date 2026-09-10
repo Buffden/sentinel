@@ -165,10 +165,41 @@ async function upsertPendingSupersession(
 	);
 }
 
-function extractSupersedesAlertIds(payload: Record<string, unknown>): string[] {
+// Validates payload.supersedes_alert_ids against the COMPOSITE contract:
+// must be an array, must contain at least one entry, and every entry must
+// be a non-empty string. Returns a description of the problem, or null when
+// valid. Exported so the alert-sink boundary (alertSink.ts's eachMessage)
+// can apply the service's existing malformed-message policy (log, skip,
+// commit the offset, never retry a message that will never become valid)
+// before persistCompositeAlert is ever called, and so this same rule isn't
+// duplicated between the two call sites.
+export function validateSupersedesAlertIds(payload: Record<string, unknown>): string | null {
 	const raw = payload['supersedes_alert_ids'];
-	if (!Array.isArray(raw)) return [];
-	return raw.filter((id): id is string => typeof id === 'string');
+	if (!Array.isArray(raw)) {
+		return 'payload.supersedes_alert_ids must be an array';
+	}
+	if (raw.length === 0) {
+		return 'payload.supersedes_alert_ids must contain at least one entry';
+	}
+	for (const id of raw) {
+		if (typeof id !== 'string' || id.length === 0) {
+			return 'payload.supersedes_alert_ids must contain only non-empty strings';
+		}
+	}
+	return null;
+}
+
+// Throws rather than silently coercing malformed input to an empty array:
+// an empty array would make a COMPOSITE supersede nothing, a quietly wrong
+// outcome that looks like a valid, if unusual, message instead of the
+// malformed one it actually is. The alert-sink boundary is expected to have
+// already validated this via validateSupersedesAlertIds and skipped a bad
+// message before calling persistCompositeAlert at all; this throw is a
+// defense-in-depth backstop for any other caller, tests included.
+function extractSupersedesAlertIds(payload: Record<string, unknown>): string[] {
+	const error = validateSupersedesAlertIds(payload);
+	if (error) throw new Error(`invalid COMPOSITE payload: ${error}`);
+	return payload['supersedes_alert_ids'] as string[];
 }
 
 // Persists a COMPOSITE alert and converges every alert it references,
@@ -181,6 +212,14 @@ export async function persistCompositeAlert(alert: AlertMessage): Promise<Publis
 	const sortedRefIds = [...extractSupersedesAlertIds(alert.payload)].sort();
 
 	return withTransaction(async (client) => {
+		// Every alert locks its own alert_id first (matching persistIndividualAlert
+		// and DATA_MODEL.md's Pre-CP5B(b) contract), then the referenced ids,
+		// sorted. Composites are never themselves a supersedes_alert_ids target
+		// in the accepted design, so this isn't load-bearing for any race
+		// reachable today, it exists so the lock discipline is uniform across
+		// every alert this module ever persists, not an exception carved out
+		// for COMPOSITE specifically.
+		await lockAlertId(client, alert.alert_id);
 		for (const refId of sortedRefIds) {
 			await lockAlertId(client, refId);
 		}

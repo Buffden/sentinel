@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import {
 	persistCompositeAlert,
 	persistIndividualAlert,
+	validateSupersedesAlertIds,
 	type PublishedAlert,
 } from './compositeSupersession.js';
 
@@ -107,6 +108,29 @@ export async function startAlertSink(
 					{ topic, partition, offset: String(Number(message.offset) + 1) },
 				]);
 				return;
+			}
+
+			// COMPOSITE has its own required contract on top of the generic
+			// fields above: supersedes_alert_ids must be an array of at least
+			// one non-empty string. A message that fails this can never become
+			// valid on retry, same policy as the generic checks above, log,
+			// skip, commit the offset.
+			if (alert.alert_type === 'COMPOSITE') {
+				const supersedesError = validateSupersedesAlertIds(alert.payload);
+				if (supersedesError) {
+					console.error(
+						JSON.stringify({
+							level: 'error',
+							msg: `COMPOSITE validation failed: ${supersedesError}`,
+							alert_id: alert.alert_id,
+							raw,
+						}),
+					);
+					await consumer.commitOffsets([
+						{ topic, partition, offset: String(Number(message.offset) + 1) },
+					]);
+					return;
+				}
 			}
 
 			// Persist idempotently first. The returned rows are this message's

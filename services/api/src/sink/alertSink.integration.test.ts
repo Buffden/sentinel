@@ -71,16 +71,69 @@ async function cleanupAlerts(...alertIds: string[]): Promise<void> {
 	await pool.query('DELETE FROM alerts WHERE alert_id = ANY($1)', [alertIds]);
 }
 
-// File-level hooks, not nested in any one describe: pool/redis are shared
-// across every describe block below, and tearing them down after only the
-// first block's tests finish would break every sibling block that runs
-// after it (a real bug caught while first running this suite).
+const testKafka = new Kafka({
+	clientId: 'api-alertsink-test',
+	brokers: config.KAFKA_BROKERS,
+	logLevel: 0,
+});
+const producer = testKafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
+const admin = testKafka.admin();
+
+// A fresh consumer group's initial offset (fromBeginning: false) is only
+// resolved once the group has actually joined and been assigned its
+// partition. consumer.run() resolves once the run loop starts, not once
+// that join/assignment has completed, so producing immediately after
+// startAlertSink() races the group actually being ready to receive,
+// intermittently missing the very first message. Poll real group state
+// (the same admin.describeGroups pattern the Alert Evaluator's own
+// ADR-005 tests use) rather than guessing at a fixed delay.
+async function waitForGroupReady(groupId: string, timeoutMs = 15_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const { groups } = await admin.describeGroups([groupId]);
+		if ((groups[0]?.members.length ?? 0) > 0) return;
+		await new Promise((r) => setTimeout(r, 200));
+	}
+	throw new Error(`group ${groupId} never became ready within ${timeoutMs}ms`);
+}
+
+async function waitForAlertEvents(
+	predicate: (msg: Record<string, unknown>) => boolean,
+	count: number,
+	timeoutMs = 10_000,
+): Promise<Record<string, unknown>[]> {
+	const sub = redis.duplicate();
+	const received: Record<string, unknown>[] = [];
+	await new Promise<void>((resolve) => sub.subscribe(config.ALERT_EVENTS_CHANNEL, () => resolve()));
+	sub.on('message', (_channel, message) => {
+		const parsed = JSON.parse(message) as Record<string, unknown>;
+		if (predicate(parsed)) received.push(parsed);
+	});
+
+	const deadline = Date.now() + timeoutMs;
+	while (received.length < count && Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	await sub.unsubscribe();
+	await sub.quit();
+	return received;
+}
+
+// File-level hooks, not nested in any one describe: pool/redis/the test
+// Kafka clients are shared across every describe block below, and tearing
+// them down after only the first block's tests finish would break every
+// sibling block that runs after it (a real bug caught while first running
+// this suite).
 beforeAll(async () => {
 	await pool.query('SELECT 1'); // fail fast with a clear error if Postgres is unreachable
 	await redis.ping(); // fail fast if Redis is unreachable
+	await producer.connect();
+	await admin.connect();
 });
 
 afterAll(async () => {
+	await producer.disconnect();
+	await admin.disconnect();
 	await pool.end();
 	await redis.quit();
 });
@@ -491,6 +544,93 @@ describe('composite supersession convergence (Pre-CP5B, integration)', () => {
 	});
 });
 
+// Pre-CP5B hardening: supersedes_alert_ids validated at the persistence
+// boundary, never silently coerced to []. An empty array would make a
+// COMPOSITE supersede nothing, a quietly wrong outcome, not a visibly
+// malformed one.
+describe('COMPOSITE supersedes_alert_ids validation (Pre-CP5B hardening, integration)', () => {
+	it('rejects a payload with no supersedes_alert_ids field at all', async () => {
+		const composite = buildComposite([]);
+		delete (composite.payload as Record<string, unknown>)['supersedes_alert_ids'];
+
+		await expect(persistCompositeAlert(composite)).rejects.toThrow(/must be an array/);
+
+		const { rows } = await pool.query('SELECT 1 FROM alerts WHERE alert_id = $1', [
+			composite.alert_id,
+		]);
+		expect(rows).toHaveLength(0); // rejected before any row is written
+	});
+
+	it('rejects a non-array supersedes_alert_ids', async () => {
+		const composite = buildComposite([]);
+		(composite.payload as Record<string, unknown>)['supersedes_alert_ids'] = 'not-an-array';
+
+		await expect(persistCompositeAlert(composite)).rejects.toThrow(/must be an array/);
+	});
+
+	it('rejects an empty supersedes_alert_ids array', async () => {
+		const composite = buildComposite([]);
+
+		await expect(persistCompositeAlert(composite)).rejects.toThrow(/at least one entry/);
+
+		const { rows } = await pool.query('SELECT 1 FROM alerts WHERE alert_id = $1', [
+			composite.alert_id,
+		]);
+		expect(rows).toHaveLength(0);
+	});
+
+	it('rejects supersedes_alert_ids containing a non-string entry', async () => {
+		const composite = buildComposite([]);
+		(composite.payload as Record<string, unknown>)['supersedes_alert_ids'] = [123];
+
+		await expect(persistCompositeAlert(composite)).rejects.toThrow(/non-empty strings/);
+	});
+
+	it('rejects supersedes_alert_ids containing an empty string', async () => {
+		const composite = buildComposite([]);
+		(composite.payload as Record<string, unknown>)['supersedes_alert_ids'] = [''];
+
+		await expect(persistCompositeAlert(composite)).rejects.toThrow(/non-empty strings/);
+	});
+
+	it('a real malformed COMPOSITE message is logged, skipped, and its offset committed, never retried forever', async () => {
+		const groupId = `test-api-alertsink-${randomUUID()}`;
+		const composite = buildComposite([]); // empty supersedes_alert_ids: malformed
+
+		const session = await startAlertSink(groupId);
+		try {
+			await waitForGroupReady(groupId);
+			await producer.send({
+				topic: config.ALERTS_TOPIC,
+				messages: [{ key: composite.alert_id, value: JSON.stringify(composite) }],
+			});
+
+			// The offset for this malformed message must still commit (skip, not
+			// block); prove it by producing a second, valid message afterward on
+			// the same partition and confirming the consumer reaches it, which it
+			// cannot do if the first message's offset was never committed.
+			const followUp = buildAlert();
+			const eventsPromise = waitForAlertEvents((m) => m['alert_id'] === followUp.alert_id, 1);
+			await producer.send({
+				topic: config.ALERTS_TOPIC,
+				messages: [{ key: followUp.alert_id, value: JSON.stringify(followUp) }],
+			});
+			const events = await eventsPromise;
+			expect(events).toHaveLength(1);
+
+			const { rows } = await pool.query('SELECT 1 FROM alerts WHERE alert_id = $1', [
+				composite.alert_id,
+			]);
+			expect(rows).toHaveLength(0); // the malformed composite was never persisted
+
+			await cleanupAlerts(followUp.alert_id);
+		} finally {
+			await session.stop();
+			await cleanupAlerts(composite.alert_id);
+		}
+	}, 40_000);
+});
+
 // Advisory-lock mechanism and the concurrency guarantees it exists to prove.
 // Real Postgres locking, not simulated timing.
 describe('advisory locking (Pre-CP5B, integration)', () => {
@@ -594,67 +734,6 @@ describe('advisory locking (Pre-CP5B, integration)', () => {
 // failed on) can only be proven end-to-end through the real eachMessage
 // wrapper, not through persistAlert alone.
 describe('startAlertSink publish after commit and replay-safe redelivery (integration)', () => {
-	const testKafka = new Kafka({
-		clientId: 'api-alertsink-test',
-		brokers: config.KAFKA_BROKERS,
-		logLevel: 0,
-	});
-	const producer = testKafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
-
-	const admin = testKafka.admin();
-
-	beforeAll(async () => {
-		await producer.connect();
-		await admin.connect();
-	});
-
-	afterAll(async () => {
-		await producer.disconnect();
-		await admin.disconnect();
-	});
-
-	// A fresh consumer group's initial offset (fromBeginning: false) is only
-	// resolved once the group has actually joined and been assigned its
-	// partition. consumer.run() resolves once the run loop starts, not once
-	// that join/assignment has completed, so producing immediately after
-	// startAlertSink() races the group actually being ready to receive,
-	// intermittently missing the very first message. Poll real group state
-	// (the same admin.describeGroups pattern the Alert Evaluator's own
-	// ADR-005 tests use) rather than guessing at a fixed delay.
-	async function waitForGroupReady(groupId: string, timeoutMs = 15_000): Promise<void> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			const { groups } = await admin.describeGroups([groupId]);
-			if ((groups[0]?.members.length ?? 0) > 0) return;
-			await new Promise((r) => setTimeout(r, 200));
-		}
-		throw new Error(`group ${groupId} never became ready within ${timeoutMs}ms`);
-	}
-
-	async function waitForAlertEvents(
-		predicate: (msg: Record<string, unknown>) => boolean,
-		count: number,
-		timeoutMs = 10_000,
-	): Promise<Record<string, unknown>[]> {
-		const sub = redis.duplicate();
-		const received: Record<string, unknown>[] = [];
-		await new Promise<void>((resolve) =>
-			sub.subscribe(config.ALERT_EVENTS_CHANNEL, () => resolve()),
-		);
-		sub.on('message', (_channel, message) => {
-			const parsed = JSON.parse(message) as Record<string, unknown>;
-			if (predicate(parsed)) received.push(parsed);
-		});
-
-		const deadline = Date.now() + timeoutMs;
-		while (received.length < count && Date.now() < deadline) {
-			await new Promise((r) => setTimeout(r, 100));
-		}
-		await sub.unsubscribe();
-		await sub.quit();
-		return received;
-	}
-
 	it('persists and publishes the canonical row after commit, for a plain individual alert', async () => {
 		const groupId = `test-api-alertsink-${randomUUID()}`;
 		const alert = buildAlert();
