@@ -1,6 +1,6 @@
 # Composite Candidate Wiring Debrief
 
-CP5A, commit hash filled in once committed.
+CP5A, commit `b34ac03`.
 
 ---
 
