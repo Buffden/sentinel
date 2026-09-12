@@ -79,10 +79,12 @@ function parsePositionFrame(data: unknown): TrackedEntityUpdate | null {
 interface WsAlertData {
 	alert_id: string
 	entity_id: string
+	counterparty_entity_id: string | null
 	entity_type: string
 	alert_type: string
 	priority: string
 	status: string
+	superseded_by: string | null
 	detected_at_ms: number
 	payload: Record<string, unknown>
 }
@@ -104,9 +106,11 @@ function parseAlertFrame(data: unknown): Alert | null {
 		id: a.alert_id,
 		alertType: a.alert_type,
 		entityId: a.entity_id,
+		counterpartyEntityId: a.counterparty_entity_id ?? null,
 		entityType: a.entity_type,
 		status: a.status,
 		priority: a.priority,
+		supersededBy: a.superseded_by ?? null,
 		detectedAtMs: a.detected_at_ms,
 		payload: a.payload ?? {},
 	}

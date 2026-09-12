@@ -11,10 +11,12 @@ import type { Alert } from './model'
 export interface WireAlertDto {
 	alert_id: string
 	entity_id: string
+	counterparty_entity_id: string | null
 	entity_type: string
 	alert_type: string
 	priority: string
 	status: string
+	superseded_by: string | null
 	payload: Record<string, unknown>
 	detected_at: string
 	updated_at: string
@@ -27,9 +29,11 @@ export function wireToAlert(dto: WireAlertDto): Alert {
 		id: dto.alert_id,
 		alertType: dto.alert_type,
 		entityId: dto.entity_id,
+		counterpartyEntityId: dto.counterparty_entity_id,
 		entityType: dto.entity_type,
 		status: dto.status,
 		priority: dto.priority,
+		supersededBy: dto.superseded_by,
 		detectedAtMs: new Date(dto.detected_at).getTime(),
 		payload: dto.payload,
 	}
