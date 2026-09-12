@@ -58,4 +58,10 @@ export const config = {
 		process.env['POLLER_BATCH_MAX_MESSAGES'],
 		0,
 	),
+
+	// OAuth2 client-credentials, from OpenSky's account "API Client" section.
+	// Optional: undefined means unauthenticated requests, same as before —
+	// the poller falls back to the anonymous rate limit rather than failing.
+	OPENSKY_CLIENT_ID: process.env['OPENSKY_CLIENT_ID'] || undefined,
+	OPENSKY_CLIENT_SECRET: process.env['OPENSKY_CLIENT_SECRET'] || undefined,
 } as const;

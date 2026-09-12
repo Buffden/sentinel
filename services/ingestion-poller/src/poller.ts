@@ -22,6 +22,12 @@
 //   10 seconds. POLL_INTERVAL_MS defaults to 10 000. OPENSKY_LAMIN/LOMIN/
 //   LAMAX/LOMAX scope the bounding box to reduce response size and credit
 //   consumption. Defaults cover UK + Western Europe.
+//
+// Authentication:
+//   OPENSKY_CLIENT_ID/OPENSKY_CLIENT_SECRET (optional) enable OAuth2
+//   client-credentials auth, which OpenSky grants a materially higher rate
+//   limit than anonymous access. Without them, requests are unauthenticated,
+//   same behavior as before this existed.
 
 import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
@@ -101,6 +107,57 @@ function log(
 	);
 }
 
+// ---- OpenSky auth ------------------------------------------------------------
+
+// OpenSky's OAuth2 token endpoint (Keycloak, client-credentials grant).
+const OPENSKY_TOKEN_URL =
+	'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
+
+interface CachedToken {
+	accessToken: string;
+	expiresAtMs: number;
+}
+
+let cachedToken: CachedToken | null = null;
+
+// Returns a bearer token when OPENSKY_CLIENT_ID/SECRET are configured, null
+// otherwise (falls back to unauthenticated requests). Caches the token until
+// shortly before its own expiry so most poll cycles reuse it instead of
+// re-authenticating every 10s.
+async function getAccessToken(): Promise<string | null> {
+	if (!config.OPENSKY_CLIENT_ID || !config.OPENSKY_CLIENT_SECRET) return null;
+
+	const now = Date.now();
+	if (cachedToken && cachedToken.expiresAtMs > now) return cachedToken.accessToken;
+
+	const body = new URLSearchParams({
+		grant_type: 'client_credentials',
+		client_id: config.OPENSKY_CLIENT_ID,
+		client_secret: config.OPENSKY_CLIENT_SECRET,
+	});
+
+	const response = await fetch(OPENSKY_TOKEN_URL, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+		body,
+		signal: AbortSignal.timeout(config.FETCH_TIMEOUT_MS),
+	});
+
+	if (!response.ok) {
+		throw new Error(`OpenSky token request failed: HTTP ${response.status}`);
+	}
+
+	const data = (await response.json()) as { access_token: string; expires_in: number };
+
+	// Refresh 60s before actual expiry so a cached token is never used right up
+	// against the moment it stops being valid mid-request.
+	cachedToken = {
+		accessToken: data.access_token,
+		expiresAtMs: now + (data.expires_in - 60) * 1000,
+	};
+	return cachedToken.accessToken;
+}
+
 // ---- OpenSky fetch ---------------------------------------------------------
 
 // OpenSky returns state vectors as positional arrays. Index positions are fixed
@@ -137,8 +194,12 @@ export function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEv
 async function fetchStateVectors(): Promise<AdsbRawEvent[]> {
 	const fetchedAtMs = Date.now();
 
+	const token = await getAccessToken();
+	const headers: Record<string, string> = { Accept: 'application/json' };
+	if (token) headers['Authorization'] = `Bearer ${token}`;
+
 	const response = await fetch(OPENSKY_URL, {
-		headers: { Accept: 'application/json' },
+		headers,
 		signal: AbortSignal.timeout(config.FETCH_TIMEOUT_MS),
 	});
 
@@ -237,6 +298,7 @@ async function run(): Promise<void> {
 		fetch_timeout_ms: config.FETCH_TIMEOUT_MS,
 		batch_max_messages:
 			config.POLLER_BATCH_MAX_MESSAGES === 0 ? 'unlimited' : config.POLLER_BATCH_MAX_MESSAGES,
+		authenticated: Boolean(config.OPENSKY_CLIENT_ID && config.OPENSKY_CLIENT_SECRET),
 	});
 
 	// Run the first poll immediately so you see output without waiting a full
