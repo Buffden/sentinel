@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import { authRouter } from './routes/auth.js';
 import { alertsRouter } from './routes/alerts.js';
 import { entitiesLiveRouter } from './routes/entitiesLive.js';
+import { workspaceRouter } from './routes/workspace.js';
 import { requireAuth } from './middleware/auth.js';
 import { startAlertSink } from './sink/alertSink.js';
 import { attachWebSocketServer } from './ws/wsServer.js';
@@ -32,6 +33,7 @@ app.get('/healthz-auth', (_req, res) => {
 
 app.use('/alerts', alertsRouter);
 app.use('/entities/live', entitiesLiveRouter);
+app.use('/users/me/workspace', workspaceRouter);
 
 // Create HTTP server so we can intercept upgrade requests for WebSocket auth.
 const server = http.createServer(app);

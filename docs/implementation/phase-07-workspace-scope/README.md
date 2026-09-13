@@ -13,7 +13,7 @@ See [`phase-07-workspace-scope.md`](phase-07-workspace-scope.md) for the origina
 | Checkpoint | Scope | Status |
 | --- | --- | --- |
 | Pre-CP1 | Design-only: resolve the `POST`/`PUT /users/me/workspace` contract — request/response shapes, demo-role exclusion, `entity_types` restricted to `["aircraft"]` in v1, `404` no-workspace convention, validation rules. Documented in `DATA_MODEL.md` and this checkpoint's concept doc before any code exists. No code. | Done |
-| CP1 | Predefined region list + `POST`/`PUT /users/me/workspace` implementing Pre-CP1's resolved contract. No REST/WebSocket filtering enforcement yet. API only. | Pending |
+| CP1 | Predefined region list + `POST`/`PUT /users/me/workspace` implementing Pre-CP1's resolved contract. No REST/WebSocket filtering enforcement yet. API only. | Done |
 | CP2 | Server-side REST filtering: `GET /alerts` applies the caller's saved scope before returning rows. | Pending |
 | CP3 | Server-side WebSocket filtering: `{connection_id -> scope}` map loaded at WS upgrade, applied to `alert-events` fan-out. | Pending |
 | CP4 | Scope-update flow: `PUT` updates the saved scope, dashboard reconnects the WebSocket to pick it up; workspace restore on reload/reconnect. | Pending |
@@ -35,4 +35,4 @@ Look up any checkpoint's commit with `git log --oneline` from the repository roo
 | [`phase-07-workspace-scope.md`](phase-07-workspace-scope.md) | Original phase plan: goal, backend/frontend scope, required experiments, exit criteria |
 | [`concepts/`](concepts/README.md) | Concept notes and checkpoint debriefs, in reading order |
 
-Phase 07 is in progress. Pre-CP1's design is resolved and documented; CP1's implementation has not started.
+Phase 07 is in progress. CP1 is implemented, tested (unit + integration against real Postgres), and manually verified through the real running dashboard and API, with the resulting `user_workspaces` row inspected directly in Postgres. CP2 has not started.

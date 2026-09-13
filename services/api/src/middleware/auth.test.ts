@@ -88,6 +88,7 @@ describe('requireAuth', () => {
 		expect(next).toHaveBeenCalledTimes(1);
 		expect(res.locals['userId']).toBe('u1');
 		expect(res.locals['userEmail']).toBe('u1@example.com');
+		expect(res.locals['userRole']).toBe('operator');
 		expect(res.status).not.toHaveBeenCalled();
 	});
 
@@ -100,5 +101,6 @@ describe('requireAuth', () => {
 		requireAuth(req, res, next);
 
 		expect(next).toHaveBeenCalledTimes(1);
+		expect(res.locals['userRole']).toBe('demo');
 	});
 });
