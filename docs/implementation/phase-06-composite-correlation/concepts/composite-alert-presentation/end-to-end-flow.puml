@@ -1,0 +1,24 @@
+@startuml end-to-end-flow
+title From a quiet aircraft to a card on your screen
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+:An aircraft goes quiet, and\nsomething unexpected happens nearby;
+:The system notices both facts\nand decides they're one incident;
+:It writes one combined alert,\nand a note that the old alert\nis now replaced;
+:That gets saved to the database\nas a single, all-or-nothing step;
+:Every connected dashboard\nis told about both changes;
+:The alert list on screen redraws:\none combined card, the old\nalert tucked underneath it;
+
+stop
+@enduml
