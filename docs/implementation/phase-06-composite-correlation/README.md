@@ -14,24 +14,24 @@ See [`phase-06-composite-correlation.md`](phase-06-composite-correlation.md) for
 
 ## Checkpoint progress
 
-| Checkpoint | Commit | Scope | Status |
-| --- | --- | --- | --- |
-| CP1 | `7e67457` | Bound `recent-loss` correlation window with an atomic `MULTI` (`HSET` + `PEXPIRE` + `DEL`) TTL handoff | Done |
-| Pre-CP2A | `9e67ad7` | Restore ADR-005: scope Alert Evaluator candidate-consumer Kafka group membership to the perceived lease holder | Done |
-| Pre-CP2B | `4952e95` | Define the composite correlation eligibility formula and both-entities-qualify tie-break in `DATA_MODEL.md`, before any code depended on it | Done |
-| CP2 | `1efa70c` | Read-only composite eligibility resolution (`resolveEntityLossEpisode`, `selectWinningEpisode`, `resolveCompositeEligibility`) — no Redis mutation, no Kafka emission, not wired into `handleProximityCandidate` | Done |
-| Pre-CP3A | `2fd1104` | Design/document the crash-safe claim + decision protocol for consuming a signal-loss episode into a `COMPOSITE` — no code | Done |
-| CP3A | `222bd3d` | Make the `alert-state` → `recent-loss` handoff coordination-safe: a single atomic Lua transfer, not read-then-`MULTI`-write. Position Consumer only; no Alert Evaluator claim code | Done |
-| CP3B | `927c2d9` | Implement `claimCompositeEpisode`/`finalizeCompositeEpisode` — representation-independent Lua primitives across `alert-state`/`recent-loss`, identified by `entity_id` + `expected_dark_since_ms` + `candidate_id`. No Kafka emission, no `alert-decision` records, not wired into `handleProximityCandidate` | Done |
-| CP3C | `1009865` | Implement `readCandidateDecision`/`writeCandidateDecisionIfAbsent` for `alert-decision:{pair_key}:{episode_start_ms}` — write-once immutable, idempotent create, throws on conflict rather than silently overwriting. Not wired into Kafka handling; no deletion logic yet | Done |
-| CP4 | `3ce8844` | Pure, deterministic `COMPOSITE` alert builder — no Redis, no Kafka, no API. Alert Evaluator only | Done |
-| CP5A | `b34ac03` | Wire CP2 → CP3B → CP3C → CP4 into `handleProximityCandidate`; publish `COMPOSITE`/`UNSCHEDULED_PROXIMITY`; reason-aware FINALIZE (`SUCCESS`/`NO_EPISODE`/`NOT_CLAIMED`) and a stray-claim release primitive per the reviewed Pre-CP5A design. No decision-record deletion: retained indefinitely for this checkpoint, reclamation deferred (Pre-CP5A(d)). Alert Evaluator only | Done |
-| **Pre-CP5B** | `bfb66d5` | **Design-only:** resolve out-of-order convergence between `SIGNAL_LOSS` and `COMPOSITE` arriving at the API in either order, a pending-supersession table plus per-`alert_id` advisory locking, symmetric ownership-conflict invariants, and replay-safe post-commit publication, no code | **Done** |
-| CP5B | `799c79b` | API atomic `COMPOSITE` insert + convergent supersession of referenced active alerts per Pre-CP5B's resolution, `pending_alert_supersessions` table, `pg_advisory_xact_lock`-based coordination, symmetric invariant checks at the pending-row and row levels, and publish-after-commit that always republishes canonical current state, never only what one delivery attempt mutated. API only | Done |
-| CP5C | — | SVG mockup → developer approval → minimal `COMPOSITE`/`SUPERSEDED` presentation, rendering `supersedes_alert_ids` generically (whatever it contains, not assumed to be exactly two fixed alert types) off the already-existing WebSocket path (Phase 03) — no Phase 08 fan-out infrastructure required. Dashboard only | Pending |
-| CP6 | — | Backend failure experiments (including `NEW`/`ACKNOWLEDGED` → `SUPERSEDED`, `RESOLVED` stays terminal, both arrival orders from Pre-CP5B) + a UI sanity pass for the transitions CP5C actually renders | Pending |
+| Checkpoint | Scope | Status |
+| --- | --- | --- |
+| CP1 | Bound `recent-loss` correlation window with an atomic `MULTI` (`HSET` + `PEXPIRE` + `DEL`) TTL handoff | Done |
+| Pre-CP2A | Restore ADR-005: scope Alert Evaluator candidate-consumer Kafka group membership to the perceived lease holder | Done |
+| Pre-CP2B | Define the composite correlation eligibility formula and both-entities-qualify tie-break in `DATA_MODEL.md`, before any code depended on it | Done |
+| CP2 | Read-only composite eligibility resolution (`resolveEntityLossEpisode`, `selectWinningEpisode`, `resolveCompositeEligibility`) — no Redis mutation, no Kafka emission, not wired into `handleProximityCandidate` | Done |
+| Pre-CP3A | Design/document the crash-safe claim + decision protocol for consuming a signal-loss episode into a `COMPOSITE` — no code | Done |
+| CP3A | Make the `alert-state` → `recent-loss` handoff coordination-safe: a single atomic Lua transfer, not read-then-`MULTI`-write. Position Consumer only; no Alert Evaluator claim code | Done |
+| CP3B | Implement `claimCompositeEpisode`/`finalizeCompositeEpisode` — representation-independent Lua primitives across `alert-state`/`recent-loss`, identified by `entity_id` + `expected_dark_since_ms` + `candidate_id`. No Kafka emission, no `alert-decision` records, not wired into `handleProximityCandidate` | Done |
+| CP3C | Implement `readCandidateDecision`/`writeCandidateDecisionIfAbsent` for `alert-decision:{pair_key}:{episode_start_ms}` — write-once immutable, idempotent create, throws on conflict rather than silently overwriting. Not wired into Kafka handling; no deletion logic yet | Done |
+| CP4 | Pure, deterministic `COMPOSITE` alert builder — no Redis, no Kafka, no API. Alert Evaluator only | Done |
+| CP5A | Wire CP2 → CP3B → CP3C → CP4 into `handleProximityCandidate`; publish `COMPOSITE`/`UNSCHEDULED_PROXIMITY`; reason-aware FINALIZE (`SUCCESS`/`NO_EPISODE`/`NOT_CLAIMED`) and a stray-claim release primitive per the reviewed Pre-CP5A design. No decision-record deletion: retained indefinitely for this checkpoint, reclamation deferred (Pre-CP5A(d)). Alert Evaluator only | Done |
+| **Pre-CP5B** | **Design-only:** resolve out-of-order convergence between `SIGNAL_LOSS` and `COMPOSITE` arriving at the API in either order, a pending-supersession table plus per-`alert_id` advisory locking, symmetric ownership-conflict invariants, and replay-safe post-commit publication, no code | **Done** |
+| CP5B | API atomic `COMPOSITE` insert + convergent supersession of referenced active alerts per Pre-CP5B's resolution, `pending_alert_supersessions` table, `pg_advisory_xact_lock`-based coordination, symmetric invariant checks at the pending-row and row levels, and publish-after-commit that always republishes canonical current state, never only what one delivery attempt mutated. API only | Done |
+| CP5C | Mockup approved → minimal `COMPOSITE`/`SUPERSEDED` presentation, rendering `supersedes_alert_ids` generically off the already-existing WebSocket path (Phase 03). Dashboard only | Done |
+| CP6 | Backend failure experiments (including `NEW`/`ACKNOWLEDGED` → `SUPERSEDED`, `RESOLVED` stays terminal, both arrival orders from Pre-CP5B) + a UI sanity pass for the transitions CP5C actually renders | Done |
 
-Look up any commit's full diff with `git show <hash>` from the repository root.
+Look up any checkpoint's commit with `git log --oneline` from the repository root.
 
 **CP4/CP5A/Pre-CP5B/CP5B/CP5C replace the earlier single "CP4"/"CP5" sketch.** Two rounds of review (including cross-checks against a second model) surfaced one real correctness blocker and several scope corrections:
 
@@ -59,5 +59,6 @@ CP5C is gated by `CLAUDE.md`'s existing Workspace Visual Language rule: a low-fi
 | --- | --- |
 | [`phase-06-composite-correlation.md`](phase-06-composite-correlation.md) | Original phase plan: goal, paths to test, required failure experiments, exit criteria |
 | [`concepts/`](concepts/README.md) | Concept notes and checkpoint debriefs, in reading order |
+| [`exit-verification.md`](exit-verification.md) | Final consolidated pass: container/service health, every store and Kafka topic Phase 06 touched, failure experiments, exit criteria |
 
-No `exit-verification.md` yet — Phase 06 is not complete. It will be added once every checkpoint above is Done, following the Phase 05 pattern.
+Phase 06 is complete: every checkpoint above (CP1 through CP6) is Done. See `exit-verification.md` for the consolidated exit pass.

@@ -1,0 +1,38 @@
+@startuml two-orders-same-result
+title Either order, same end result
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+
+fork
+  :Combined alert arrives first;
+  :Shows on screen by itself\n(nothing to nest yet);
+  :"Went dark" alert arrives\na moment later;
+  :Now nests underneath\nthe combined alert;
+fork again
+  :"Went dark" alert arrives first;
+  :Shows on screen as its own card;
+  :Combined alert arrives\na moment later;
+  :"Went dark" alert immediately\nmoves under it, marked replaced;
+end fork
+
+:Same end result either way:\none combined alert card,\nthe replaced alert nested\nunderneath it;
+
+note right
+  Whichever of the two alerts the
+  system hears about first, the
+  operator ends up looking at the
+  identical, correct picture.
+end note
+
+stop
+@enduml

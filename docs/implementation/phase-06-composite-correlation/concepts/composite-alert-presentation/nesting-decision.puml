@@ -1,0 +1,43 @@
+@startuml nesting-decision
+title How the dashboard decides what nests under what
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam ArrowColor #555555
+skinparam ActivityBackgroundColor #F5F5F5
+skinparam ActivityBorderColor #888888
+skinparam ActivityDiamondBackgroundColor #FFFDE7
+skinparam ActivityDiamondBorderColor #AAAAAA
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+start
+:Look at one alert on screen;
+
+if (Is it a combined alert?) then (yes)
+  :Read its own "these are replaced" list;
+  if (Do we know any of those alerts locally?) then (yes)
+    :Draw them nested underneath,\ngrayed out, tagged "replaced";
+  else (not yet)
+    :Draw the combined alert alone;
+    note right
+      Nothing invented here.
+      If we don't know about it,
+      we just don't show it.
+    end note
+  endif
+  :Draw the combined alert\nas its own top-level card;
+else (no)
+  if (Does some combined alert's\n"replaced" list mention this one?) then (yes)
+    :Don't draw it again on its own;
+    note right
+      It already got drawn nested
+      under its parent, above.
+    end note
+  else (no)
+    :Draw it as its own\nordinary top-level card;
+  endif
+endif
+
+stop
+@enduml
