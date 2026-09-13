@@ -120,6 +120,7 @@ An operator can update their scope while the WebSocket is open. The dashboard ca
 - On WebSocket upgrade, the API loads the operator's saved scope from `user_workspaces` into this map
 - The API publishes each consumed alert to `alert-events` Redis pub/sub; all instances receive it and evaluate against their local connection scope maps
 - Alert scope filtering uses the position in the alert payload, not the current Redis position
-- `GET /users/me/workspace` returns the saved scope (used by the dashboard on load to decide whether to show the scope prompt or restore the previous view)
+- `POST /users/me/workspace` returns the saved scope (used by the dashboard on load to decide whether to show the scope prompt or restore the previous view). `POST` instead of `GET` is a deliberate convention for read endpoints going forward: it keeps the door open for adding filter/query criteria in the request body later without a breaking URL change. No filtering exists on this endpoint yet — it always returns the caller's own single workspace row, resolved from the JWT.
 - `PUT /users/me/workspace` updates the saved scope; the dashboard then reconnects the WebSocket to pick up the new scope server-side
+- This `POST`-for-reads convention applies to new endpoints only; already-shipped `GET` endpoints (`GET /alerts`, `GET /entities/live`) are not retrofitted
 - A predefined region list (name + bounding box) is maintained as a static JSON file in the API service - no database table needed for regions in v1
