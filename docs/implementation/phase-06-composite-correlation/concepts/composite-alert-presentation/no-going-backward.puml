@@ -1,0 +1,34 @@
+@startuml no-going-backward
+title An alert's status can't go backward on screen
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 13
+skinparam StateBackgroundColor #F5F5F5
+skinparam StateBorderColor #888888
+skinparam ArrowColor #555555
+skinparam NoteBackgroundColor #FAFAFA
+skinparam NoteBorderColor #AAAAAA
+
+[*] --> New
+
+New --> Acknowledged
+New --> Replaced
+New --> Resolved
+Acknowledged --> Replaced
+Acknowledged --> Resolved
+
+state Replaced #FFE4E4
+state Resolved #FFE4E4
+
+Replaced --> [*]
+Resolved --> [*]
+
+note bottom of Replaced
+  Once an alert reaches Replaced
+  or Resolved, a late, out-of-order
+  update saying "actually it's still
+  New" is thrown away, not applied.
+  The screen never flips back.
+end note
+
+@enduml
