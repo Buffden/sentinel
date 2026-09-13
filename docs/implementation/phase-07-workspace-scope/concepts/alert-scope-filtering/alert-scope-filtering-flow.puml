@@ -1,0 +1,56 @@
+@startuml alert-scope-filtering-flow
+title GET /alerts Server-Side Scope Filtering (CP2)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+actor "Operator or\nDemo viewer" as Op
+participant "Dashboard" as UI #E0E7FF
+participant "API\n(requireAuth)" as API #DBEAFE
+database "TimescaleDB\nalerts" as DB #FEF9C3
+
+Op -> UI : opens alerts widget
+UI -> API : GET /alerts[?bbox=...]
+API -> DB : SELECT ... WHERE status IN ('NEW','ACKNOWLEDGED')
+
+alt role == operator
+  API -> API : load saved user_workspaces scope
+  alt no saved workspace
+    API --> UI : 200 [] (empty -- show scope setup prompt)
+  else scope exists
+    API -> API : matchesScope(row, {bounds, entity_types, alert_types})\nfor every fetched row
+    API --> UI : 200 [...only in-scope rows...]
+  end
+else role == demo
+  alt bbox provided
+    API -> API : matchesScope(row, {bounds: bbox, entity_types: null, alert_types: null})\nfor every fetched row
+    API --> UI : 200 [...rows within bbox only...]
+  else no bbox
+    API --> UI : 200 [...every fetched row, unfiltered...]
+    note right of API
+      Transitional: nothing sends bbox yet
+      (dashboard alert widget doesn't pass
+      the map viewport until CP5's frontend
+      work wires it up). Safe fallback --
+      matches today's existing behavior.
+    end note
+  end
+end
+
+note over API, DB
+  Position always read from the alert's own payload
+  (immutable at detection time), never current Redis
+  state. Field path differs by alert_type -- see
+  ADR-012. A row whose type yields no known position
+  (only possible for ROUTE_DEVIATION today) is excluded,
+  never included by a fallback guess.
+end note
+
+@enduml

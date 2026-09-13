@@ -698,9 +698,14 @@ Response: array of entity snapshots.
 | `entity_subtype` | string \| null | Redis hash |
 | `live_geo_cell` | string | Redis hash |
 
-### `GET /alerts`
+### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}` (`bbox` optional)
 
-Returns persisted alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered by the authenticated user's workspace scope.
+Returns persisted `NEW`/`ACKNOWLEDGED` alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
+
+- **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types` + `alert_types`). No saved workspace yields an empty array, not an unfiltered one — the dashboard is expected to show the scope setup prompt instead. Any `bbox` query param is ignored for an operator; the saved scope is authoritative.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered (every `NEW`/`ACKNOWLEDGED` alert) — the transitional behavior until a frontend caller passes the map's current viewport.
+
+Position is read from the alert's own `payload`, not current Redis state, and the field path differs by `alert_type` — see ADR-012's corrected field list. An alert whose payload doesn't yield a usable position for its type (this can only be `ROUTE_DEVIATION` today, whose payload shape is undecided since Phase 04 is deferred) is excluded, never included by a fallback guess.
 
 ### `POST /users/me/workspace`
 

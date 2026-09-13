@@ -1,0 +1,73 @@
+@startuml alert-scope-filtering-classes
+title Shared Scope Predicate: One Definition, Two Callers (CP2 / future CP3)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam classBorderColor #888888
+skinparam classBackgroundColor #FAFAFA
+skinparam classHeaderBackgroundColor #DBEAFE
+
+class AlertRow <<alerts table row>> {
+  alert_id: string
+  entity_id: string
+  entity_type: string
+  alert_type: string
+  payload: JSONB
+}
+
+class GeoBounds {
+  min_lat: number
+  max_lat: number
+  min_lon: number
+  max_lon: number
+}
+
+class ScopeFilter <<the shared predicate's one input shape>> {
+  bounds: GeoBounds
+  entity_types: string[] | null
+  alert_types: string[] | null
+}
+
+note right of ScopeFilter
+  null on entity_types/alert_types means
+  "no restriction" -- used only by demo's
+  ad-hoc bbox filter, which has no saved
+  entity/alert-type dimension to draw from.
+  An operator's ScopeFilter always carries
+  concrete arrays from their saved scope.
+end note
+
+class "extractAlertPosition()" as Extract <<pure function>> {
+  SIGNAL_LOSS -> payload.last_known_lat/lon
+  UNSCHEDULED_PROXIMITY -> payload.lat/lon
+  COMPOSITE -> payload.proximity.lat/lon
+  ROUTE_DEVIATION -> null (undecided, fail closed)
+}
+
+class "matchesScope()" as Predicate <<pure function, one definition>> {
+  (alert: AlertRow, scope: ScopeFilter) => boolean
+}
+
+class "GET /alerts (CP2)" as RestCaller <<REST, this checkpoint>> {
+  builds ScopeFilter from saved\nuser_workspaces row, or\nfrom a demo bbox query param
+}
+
+class "alert-events fan-out (future CP3)" as WsCaller <<WebSocket, not yet built>> {
+  builds ScopeFilter from the same\nsaved user_workspaces row,\nheld in the connection map
+}
+
+AlertRow --> Extract : input
+Extract --> Predicate : position (or null -> excluded)
+GeoBounds *-- ScopeFilter
+ScopeFilter --> Predicate : input
+RestCaller ..> Predicate : calls
+WsCaller ..> Predicate : will call
+
+note bottom of Predicate
+  One function, tested once. REST and the
+  future WebSocket path can never disagree
+  on what counts as "in scope" because
+  neither reimplements the check.
+end note
+
+@enduml
