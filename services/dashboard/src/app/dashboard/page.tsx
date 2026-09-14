@@ -7,9 +7,9 @@ import Footer from '@/shell/Footer'
 import Workspace from '@/workspace/Workspace'
 import DemoExpiredBanner from '@/shared/ui/DemoExpiredBanner'
 import NavUserIcons from '@/shared/ui/NavUserIcons'
+import WorkspaceScopeControl from '@/features/workspace/WorkspaceScopeControl'
 
 type AuthState = 'checking' | 'ok' | 'redirecting'
-
 
 export default function DashboardPage() {
 	const router = useRouter()
@@ -64,7 +64,14 @@ export default function DashboardPage() {
 			}}
 		>
 			{demoExpired && <DemoExpiredBanner onDismiss={() => setDemoExpired(false)} />}
-			<TopNav right={<NavUserIcons />} />
+			<TopNav
+				right={
+					<div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+						<WorkspaceScopeControl />
+						<NavUserIcons />
+					</div>
+				}
+			/>
 			<Workspace onDemoExpired={() => setDemoExpired(true)} />
 			<Footer />
 		</div>
