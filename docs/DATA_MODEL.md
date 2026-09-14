@@ -767,7 +767,7 @@ Clients must render the position with the highest `timestamp_ms` received for a 
 
 ### WebSocket — alert event message
 
-Forwarded from `alert-events` Redis pub/sub. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
+Forwarded from `alert-events` Redis pub/sub, scope-filtered per connection before delivery — same `matchesScope` rule as `GET /alerts`, see ADR-012. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
 
 ```json
 {
@@ -776,6 +776,7 @@ Forwarded from `alert-events` Redis pub/sub. Clients append to the alert list; d
   "alert_id": "abc123:SIGNAL_LOSS:1787634000000",
   "alert_type": "SIGNAL_LOSS",
   "entity_id": "abc123",
+  "entity_type": "aircraft",
   "counterparty_entity_id": null,
   "priority": "STANDARD",
   "status": "NEW",
