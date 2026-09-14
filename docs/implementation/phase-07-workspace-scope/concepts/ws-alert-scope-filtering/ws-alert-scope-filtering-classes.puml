@@ -1,0 +1,59 @@
+@startuml ws-alert-scope-filtering-classes
+title Per-Connection State, Reusing CP2's Predicate (CP3)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam classBorderColor #888888
+skinparam classBackgroundColor #FAFAFA
+skinparam classHeaderBackgroundColor #DBEAFE
+
+class ConnectionState <<one per open WebSocket, replaces the old bare connectionBBox map>> {
+  role: 'operator' | 'demo'
+  userId: string
+  positionBBox: BBox | null
+  operatorScope: ScopeFilter | null
+  scopeLoaded: boolean
+}
+
+note right of ConnectionState
+  positionBBox is unchanged from before CP3 --
+  still drives position-updates filtering.
+  operatorScope/scopeLoaded are new: loaded
+  once from user_workspaces at connection open,
+  for role == operator only. Demo never
+  populates operatorScope -- it filters alerts
+  from positionBBox instead, at delivery time.
+end note
+
+class ScopeFilter <<from CP2, unchanged>> {
+  bounds: GeoBounds
+  entity_types: string[] | null
+  alert_types: string[] | null
+}
+
+class "matchesScope()" as Predicate <<from CP2, unchanged>> {
+  (alert: AlertForScopeCheck, scope: ScopeFilter) => boolean
+}
+
+class "GET /alerts (CP2)" as RestCaller <<REST>> {
+}
+
+class "alert-events fan-out (CP3, this checkpoint)" as WsCaller <<WebSocket>> {
+  operator: scope from ConnectionState.operatorScope
+  demo: ephemeral ScopeFilter built\nfrom ConnectionState.positionBBox
+}
+
+ConnectionState --> ScopeFilter : operatorScope
+ConnectionState --> "BBox" : positionBBox
+RestCaller ..> Predicate : calls
+WsCaller ..> Predicate : calls
+WsCaller ..> ScopeFilter : builds (from saved scope\nor ephemeral bbox)
+
+note bottom of WsCaller
+  Nothing about matchesScope changed for CP3.
+  The only new code is what builds a ScopeFilter
+  and when -- once per connection for an operator,
+  freshly from positionBBox on every alert for demo.
+end note
+
+@enduml

@@ -1,0 +1,76 @@
+@startuml workspace-scope-classes
+title Workspace Scope Data Shapes (CP1)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam classBorderColor #888888
+skinparam classBackgroundColor #FAFAFA
+skinparam classHeaderBackgroundColor #DBEAFE
+
+class User {
+  user_id: UUID
+  google_sub: string
+  email: string
+  last_login_at: timestamptz
+}
+
+class UserWorkspace <<TimescaleDB row>> {
+  user_id: UUID (PK, FK)
+  scope: JSONB
+  updated_at: timestamptz
+}
+
+class WorkspaceScope <<embedded in scope JSONB>> {
+  geo_region: GeoRegionSelection
+  entity_types: EntityType[]
+  alert_types: AlertType[]
+}
+
+class GeoRegionSelection {
+  name: string | null
+  bounds: GeoBounds
+}
+
+class GeoBounds {
+  min_lat: number
+  max_lat: number
+  min_lon: number
+  max_lon: number
+}
+
+class PredefinedRegion <<static file, not a table>> {
+  name: string
+  bounds: GeoBounds
+}
+
+enum EntityType {
+  aircraft
+  ' vessel intentionally not offered in v1 --
+  ' no such entity exists yet (CLAUDE.md:
+  ' do not implement future domains early)
+}
+
+enum AlertType {
+  SIGNAL_LOSS
+  UNSCHEDULED_PROXIMITY
+  COMPOSITE
+  ' ROUTE_DEVIATION valid once Phase 04 resumes
+}
+
+User "1" -- "0..1" UserWorkspace : owns
+UserWorkspace *-- "1" WorkspaceScope : scope column holds
+WorkspaceScope *-- "1" GeoRegionSelection
+WorkspaceScope "1" o-- "0..*" EntityType : entity_types
+WorkspaceScope "1" o-- "0..*" AlertType : alert_types
+GeoRegionSelection *-- "1" GeoBounds
+GeoRegionSelection ..> PredefinedRegion : name, if non-null,\nmust match a catalog entry
+
+note bottom of GeoRegionSelection
+  bounds is always present and is the only
+  field filtering evaluates. name is display/
+  provenance only -- null means the operator
+  drew a custom box instead of picking one
+  from PredefinedRegion's static catalog.
+end note
+
+@enduml

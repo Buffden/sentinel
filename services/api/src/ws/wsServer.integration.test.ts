@@ -1,12 +1,13 @@
 // Integration tests for wsServer.ts: JWT-gated WebSocket upgrade, position
-// bbox filtering, unfiltered alert fan-out, and demo-session lifecycle.
-// Runs a real http.Server + real `ws` client + real Redis (docker-compose),
-// not mocks — the guarantee under test is "an unauthenticated socket never
-// completes the handshake" and "a client only sees what its subscription
-// says it should," which live in real HTTP-Upgrade and Redis pub/sub
-// behavior, not application code a mock could fake.
+// bbox filtering, scope-filtered alert fan-out, and demo-session lifecycle.
+// Runs a real http.Server + real `ws` client + real Redis + real Postgres
+// (docker-compose), not mocks — the guarantee under test is "an
+// unauthenticated socket never completes the handshake" and "a client only
+// sees what its scope says it should," which live in real HTTP-Upgrade,
+// Redis pub/sub, and Postgres-backed workspace lookups, not application
+// code a mock could fake.
 //
-// Requires: `make up` (Redis), or the CI service container.
+// Requires: `make up && make migrate` (locally) or the CI service containers.
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
@@ -15,12 +16,41 @@ import WebSocket from 'ws';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { config } from '../config.js';
 import { redis } from '../redis.js';
+import { pool } from '../db.js';
 import { getDemoCount } from '../shared/demoSessions.js';
 import { attachWebSocketServer } from './wsServer.js';
 
 let httpServer: Server;
 let wsUrl: string;
 const openClients: WebSocket[] = [];
+const seededUserIds: string[] = [];
+
+async function insertUserWithWorkspace(
+	userId: string,
+	scope: {
+		geo_region: { name: string | null; bounds: Record<string, number> };
+		entity_types: string[];
+		alert_types: string[];
+	},
+): Promise<void> {
+	await pool.query(
+		`INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
+		 VALUES ($1, $2, $3, now(), now())`,
+		[userId, `google-${userId}`, `${userId}@example.com`],
+	);
+	await pool.query(
+		`INSERT INTO user_workspaces (user_id, scope, updated_at) VALUES ($1, $2, now())`,
+		[userId, JSON.stringify(scope)],
+	);
+}
+
+async function insertUserWithoutWorkspace(userId: string): Promise<void> {
+	await pool.query(
+		`INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
+		 VALUES ($1, $2, $3, now(), now())`,
+		[userId, `google-${userId}`, `${userId}@example.com`],
+	);
+}
 
 function signToken(
 	payload: { user_id: string; email: string; role: 'operator' | 'demo' },
@@ -92,12 +122,24 @@ describe('wsServer.ts (integration)', () => {
 	afterAll(async () => {
 		await new Promise<void>((resolve) => httpServer.close(() => resolve()));
 		await redis.quit();
+		await pool.end();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (openClients.length > 0) {
 			const ws = openClients.pop();
 			if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+		}
+		// ws.close() only starts the close handshake; the server's own 'close'
+		// handler (which decrements demoCount and drops connection state) runs
+		// asynchronously afterward. Without this wait, a test that opens a demo
+		// connection can leave a not-yet-processed close pending when the next
+		// test captures its "before" baseline off the shared demoCount counter.
+		await new Promise((r) => setTimeout(r, 100));
+		if (seededUserIds.length > 0) {
+			await pool.query('DELETE FROM user_workspaces WHERE user_id = ANY($1)', [seededUserIds]);
+			await pool.query('DELETE FROM users WHERE user_id = ANY($1)', [seededUserIds]);
+			seededUserIds.length = 0;
 		}
 	});
 
@@ -180,27 +222,120 @@ describe('wsServer.ts (integration)', () => {
 		});
 	});
 
-	describe('alert-events fan-out', () => {
-		it('delivers to every connected client regardless of its position bbox', async () => {
-			const tokenA = signToken({ user_id: 'a', email: 'a@example.com', role: 'operator' });
-			const tokenB = signToken({ user_id: 'b', email: 'b@example.com', role: 'operator' });
-			const wsA = await connect(tokenA);
-			const wsB = await connect(tokenB);
-			// Neither client's bbox would contain a plausible position — proves
-			// alert-events bypasses the position filter entirely.
-			subscribe(wsA, [10, 10, 12, 12]);
-			subscribe(wsB, [20, 20, 22, 22]);
+	describe('alert-events fan-out (scope-filtered)', () => {
+		function proximityAlert(overrides: {
+			alert_id: string;
+			lat: number;
+			lon: number;
+			entity_type?: string;
+		}): Record<string, unknown> {
+			return {
+				alert_id: overrides.alert_id,
+				entity_id: 'test-entity',
+				entity_type: overrides.entity_type ?? 'aircraft',
+				alert_type: 'UNSCHEDULED_PROXIMITY',
+				payload: { lat: overrides.lat, lon: overrides.lon },
+			};
+		}
+
+		it('delivers nothing to an operator with no saved workspace', async () => {
+			const userId = randomUUID();
+			await insertUserWithoutWorkspace(userId);
+			seededUserIds.push(userId);
+
+			const token = signToken({
+				user_id: userId,
+				email: `${userId}@example.com`,
+				role: 'operator',
+			});
+			const ws = await connect(token);
+			await new Promise((r) => setTimeout(r, 150)); // let the async scope load resolve (to "none")
+
+			const pending = assertNoMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(proximityAlert({ alert_id: `test-alert-${randomUUID()}`, lat: 45, lon: 2 })),
+			);
+			await expect(pending).resolves.toBeUndefined();
+		});
+
+		it("delivers an alert inside an operator's saved scope, and withholds one outside it", async () => {
+			const userId = randomUUID();
+			await insertUserWithWorkspace(userId, {
+				geo_region: {
+					name: 'France',
+					bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+				},
+				entity_types: ['aircraft'],
+				alert_types: ['UNSCHEDULED_PROXIMITY'],
+			});
+			seededUserIds.push(userId);
+
+			const token = signToken({
+				user_id: userId,
+				email: `${userId}@example.com`,
+				role: 'operator',
+			});
+			const ws = await connect(token);
+			await new Promise((r) => setTimeout(r, 150)); // let the async scope load resolve
+
+			const inFranceId = `test-alert-${randomUUID()}`;
+			const pending = waitForMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(proximityAlert({ alert_id: inFranceId, lat: 45, lon: 2 })),
+			);
+			const received = await pending;
+			expect((received['data'] as { alert_id: string }).alert_id).toBe(inFranceId);
+
+			const outsideFrancePending = assertNoMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(
+					proximityAlert({ alert_id: `test-alert-${randomUUID()}`, lat: 40.7, lon: -74.0 }),
+				),
+			);
+			await expect(outsideFrancePending).resolves.toBeUndefined();
+		});
+
+		it('filters a demo connection to its subscribed bbox, geography only', async () => {
+			const token = signToken({ user_id: 'demo', email: 'demo', role: 'demo' });
+			const ws = await connect(token);
+			subscribe(ws, [41.3, -5.2, 51.1, 9.6]); // France
 			await new Promise((r) => setTimeout(r, 100));
 
-			const alertId = `test-alert-${randomUUID()}`;
-			const pendingA = waitForMessage(wsA);
-			const pendingB = waitForMessage(wsB);
-			await redis.publish(config.ALERT_EVENTS_CHANNEL, JSON.stringify({ alert_id: alertId }));
+			const inBboxId = `test-alert-${randomUUID()}`;
+			const pending = waitForMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(proximityAlert({ alert_id: inBboxId, lat: 45, lon: 2 })),
+			);
+			const received = await pending;
+			expect((received['data'] as { alert_id: string }).alert_id).toBe(inBboxId);
 
-			const [receivedA, receivedB] = await Promise.all([pendingA, pendingB]);
-			expect(receivedA['channel']).toBe(config.ALERT_EVENTS_CHANNEL);
-			expect((receivedA['data'] as { alert_id: string }).alert_id).toBe(alertId);
-			expect((receivedB['data'] as { alert_id: string }).alert_id).toBe(alertId);
+			const outsideBboxPending = assertNoMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(
+					proximityAlert({ alert_id: `test-alert-${randomUUID()}`, lat: 40.7, lon: -74.0 }),
+				),
+			);
+			await expect(outsideBboxPending).resolves.toBeUndefined();
+		});
+
+		it('delivers unfiltered to a demo connection with no subscribed bbox yet', async () => {
+			const token = signToken({ user_id: 'demo', email: 'demo', role: 'demo' });
+			const ws = await connect(token);
+			// No subscribe() call.
+
+			const alertId = `test-alert-${randomUUID()}`;
+			const pending = waitForMessage(ws);
+			await redis.publish(
+				config.ALERT_EVENTS_CHANNEL,
+				JSON.stringify(proximityAlert({ alert_id: alertId, lat: 45, lon: 2 })),
+			);
+			const received = await pending;
+			expect((received['data'] as { alert_id: string }).alert_id).toBe(alertId);
 		});
 	});
 

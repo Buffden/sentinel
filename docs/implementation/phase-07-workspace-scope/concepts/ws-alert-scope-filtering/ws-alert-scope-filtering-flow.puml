@@ -1,0 +1,79 @@
+@startuml ws-alert-scope-filtering-flow
+title WebSocket alert-events Scope Filtering (CP3)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+participant "Browser" as UI #E0E7FF
+participant "API\nwsServer.ts" as WS #DBEAFE
+database "TimescaleDB\nuser_workspaces" as DB #FEF9C3
+participant "Redis\nalert-events" as R #FEF9C3
+
+UI -> WS : WebSocket upgrade (sentinel_jwt cookie)
+WS -> WS : verify JWT once, at connection open
+
+alt role == operator
+  WS -> DB : SELECT scope WHERE user_id = $jwt.user_id
+  note right of WS
+    Connection state starts fail-closed:
+    operatorScope = null, scopeLoaded = false.
+    Any alert-events message arriving before
+    this SELECT resolves is skipped, never
+    delivered on a guess.
+  end note
+  DB --> WS : scope row, or none
+  WS -> WS : state.operatorScope = scope ?? null\nstate.scopeLoaded = true
+else role == demo
+  note right of WS
+    No DB lookup. Demo reuses positionBBox --
+    the same bbox already sent via the existing
+    "subscribe" message for position filtering,
+    not a new mechanism.
+  end note
+end
+
+UI -> WS : {"type":"subscribe","bbox":[...]}
+WS -> WS : state.positionBBox = bbox\n(also feeds position-updates filtering, unchanged)
+
+== some time later ==
+
+R -> WS : alert-events message (PublishedAlert)
+
+loop for every open connection
+  alt role == operator
+    alt not scopeLoaded, or operatorScope is null
+      WS -> WS : skip (fail closed / no saved workspace)
+    else matchesScope(alert, operatorScope)
+      WS -> UI : deliver
+    else
+      WS -> WS : skip (out of scope)
+    end
+  else role == demo
+    alt positionBBox set
+      alt matchesScope(alert, {bounds: positionBBox, entity_types: null, alert_types: null})
+        WS -> UI : deliver
+      else
+        WS -> WS : skip
+      end
+    else
+      WS -> UI : deliver (no bbox yet -- unfiltered, same default as CP2's REST path)
+    end
+  end
+end
+
+note over WS, DB
+  Scope loads exactly once, at connection open --
+  not re-checked per message. An operator who
+  changes their saved scope while connected keeps
+  seeing the OLD scope until they reconnect; that
+  reconnect trigger is CP4, not this checkpoint.
+end note
+
+@enduml

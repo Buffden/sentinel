@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 700" font-family="ui-monospace, 'JetBrains Mono', monospace">
+  <!-- Tokens used (services/dashboard/src/shared/styles/tokens.css):
+       bg-app #0a0a0a, bg-panel #111111, bg-elevated #1a1a1a,
+       border #2a2a2a, border-subtle #1e1e1e, border-focus #3b82f6,
+       text-primary #e0e0e0, text-secondary #a0a0a0, text-muted #606060,
+       status-live #22c55e, status-warning #f59e0b, status-critical #ef4444, status-info #3b82f6 -->
+
+  <!-- App background -->
+  <rect x="0" y="0" width="960" height="700" fill="#0a0a0a"/>
+
+  <!-- Top nav (existing, unchanged) -->
+  <rect x="0" y="0" width="960" height="48" fill="#111111" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="16" y="29" fill="#e0e0e0" font-size="15" font-weight="700" letter-spacing="2">SENTINEL</text>
+
+  <!-- NEW: scope icon button in top nav, left of the existing user icons -->
+  <circle cx="860" cy="24" r="12" fill="none" stroke="#3b82f6" stroke-width="1.5"/>
+  <path d="M854 24 a6 6 0 0 1 12 0" fill="none" stroke="#3b82f6" stroke-width="1.5"/>
+  <circle cx="860" cy="20" r="2" fill="#3b82f6"/>
+  <text x="878" y="12" fill="#606060" font-size="9">NEW: scope</text>
+  <text x="878" y="22" fill="#606060" font-size="9">icon, opens</text>
+  <text x="878" y="32" fill="#606060" font-size="9">editor below</text>
+
+  <!-- existing user icon placeholders, unchanged -->
+  <circle cx="905" cy="24" r="10" fill="none" stroke="#2a2a2a" stroke-width="1.5"/>
+  <circle cx="935" cy="24" r="10" fill="none" stroke="#2a2a2a" stroke-width="1.5"/>
+
+  <!-- Dimmed backdrop behind the modal (rest of workspace visible but inert) -->
+  <rect x="0" y="48" width="960" height="652" fill="#000000" opacity="0.55"/>
+  <text x="40" y="90" fill="#606060" font-size="11">(map / alert widgets, dimmed behind the modal)</text>
+
+  <!-- Modal panel -->
+  <rect x="260" y="90" width="440" height="560" rx="4" fill="#111111" stroke="#2a2a2a" stroke-width="1"/>
+
+  <!-- Modal header -->
+  <rect x="260" y="90" width="440" height="36" rx="4" fill="#1a1a1a" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="276" y="113" fill="#a0a0a0" font-size="11" letter-spacing="1" font-weight="600">WORKSPACE SCOPE</text>
+  <line x1="668" y1="102" x2="680" y2="114" stroke="#606060" stroke-width="1.5"/>
+  <line x1="680" y1="102" x2="668" y2="114" stroke="#606060" stroke-width="1.5"/>
+  <text x="614" y="140" fill="#606060" font-size="9">(close hidden on first-time setup --</text>
+  <text x="614" y="150" fill="#606060" font-size="9">must save to dismiss, per ADR-012)</text>
+
+  <!-- Region section -->
+  <text x="280" y="150" fill="#a0a0a0" font-size="10" letter-spacing="1" font-weight="600">REGION</text>
+  <rect x="280" y="160" width="400" height="30" rx="3" fill="#1a1a1a" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="292" y="179" fill="#e0e0e0" font-size="12">France ▾</text>
+  <text x="280" y="205" fill="#606060" font-size="9">Global · France · United Kingdom · Western Europe · United States · Custom bounds…</text>
+
+  <!-- Custom bounds row (revealed when "Custom bounds" selected) -->
+  <text x="280" y="230" fill="#606060" font-size="9" font-style="italic">if "Custom bounds" selected:</text>
+  <rect x="280" y="238" width="95" height="26" rx="3" fill="#1a1a1a" stroke="#1e1e1e" stroke-width="1"/>
+  <text x="290" y="255" fill="#606060" font-size="10">min_lat</text>
+  <rect x="382" y="238" width="95" height="26" rx="3" fill="#1a1a1a" stroke="#1e1e1e" stroke-width="1"/>
+  <text x="392" y="255" fill="#606060" font-size="10">max_lat</text>
+  <rect x="484" y="238" width="95" height="26" rx="3" fill="#1a1a1a" stroke="#1e1e1e" stroke-width="1"/>
+  <text x="494" y="255" fill="#606060" font-size="10">min_lon</text>
+  <rect x="586" y="238" width="94" height="26" rx="3" fill="#1a1a1a" stroke="#1e1e1e" stroke-width="1"/>
+  <text x="596" y="255" fill="#606060" font-size="10">max_lon</text>
+
+  <!-- Divider -->
+  <line x1="280" y1="284" x2="680" y2="284" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- Entity types -->
+  <text x="280" y="308" fill="#a0a0a0" font-size="10" letter-spacing="1" font-weight="600">ENTITY TYPES</text>
+  <rect x="280" y="318" width="14" height="14" rx="2" fill="#1a1a1a" stroke="#3b82f6" stroke-width="1.5"/>
+  <path d="M283 325 l3 3 l6 -7" fill="none" stroke="#3b82f6" stroke-width="1.5"/>
+  <text x="302" y="329" fill="#e0e0e0" font-size="12">Aircraft</text>
+  <text x="370" y="329" fill="#606060" font-size="9">(only tracked type in v1 -- checked, disabled)</text>
+
+  <!-- Divider -->
+  <line x1="280" y1="350" x2="680" y2="350" stroke="#1e1e1e" stroke-width="1"/>
+
+  <!-- Alert types -->
+  <text x="280" y="374" fill="#a0a0a0" font-size="10" letter-spacing="1" font-weight="600">ALERT TYPES</text>
+
+  <rect x="280" y="384" width="14" height="14" rx="2" fill="#1a1a1a" stroke="#ef4444" stroke-width="1.5"/>
+  <path d="M283 391 l3 3 l6 -7" fill="none" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="302" y="395" fill="#e0e0e0" font-size="12">Signal Loss</text>
+  <circle cx="440" cy="391" r="3" fill="#ef4444"/>
+
+  <rect x="280" y="410" width="14" height="14" rx="2" fill="#1a1a1a" stroke="#f59e0b" stroke-width="1.5"/>
+  <path d="M283 417 l3 3 l6 -7" fill="none" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="302" y="421" fill="#e0e0e0" font-size="12">Unscheduled Proximity</text>
+  <circle cx="500" cy="417" r="3" fill="#f59e0b"/>
+
+  <rect x="280" y="436" width="14" height="14" rx="2" fill="#1a1a1a" stroke="#f59e0b" stroke-width="1.5"/>
+  <path d="M283 443 l3 3 l6 -7" fill="none" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="302" y="447" fill="#e0e0e0" font-size="12">Composite</text>
+  <circle cx="425" cy="443" r="3" fill="#f59e0b"/>
+
+  <rect x="280" y="462" width="14" height="14" rx="2" fill="#111111" stroke="#1e1e1e" stroke-width="1.5"/>
+  <text x="302" y="473" fill="#606060" font-size="12">Route Deviation</text>
+  <text x="450" y="473" fill="#606060" font-size="9" font-style="italic">(Phase 4 pending -- disabled)</text>
+
+  <!-- No-workspace-yet banner variant, shown as an inset note rather than a second full mockup -->
+  <line x1="280" y1="496" x2="680" y2="496" stroke="#1e1e1e" stroke-width="1"/>
+  <rect x="280" y="508" width="400" height="72" rx="3" fill="#1a1a1a" stroke="#f59e0b" stroke-width="1"/>
+  <text x="292" y="524" fill="#f59e0b" font-size="10" font-weight="600">FIRST-TIME SETUP STATE</text>
+  <text x="292" y="540" fill="#a0a0a0" font-size="10">Same modal, opened automatically on login when</text>
+  <text x="292" y="554" fill="#a0a0a0" font-size="10">no saved workspace exists (ADR-012). No alerts</text>
+  <text x="292" y="568" fill="#a0a0a0" font-size="9" font-style="italic">shown behind it until Save is clicked.</text>
+
+  <!-- Footer buttons -->
+  <rect x="500" y="592" width="80" height="32" rx="3" fill="#1a1a1a" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="522" y="613" fill="#a0a0a0" font-size="11">Cancel</text>
+  <rect x="590" y="592" width="90" height="32" rx="3" fill="#3b82f6" stroke="#3b82f6" stroke-width="1"/>
+  <text x="614" y="613" fill="#0a0a0a" font-size="11" font-weight="700">Save</text>
+  <text x="280" y="613" fill="#606060" font-size="9">Cancel hidden on first-time setup</text>
+</svg>
