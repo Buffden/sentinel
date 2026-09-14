@@ -34,20 +34,36 @@ let refCount = 0
 // that) from a genuine reconnect after a drop (nothing else tells anyone
 // that happened — see onReconnect below).
 let hasConnectedBefore = false
+let currentUrl: string | null = null
+
+// Bumped by every connect() call. A close handler captures the generation
+// its own connection was created with and only acts (clears `handle`,
+// schedules an auto-reconnect) if that generation is still current.
+// forceReconnect() bumps this by calling connect() BEFORE closing the old
+// socket, so the old socket's close event -- which fires asynchronously,
+// after forceReconnect has already returned -- always sees a stale
+// generation and does nothing. Without this, an intentional reconnect and
+// the old connection's own drop-recovery logic would race, potentially
+// scheduling a second, redundant reconnect a few seconds later.
+let generation = 0
 
 const frameListeners = new Set<FrameListener>()
 const demoExpiredListeners = new Set<DemoExpiredListener>()
 const reconnectListeners = new Set<ReconnectListener>()
 
 function connect(url: string): void {
+	currentUrl = url
+	const myGeneration = ++generation
 	handle = openWebSocket(url, {
 		onOpen: () => {
+			if (myGeneration !== generation) return
 			if (hasConnectedBefore) {
 				reconnectListeners.forEach((fn) => fn())
 			}
 			hasConnectedBefore = true
 		},
 		onMessage: (raw) => {
+			if (myGeneration !== generation) return
 			let frame: LiveFrame
 			try {
 				frame = JSON.parse(raw) as LiveFrame
@@ -57,6 +73,10 @@ function connect(url: string): void {
 			frameListeners.forEach((fn) => fn(frame))
 		},
 		onClose: (code) => {
+			// A stale generation means a newer connection has already taken
+			// over (forceReconnect) -- this close is the old socket catching
+			// up, not something to react to.
+			if (myGeneration !== generation) return
 			handle = null
 			if (code === DEMO_EXPIRED_CODE) {
 				demoExpiredListeners.forEach((fn) => fn())
@@ -69,6 +89,28 @@ function connect(url: string): void {
 			}
 		},
 	})
+}
+
+// Closes the current connection and immediately opens a new one against the
+// same URL, bypassing the normal drop-and-wait delay entirely. For a
+// deliberate change (e.g. a saved workspace scope), not a recovery from an
+// unexpected drop -- see the workspace-reconnect-flow concept doc for why
+// those are different situations needing different handling. A no-op if no
+// connection has ever been opened (nothing to reconnect).
+export function forceReconnect(): void {
+	if (currentUrl === null) return
+	if (reconnectTimer !== null) {
+		clearTimeout(reconnectTimer)
+		reconnectTimer = null
+	}
+	const old = handle
+	handle = null
+	connect(currentUrl) // bumps generation first, so `old`'s eventual close is a no-op
+	old?.close()
+}
+
+export function getWsUrl(): string {
+	return process.env['NEXT_PUBLIC_WS_URL'] ?? 'ws://localhost:3000'
 }
 
 export interface LiveSocketSubscription {

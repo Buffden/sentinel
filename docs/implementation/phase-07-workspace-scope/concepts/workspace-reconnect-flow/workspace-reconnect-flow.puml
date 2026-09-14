@@ -1,0 +1,51 @@
+@startuml workspace-reconnect-flow
+title Reconnect-on-Save, Not Hot-Swap (CP4)
+
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam sequenceArrowThickness 1.5
+skinparam sequenceParticipantBorderColor #888888
+skinparam sequenceLifeLineBorderColor #AAAAAA
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FAFAFA
+skinparam sequenceGroupBorderColor #CCCCCC
+skinparam sequenceGroupBodyBackgroundColor #FAFAFA
+
+actor Operator as Op
+participant "saveWorkspaceScope()\n(dashboard, CP4)" as Save #E0E7FF
+participant "liveSocket.ts\n(dashboard, CP4 adds\nforceReconnect)" as Sock #DBEAFE
+participant "API" as API #DBEAFE
+database "user_workspaces" as DB #FEF9C3
+
+Op -> Save : (future CP5 UI) submits an edited scope
+Save -> API : PUT /users/me/workspace { ...new scope }
+API -> DB : INSERT ... ON CONFLICT DO UPDATE
+DB --> API : row written
+API --> Save : 200 { scope }
+
+alt save failed (4xx/5xx)
+  Save -> Save : throw -- forceReconnect() never called
+  note right of Save
+    The existing connection, and whatever scope
+    it already loaded, is left completely alone.
+    A failed save must never disturb a working
+    connection.
+  end note
+else save succeeded
+  Save -> Sock : forceReconnect()
+  Sock -> Sock : bump generation, open a NEW connection\n(old one not yet closed)
+  Sock -> API : new WebSocket upgrade (same sentinel_jwt cookie)
+  API -> DB : SELECT scope WHERE user_id = ... (CP3's existing connection-open load)
+  DB --> API : the just-saved scope
+  Sock -> Sock : close the OLD connection\n(its close handler sees a stale\ngeneration and does nothing)
+  Sock -> Op : onReconnect() fires (existing mechanism,\nunchanged since before CP3/CP4)
+  note right of Op
+    Every widget already listening to
+    onReconnect (MapWidget, AlertWidget)
+    re-hydrates via REST and re-sends its
+    bbox subscribe -- CP4 adds no new
+    "restore" code, it reuses this.
+  end note
+end
+
+@enduml

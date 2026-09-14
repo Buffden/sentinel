@@ -7,7 +7,7 @@ Make authentication operationally meaningful by adding saved operator scope and 
 ## Backend
 
 - `user_workspaces` persistence
-- `GET /workspaces` / `PUT /workspaces`
+- `POST /users/me/workspace` (read) / `PUT /users/me/workspace` (update) — `POST` instead of `GET` for the read, per the API-wide convention of using `POST` for new read endpoints so filters can extend the request body later without a breaking URL change; see ADR-012's Consequences section
 - geographic bounds
 - entity-type filters
 - alert-type filters

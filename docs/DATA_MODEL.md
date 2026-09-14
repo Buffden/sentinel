@@ -698,9 +698,50 @@ Response: array of entity snapshots.
 | `entity_subtype` | string \| null | Redis hash |
 | `live_geo_cell` | string | Redis hash |
 
-### `GET /alerts`
+### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}` (`bbox` optional)
 
-Returns persisted alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered by the authenticated user's workspace scope.
+Returns persisted `NEW`/`ACKNOWLEDGED` alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
+
+- **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types` + `alert_types`). No saved workspace yields an empty array, not an unfiltered one — the dashboard is expected to show the scope setup prompt instead. Any `bbox` query param is ignored for an operator; the saved scope is authoritative.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered (every `NEW`/`ACKNOWLEDGED` alert) — the transitional behavior until a frontend caller passes the map's current viewport.
+
+Position is read from the alert's own `payload`, not current Redis state, and the field path differs by `alert_type` — see ADR-012's corrected field list. An alert whose payload doesn't yield a usable position for its type (this can only be `ROUTE_DEVIATION` today, whose payload shape is undecided since Phase 04 is deferred) is excluded, never included by a fallback guess.
+
+### `POST /users/me/workspace`
+
+Returns the authenticated operator's saved workspace scope. `POST` rather than `GET` by convention for new read endpoints going forward — it keeps the door open for adding filter/query criteria to the body later without a breaking URL change. This endpoint itself takes no filters; it always returns the caller's own single `user_workspaces` row, resolved from the JWT.
+
+Not available to demo sessions (`role: 'demo'` in the JWT): always `403`. Demo sessions have no `users` row and therefore no `user_workspaces` row to reference.
+
+- `200`: the scope object (shape below)
+- `404`: `{ "error": "no_workspace" }` — no saved workspace yet. Per ADR-012, the dashboard shows the scope setup prompt and the operator receives no alerts until a scope is saved.
+
+### `PUT /users/me/workspace`
+
+Creates or replaces the authenticated operator's saved workspace scope — a single-row upsert on `user_workspaces`. Same demo-role restriction as above (`403`).
+
+Request and response body — the scope object:
+
+```json
+{
+  "geo_region": {
+    "name": "France",
+    "bounds": { "min_lat": 41.3, "max_lat": 51.1, "min_lon": -5.2, "max_lon": 9.6 }
+  },
+  "entity_types": ["aircraft"],
+  "alert_types": ["SIGNAL_LOSS", "ROUTE_DEVIATION", "UNSCHEDULED_PROXIMITY", "COMPOSITE"]
+}
+```
+
+- `geo_region.bounds` is always present and is the only field filtering actually evaluates. `geo_region.name` is display/provenance only — a name from the predefined region list, or `null` when the operator drew a custom bounding box instead of picking a named region.
+- `entity_types` is **restricted to `["aircraft"]` in v1.** Sentinel tracks no other entity type yet; ADR-012's original example JSON listed `"vessel"` as an illustrative future value, but offering it as a selectable option now would violate CLAUDE.md's "do not implement future domains early" guardrail. Recorded here so the restriction reads as a deliberate decision, not an oversight, if it's ever questioned later.
+- `alert_types` is any subset of the alert types the Alert Evaluator can currently emit: `SIGNAL_LOSS`, `UNSCHEDULED_PROXIMITY`, `COMPOSITE` today; `ROUTE_DEVIATION` once Phase 04 resumes.
+
+`PUT` validates before writing: `bounds` describes a real box (`min_lat < max_lat`, `min_lon < max_lon`), `entity_types` is a non-empty subset of the allowed set, `alert_types` is a subset of known alert types. An invalid body returns `400` with no partial write.
+
+### Predefined region list
+
+A static, hardcoded list of named regions (name + bounding box) served to the dashboard for the region picker — no database table, per ADR-012's "no external geocoder in v1" decision. Maintained as a static file in the API service. The exact list of regions is a CP1 implementation choice, not an architectural one.
 
 ### WebSocket — position update message
 
@@ -726,7 +767,7 @@ Clients must render the position with the highest `timestamp_ms` received for a 
 
 ### WebSocket — alert event message
 
-Forwarded from `alert-events` Redis pub/sub. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
+Forwarded from `alert-events` Redis pub/sub, scope-filtered per connection before delivery — same `matchesScope` rule as `GET /alerts`, see ADR-012. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
 
 ```json
 {
@@ -735,6 +776,7 @@ Forwarded from `alert-events` Redis pub/sub. Clients append to the alert list; d
   "alert_id": "abc123:SIGNAL_LOSS:1787634000000",
   "alert_type": "SIGNAL_LOSS",
   "entity_id": "abc123",
+  "entity_type": "aircraft",
   "counterparty_entity_id": null,
   "priority": "STANDARD",
   "status": "NEW",

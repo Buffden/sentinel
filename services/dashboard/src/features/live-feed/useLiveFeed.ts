@@ -24,7 +24,7 @@
 // never recreated when the parent re-renders with new inline functions.
 
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
-import { acquireLiveSocket, type LiveFrame } from '@/shared/realtime/liveSocket'
+import { acquireLiveSocket, getWsUrl, type LiveFrame } from '@/shared/realtime/liveSocket'
 import type { TrackedEntityUpdate } from '@/entities/tracked-entity/model'
 import type { Alert } from '@/entities/alert/model'
 
@@ -151,8 +151,7 @@ export function useLiveFeed({
 	const sendRef = useRef<((data: string) => void) | null>(null)
 
 	useEffect(() => {
-		const wsUrl = process.env['NEXT_PUBLIC_WS_URL'] ?? 'ws://localhost:3000'
-		const socket = acquireLiveSocket(wsUrl)
+		const socket = acquireLiveSocket(getWsUrl())
 		sendRef.current = socket.send
 
 		const unsubFrame = socket.onFrame((frame: LiveFrame) => {

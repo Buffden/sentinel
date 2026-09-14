@@ -6,6 +6,13 @@ import jwt from 'jsonwebtoken';
 import { Redis } from 'ioredis';
 import type { SentinelJwtPayload } from '../middleware/auth.js';
 import { incrementDemoCount, decrementDemoCount } from '../shared/demoSessions.js';
+import { pool } from '../db.js';
+import {
+	matchesScope,
+	type AlertForScopeCheck,
+	type ScopeFilter,
+} from '../shared/alertScopeFilter.js';
+import type { GeoBounds } from '../shared/regions.js';
 import { config } from '../config.js';
 
 interface BBox {
@@ -20,8 +27,26 @@ interface SubscribeMessage {
 	bbox: [number, number, number, number]; // minLat, minLon, maxLat, maxLon
 }
 
-// Per-connection bbox. Null until client sends a subscribe message.
-const connectionBBox = new Map<WebSocket, BBox | null>();
+interface WorkspaceScopeRow {
+	geo_region: { bounds: GeoBounds };
+	entity_types: string[];
+	alert_types: string[];
+}
+
+// One record per open WebSocket. positionBBox drives position-updates
+// filtering (unchanged from before CP3). operatorScope/scopeLoaded are new:
+// loaded once from user_workspaces at connection open, for role === 'operator'
+// only -- see the ws-alert-scope-filtering concept doc for why this replaced
+// a bare connectionBBox map.
+interface ConnectionState {
+	role: 'operator' | 'demo';
+	userId: string;
+	positionBBox: BBox | null;
+	operatorScope: ScopeFilter | null;
+	scopeLoaded: boolean;
+}
+
+const connections = new Map<WebSocket, ConnectionState>();
 
 function verifyToken(req: IncomingMessage): SentinelJwtPayload | null {
 	const cookieHeader = req.headers['cookie'] ?? '';
@@ -37,6 +62,28 @@ function verifyToken(req: IncomingMessage): SentinelJwtPayload | null {
 
 function isWithinBBox(bbox: BBox, lat: number, lon: number): boolean {
 	return lat >= bbox.minLat && lat <= bbox.maxLat && lon >= bbox.minLon && lon <= bbox.maxLon;
+}
+
+function bboxToGeoBounds(bbox: BBox): GeoBounds {
+	return { min_lat: bbox.minLat, max_lat: bbox.maxLat, min_lon: bbox.minLon, max_lon: bbox.maxLon };
+}
+
+// Single lookup at connection open -- see ADR-012 and the ws-alert-scope-filtering
+// concept doc for why this is not re-queried per message. Returns null both
+// for "no saved workspace" and (via the caller's catch) "lookup failed" --
+// either way, the connection stays fail-closed for alert delivery.
+async function loadOperatorScope(userId: string): Promise<ScopeFilter | null> {
+	const result = await pool.query<{ scope: WorkspaceScopeRow }>(
+		'SELECT scope FROM user_workspaces WHERE user_id = $1',
+		[userId],
+	);
+	if (result.rows.length === 0) return null;
+	const scope = result.rows[0]!.scope;
+	return {
+		bounds: scope.geo_region.bounds,
+		entity_types: scope.entity_types,
+		alert_types: scope.alert_types,
+	};
 }
 
 export function attachWebSocketServer(server: Server): void {
@@ -75,18 +122,41 @@ export function attachWebSocketServer(server: Server): void {
 				typeof parsed.lon === 'number' ? parsed.lon : parseFloat(String(parsed.lon ?? ''));
 			if (!isFinite(lat) || !isFinite(lon)) return;
 
-			for (const [ws, bbox] of connectionBBox) {
+			for (const [ws, state] of connections) {
 				if (ws.readyState !== WebSocket.OPEN) continue;
-				if (bbox && !isWithinBBox(bbox, lat, lon)) continue;
+				if (state.positionBBox && !isWithinBBox(state.positionBBox, lat, lon)) continue;
 				ws.send(JSON.stringify({ channel: config.POSITION_UPDATES_CHANNEL, data: parsed }));
 			}
 		} else if (channel === config.ALERT_EVENTS_CHANNEL) {
-			// Alert events go to all connected clients — no bbox filter.
-			for (const [ws] of connectionBBox) {
+			let alert: (AlertForScopeCheck & Record<string, unknown>) | null;
+			try {
+				alert = JSON.parse(message) as AlertForScopeCheck & Record<string, unknown>;
+			} catch {
+				return;
+			}
+			const envelope = JSON.stringify({ channel: config.ALERT_EVENTS_CHANNEL, data: alert });
+
+			for (const [ws, state] of connections) {
 				if (ws.readyState !== WebSocket.OPEN) continue;
-				ws.send(
-					JSON.stringify({ channel: config.ALERT_EVENTS_CHANNEL, data: JSON.parse(message) }),
-				);
+
+				if (state.role === 'operator') {
+					// Fail closed: no saved workspace, or the async load hasn't
+					// resolved yet, both mean "deliver nothing" -- never a guess.
+					if (!state.scopeLoaded || !state.operatorScope) continue;
+					if (!matchesScope(alert, state.operatorScope)) continue;
+				} else if (state.positionBBox) {
+					// Demo: ad-hoc geography-only filter from the same bbox already
+					// driving position filtering -- entity/alert type unrestricted.
+					const demoScope: ScopeFilter = {
+						bounds: bboxToGeoBounds(state.positionBBox),
+						entity_types: null,
+						alert_types: null,
+					};
+					if (!matchesScope(alert, demoScope)) continue;
+				}
+				// Demo with no positionBBox yet: unfiltered, same default as CP2's REST path.
+
+				ws.send(envelope);
 			}
 		}
 	});
@@ -106,7 +176,39 @@ export function attachWebSocketServer(server: Server): void {
 	});
 
 	wss.on('connection', (ws: WebSocket, _req: IncomingMessage, payload: SentinelJwtPayload) => {
-		connectionBBox.set(ws, null);
+		const state: ConnectionState = {
+			role: payload.role,
+			userId: payload.user_id,
+			positionBBox: null,
+			operatorScope: null,
+			// Demo never performs a workspace lookup, so it's "loaded" (with
+			// nothing) immediately. Operator starts unloaded -- fail-closed
+			// until loadOperatorScope resolves below.
+			scopeLoaded: payload.role !== 'operator',
+		};
+		connections.set(ws, state);
+
+		if (payload.role === 'operator') {
+			loadOperatorScope(payload.user_id)
+				.then((scope) => {
+					const current = connections.get(ws);
+					if (!current) return; // connection already closed before the lookup finished
+					current.operatorScope = scope;
+					current.scopeLoaded = true;
+				})
+				.catch((err) => {
+					console.error(
+						JSON.stringify({
+							level: 'error',
+							msg: 'failed to load operator workspace scope',
+							user_id: payload.user_id,
+							err: String(err),
+						}),
+					);
+					// scopeLoaded stays false -- connection remains fail-closed for
+					// alerts for its whole lifetime; a reconnect retries the load.
+				});
+		}
 
 		// Demo session: track active count and schedule close at JWT expiry.
 		let demoExpiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -127,7 +229,7 @@ export function attachWebSocketServer(server: Server): void {
 				msg: 'ws client connected',
 				user_id: payload.user_id,
 				role: payload.role,
-				total: connectionBBox.size,
+				total: connections.size,
 			}),
 		);
 
@@ -140,7 +242,8 @@ export function attachWebSocketServer(server: Server): void {
 			}
 			if (msg.type === 'subscribe' && Array.isArray(msg.bbox) && msg.bbox.length === 4) {
 				const [minLat, minLon, maxLat, maxLon] = msg.bbox;
-				connectionBBox.set(ws, { minLat, minLon, maxLat, maxLon });
+				const current = connections.get(ws);
+				if (current) current.positionBBox = { minLat, minLon, maxLat, maxLon };
 				console.log(
 					JSON.stringify({
 						level: 'info',
@@ -153,7 +256,7 @@ export function attachWebSocketServer(server: Server): void {
 		});
 
 		ws.on('close', () => {
-			connectionBBox.delete(ws);
+			connections.delete(ws);
 			if (payload.role === 'demo') {
 				decrementDemoCount();
 				if (demoExpiryTimer !== null) clearTimeout(demoExpiryTimer);
@@ -164,7 +267,7 @@ export function attachWebSocketServer(server: Server): void {
 					msg: 'ws client disconnected',
 					user_id: payload.user_id,
 					role: payload.role,
-					total: connectionBBox.size,
+					total: connections.size,
 				}),
 			);
 		});

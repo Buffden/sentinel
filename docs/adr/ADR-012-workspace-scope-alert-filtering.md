@@ -57,13 +57,28 @@ The API instance that consumes an alert from Kafka writes it to TimescaleDB, the
 
 Scope filter on each `alert-events` message:
 
-1. Use the **position embedded in the alert payload** (`payload.last_lat`, `payload.last_lon` for signal loss; `payload.lat`, `payload.lon` for proximity/composite) — not the current Redis position. The alert payload carries an immutable position recorded at detection time; the Redis position may have changed by delivery time.
+1. Use the **position embedded in the alert payload** — not the current Redis position. The alert payload carries an immutable position recorded at detection time; the Redis position may have changed by delivery time. The exact field path differs by `alert_type`, corrected here against the actual payload builders rather than assumed (this ADR originally named `payload.last_lat`/`payload.last_lon` and a flat `payload.lat`/`payload.lon` for composite, neither of which matches what Phase 03/06 actually shipped):
+   - `SIGNAL_LOSS`: `payload.last_known_lat`, `payload.last_known_lon` (`services/alert-evaluator/src/evaluator.ts`)
+   - `UNSCHEDULED_PROXIMITY`: flat `payload.lat`, `payload.lon` (`services/alert-evaluator/src/evaluator.ts`)
+   - `COMPOSITE`: nested `payload.proximity.lat`, `payload.proximity.lon` (`services/alert-evaluator/src/composite.ts`) — not top-level, since `COMPOSITE`'s payload is deliberately two distinct sub-objects (`signal_loss` + `proximity`), never flattened
+   - `ROUTE_DEVIATION`: undecided (Phase 04 is deferred); a row of this type does not exist in practice yet, and filtering code must fail closed (exclude, not crash) if one ever appears before this is resolved
 2. Check whether the position falls within the scope's `geo_region.bounds`
 3. Check whether the entity type matches the scope's `entity_types` list
 4. Check whether the alert type matches the scope's `alert_types` list
 5. Push only if all match
 
-Operators with no saved workspace see the scope setup prompt and receive no alerts until a scope is saved.
+Operators with no saved workspace see the scope setup prompt and receive no alerts until a scope is saved. This same rule applies to the `GET /alerts` REST read, not only the live WebSocket stream: an operator with no saved workspace gets an empty list, not an unfiltered one.
+
+### Demo sessions have no saved workspace, and never will
+
+A demo JWT (`role: 'demo'`, `user_id: 'demo'`) has no corresponding `users` row and cannot hold a `user_workspaces` row (see CP1's exclusion of demo from the workspace endpoints). Applying the "no saved workspace = no alerts" rule above literally to demo would mean the demo experience always shows zero alerts, which defeats its purpose as a no-setup live preview.
+
+Instead, demo sessions filter by an **ad-hoc `bbox` query parameter** on `GET /alerts` — the same bounding box already sent to `GET /entities/live?bbox=...` for the map's current viewport, rather than a persisted, named scope:
+
+- `bbox` provided: alerts are filtered to that box only (geography only — entity type and alert type are not restricted for demo, since it has no other scope dimension to draw from).
+- `bbox` omitted: demo falls back to the fully unfiltered list (today's behavior), since nothing requires the caller to supply a viewport.
+
+This reuses the exact same bounds-check machinery as the operator path — a demo request's `bbox` and an operator's saved `geo_region.bounds` are both just a `GeoBounds` value passed into one shared predicate function, with `entity_types`/`alert_types` treated as "no restriction" for demo instead of a concrete list. The two roles differ in *where the bounds come from* (a persisted row vs. a request parameter), not in how filtering itself is evaluated.
 
 ### Scope updates over an active connection
 
@@ -120,6 +135,7 @@ An operator can update their scope while the WebSocket is open. The dashboard ca
 - On WebSocket upgrade, the API loads the operator's saved scope from `user_workspaces` into this map
 - The API publishes each consumed alert to `alert-events` Redis pub/sub; all instances receive it and evaluate against their local connection scope maps
 - Alert scope filtering uses the position in the alert payload, not the current Redis position
-- `GET /users/me/workspace` returns the saved scope (used by the dashboard on load to decide whether to show the scope prompt or restore the previous view)
+- `POST /users/me/workspace` returns the saved scope (used by the dashboard on load to decide whether to show the scope prompt or restore the previous view). `POST` instead of `GET` is a deliberate convention for read endpoints going forward: it keeps the door open for adding filter/query criteria in the request body later without a breaking URL change. No filtering exists on this endpoint yet — it always returns the caller's own single workspace row, resolved from the JWT.
 - `PUT /users/me/workspace` updates the saved scope; the dashboard then reconnects the WebSocket to pick up the new scope server-side
+- This `POST`-for-reads convention applies to new endpoints only; already-shipped `GET` endpoints (`GET /alerts`, `GET /entities/live`) are not retrofitted
 - A predefined region list (name + bounding box) is maintained as a static JSON file in the API service - no database table needed for regions in v1
