@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="640" viewBox="0 0 1400 640" font-family="JetBrains Mono, ui-monospace, monospace">
+  <rect width="1400" height="640" fill="#0a0a0a"/>
+
+  <!-- ===== Column 1: collapsed list, status badges ===== -->
+  <text x="24" y="28" fill="#a0a0a0" font-size="13" font-weight="700">COLLAPSED — status badge next to alert type</text>
+
+  <g transform="translate(24,44)">
+    <rect width="420" height="300" fill="#111111" stroke="#1e1e1e"/>
+
+    <!-- card: NEW -->
+    <rect x="0" y="0" width="420" height="56" fill="#111111"/>
+    <rect x="0" y="0" width="3" height="56" fill="#f59e0b"/>
+    <text x="16" y="24" fill="#e0e0e0" font-size="12" font-weight="600">EZY92XM</text>
+    <text x="16" y="42" fill="#606060" font-size="11">Dark since 03:10 UTC</text>
+    <rect x="330" y="14" width="40" height="16" rx="2" fill="none" stroke="#3b82f6"/>
+    <text x="350" y="26" fill="#3b82f6" font-size="9" text-anchor="middle">NEW</text>
+    <text x="404" y="42" fill="#606060" font-size="12" text-anchor="end">▸</text>
+    <line x1="0" y1="56" x2="420" y2="56" stroke="#1e1e1e"/>
+
+    <!-- card: ACKNOWLEDGED -->
+    <rect x="0" y="56" width="420" height="56" fill="#111111"/>
+    <rect x="0" y="56" width="3" height="56" fill="#f59e0b"/>
+    <text x="16" y="80" fill="#e0e0e0" font-size="12" font-weight="600">427c0b</text>
+    <text x="16" y="98" fill="#606060" font-size="11">Dark since 03:09 UTC</text>
+    <rect x="300" y="70" width="70" height="16" rx="2" fill="none" stroke="#f59e0b"/>
+    <text x="335" y="82" fill="#f59e0b" font-size="9" text-anchor="middle">ACKNOWLEDGED</text>
+    <text x="404" y="98" fill="#606060" font-size="12" text-anchor="end">▸</text>
+    <line x1="0" y1="112" x2="420" y2="112" stroke="#1e1e1e"/>
+
+    <!-- card: COMPOSITE (ELEVATED, ACKNOWLEDGED) with a SUPERSEDED child, unchanged nesting -->
+    <rect x="0" y="112" width="420" height="56" fill="#111111"/>
+    <rect x="0" y="112" width="3" height="56" fill="#ef4444"/>
+    <text x="16" y="136" fill="#e0e0e0" font-size="12" font-weight="600">EZY92XM ↔ 4b91aa</text>
+    <text x="16" y="154" fill="#606060" font-size="11">Correlated 03:11 UTC</text>
+    <rect x="300" y="126" width="70" height="16" rx="2" fill="none" stroke="#f59e0b"/>
+    <text x="335" y="138" fill="#f59e0b" font-size="9" text-anchor="middle">ACKNOWLEDGED</text>
+    <text x="404" y="154" fill="#606060" font-size="12" text-anchor="end">▸</text>
+    <line x1="0" y1="168" x2="420" y2="168" stroke="#1e1e1e"/>
+
+    <rect x="0" y="168" width="420" height="44" fill="#0e0e0e"/>
+    <text x="32" y="188" fill="#a0a0a0" font-size="11" font-weight="600">EZY92XM</text>
+    <rect x="330" y="180" width="70" height="14" rx="2" fill="none" stroke="#606060"/>
+    <text x="365" y="190" fill="#606060" font-size="8" text-anchor="middle">SUPERSEDED</text>
+    <text x="32" y="204" fill="#606060" font-size="10">nested evidence — no buttons, terminal</text>
+    <line x1="0" y1="212" x2="420" y2="212" stroke="#1e1e1e"/>
+
+    <text x="16" y="240" fill="#606060" font-size="10" font-style="italic">badge color: NEW=blue, ACKNOWLEDGED=amber,</text>
+    <text x="16" y="254" fill="#606060" font-size="10" font-style="italic">SUPERSEDED=gray (unchanged) — CLAUDE.md semantic colors</text>
+    <text x="16" y="276" fill="#606060" font-size="10" font-style="italic">RESOLVED alerts are removed from the list entirely —</text>
+    <text x="16" y="290" fill="#606060" font-size="10" font-style="italic">GET /alerts already only returns NEW/ACKNOWLEDGED</text>
+  </g>
+
+  <!-- ===== Column 2: expanded NEW alert, both actions ===== -->
+  <text x="476" y="28" fill="#a0a0a0" font-size="13" font-weight="700">EXPANDED — NEW: both actions available</text>
+
+  <g transform="translate(476,44)">
+    <rect width="420" height="380" fill="#111111" stroke="#1e1e1e"/>
+    <rect x="0" y="0" width="4" height="380" fill="#f59e0b"/>
+
+    <text x="16" y="24" fill="#e0e0e0" font-size="12" font-weight="600">EZY92XM</text>
+    <text x="16" y="42" fill="#606060" font-size="11">Dark since 03:10 UTC</text>
+    <text x="404" y="42" fill="#e0e0e0" font-size="12" text-anchor="end">▾</text>
+    <line x1="16" y1="54" x2="404" y2="54" stroke="#2a2a2a"/>
+
+    <g font-size="11">
+      <text x="16" y="74" fill="#606060">ALERT ID</text>
+      <text x="404" y="74" fill="#e0e0e0" text-anchor="end">407c0b:SIGNAL_LOSS:...</text>
+
+      <text x="16" y="94" fill="#606060">STATUS</text>
+      <rect x="340" y="82" width="64" height="16" rx="2" fill="none" stroke="#3b82f6"/>
+      <text x="372" y="94" fill="#3b82f6" font-size="9" text-anchor="middle">NEW</text>
+
+      <text x="16" y="114" fill="#606060">DETECTED</text>
+      <text x="404" y="114" fill="#e0e0e0" text-anchor="end">03:10:22 UTC</text>
+    </g>
+    <line x1="16" y1="130" x2="404" y2="130" stroke="#1e1e1e"/>
+
+    <text x="16" y="150" fill="#606060" font-size="10" font-style="italic">... remaining detail rows unchanged (lat/lon/alt/speed) ...</text>
+
+    <!-- action row -->
+    <line x1="16" y1="320" x2="404" y2="320" stroke="#2a2a2a"/>
+    <rect x="16" y="336" width="160" height="28" rx="3" fill="none" stroke="#3b82f6"/>
+    <text x="96" y="354" fill="#3b82f6" font-size="11" text-anchor="middle">Acknowledge</text>
+    <rect x="192" y="336" width="120" height="28" rx="3" fill="none" stroke="#22c55e"/>
+    <text x="252" y="354" fill="#22c55e" font-size="11" text-anchor="middle">Resolve</text>
+
+    <text x="16" y="385" fill="#606060" font-size="10" font-style="italic">click sends PATCH; button disabled + spinner while in flight</text>
+  </g>
+
+  <!-- ===== Column 3: expanded ACKNOWLEDGED alert + composite note ===== -->
+  <text x="928" y="28" fill="#a0a0a0" font-size="13" font-weight="700">EXPANDED — ACKNOWLEDGED: resolve only</text>
+
+  <g transform="translate(928,44)">
+    <rect width="420" height="380" fill="#111111" stroke="#1e1e1e"/>
+    <rect x="0" y="0" width="4" height="380" fill="#f59e0b"/>
+
+    <text x="16" y="24" fill="#e0e0e0" font-size="12" font-weight="600">427c0b</text>
+    <text x="16" y="42" fill="#606060" font-size="11">Dark since 03:09 UTC</text>
+    <text x="404" y="42" fill="#e0e0e0" font-size="12" text-anchor="end">▾</text>
+    <line x1="16" y1="54" x2="404" y2="54" stroke="#2a2a2a"/>
+
+    <g font-size="11">
+      <text x="16" y="74" fill="#606060">ALERT ID</text>
+      <text x="404" y="74" fill="#e0e0e0" text-anchor="end">427c0b:SIGNAL_LOSS:...</text>
+
+      <text x="16" y="94" fill="#606060">STATUS</text>
+      <rect x="316" y="82" width="88" height="16" rx="2" fill="none" stroke="#f59e0b"/>
+      <text x="360" y="94" fill="#f59e0b" font-size="9" text-anchor="middle">ACKNOWLEDGED</text>
+
+      <text x="16" y="114" fill="#606060">ACKNOWLEDGED BY</text>
+      <text x="404" y="114" fill="#e0e0e0" text-anchor="end">you, 03:12:40 UTC</text>
+    </g>
+    <line x1="16" y1="130" x2="404" y2="130" stroke="#1e1e1e"/>
+
+    <text x="16" y="150" fill="#606060" font-size="10" font-style="italic">... remaining detail rows unchanged ...</text>
+
+    <!-- action row: resolve only -->
+    <line x1="16" y1="320" x2="404" y2="320" stroke="#2a2a2a"/>
+    <rect x="16" y="336" width="120" height="28" rx="3" fill="none" stroke="#22c55e"/>
+    <text x="76" y="354" fill="#22c55e" font-size="11" text-anchor="middle">Resolve</text>
+  </g>
+
+  <text x="24" y="610" fill="#606060" font-size="10">Same action-row pattern applies to a COMPOSITE's own card (it has its own NEW/ACKNOWLEDGED lifecycle, separate from the individual alerts nested under it as evidence).</text>
+  <text x="24" y="626" fill="#606060" font-size="10">Nested/superseded children never show action buttons — terminal, system-owned. A RESOLVED alert disappears from the panel on its next re-render rather than lingering with a badge.</text>
+</svg>

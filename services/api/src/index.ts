@@ -1,5 +1,5 @@
 import http from 'node:http';
-import express from 'express';
+import express, { type ErrorRequestHandler } from 'express';
 import cookieParser from 'cookie-parser';
 import { authRouter } from './routes/auth.js';
 import { alertsRouter } from './routes/alerts.js';
@@ -34,6 +34,24 @@ app.get('/healthz-auth', (_req, res) => {
 app.use('/alerts', alertsRouter);
 app.use('/entities/live', entitiesLiveRouter);
 app.use('/users/me/workspace', workspaceRouter);
+
+// Express 4 does not forward a rejected promise from an async route handler
+// to error-handling middleware on its own -- an uncaught rejection here
+// (e.g. an unexpected Postgres error) would otherwise leave the request
+// hanging with no response at all, rather than failing cleanly. Must be
+// registered after every route; Express identifies this as error-handling
+// middleware by its 4-argument signature.
+const handleUnhandledRouteError: ErrorRequestHandler = (err, _req, res, next) => {
+	if (res.headersSent) {
+		next(err);
+		return;
+	}
+	console.error(
+		JSON.stringify({ level: 'error', msg: 'unhandled request error', err: String(err) }),
+	);
+	res.status(500).json({ error: 'internal error' });
+};
+app.use(handleUnhandledRouteError);
 
 // Create HTTP server so we can intercept upgrade requests for WebSocket auth.
 const server = http.createServer(app);

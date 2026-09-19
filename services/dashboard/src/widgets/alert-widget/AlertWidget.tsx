@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import WidgetHeader from '@/shared/ui/WidgetHeader'
 import { fetchApi } from '@/features/auth/apiClient'
 import { formatUtcTime } from '@/shared/lib/formatTime'
@@ -11,6 +11,11 @@ import {
 	supersededEvidenceIds,
 } from '@/entities/alert/model'
 import { wireToAlert, isValidWireAlertDto } from '@/entities/alert/adapter'
+import {
+	patchAlertStatus,
+	AlertTransitionError,
+	type LifecycleTargetStatus,
+} from '@/entities/alert/api'
 import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 
 // STANDARD and ELEVATED are the only priorities the Alert Evaluator emits
@@ -19,6 +24,59 @@ import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 const priorityColor: Record<string, string> = {
 	STANDARD: 'var(--color-status-warning)',
 	ELEVATED: 'var(--color-status-critical)',
+}
+
+// NEW/ACKNOWLEDGED get real semantic color (CLAUDE.md's status-color rule:
+// blue = informational/interactive, amber = warning/elevated). Anything
+// else (SUPERSEDED, or a status this widget doesn't otherwise expect)
+// falls back to the same neutral look the nested-evidence badge already
+// used before Phase 08 — RESOLVED never reaches this component at all,
+// filtered out of topLevel below.
+function statusBadgeColors(status: string): { border: string; text: string } {
+	switch (status) {
+		case 'NEW':
+			return { border: 'var(--color-status-info)', text: 'var(--color-status-info)' }
+		case 'ACKNOWLEDGED':
+			return { border: 'var(--color-status-warning)', text: 'var(--color-status-warning)' }
+		default:
+			return { border: 'var(--color-border)', text: 'var(--color-text-muted)' }
+	}
+}
+
+function StatusBadge({ status }: { status: string }) {
+	const { border, text } = statusBadgeColors(status)
+	return (
+		<span
+			style={{
+				fontSize: '9px',
+				color: text,
+				fontFamily: 'var(--font-mono)',
+				border: `1px solid ${border}`,
+				borderRadius: 'var(--panel-border-radius)',
+				padding: '1px 6px',
+				letterSpacing: '0.04em',
+				whiteSpace: 'nowrap',
+			}}
+		>
+			{status}
+		</span>
+	)
+}
+
+// Acknowledge = blue (interactive action, matches NEW's badge color).
+// Resolve = green (healthy/complete conclusion), regardless of current status.
+function actionButtonStyle(color: string, disabled: boolean): CSSProperties {
+	return {
+		background: 'transparent',
+		border: `1px solid ${color}`,
+		borderRadius: 'var(--panel-border-radius)',
+		color,
+		fontSize: 'var(--font-size-xs)',
+		fontFamily: 'var(--font-mono)',
+		padding: '5px 12px',
+		cursor: disabled ? 'default' : 'pointer',
+		opacity: disabled ? 0.5 : 1,
+	}
 }
 
 // Renders one label/value row inside an expanded alert card. Mirrors the
@@ -52,6 +110,31 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 			>
 				{value}
 			</span>
+		</div>
+	)
+}
+
+// Same layout as DetailRow, badge instead of plain text for the STATUS row.
+function StatusDetailRow({ label, status }: { label: string; status: string }) {
+	return (
+		<div
+			style={{
+				display: 'flex',
+				justifyContent: 'space-between',
+				alignItems: 'center',
+				padding: '3px 0',
+			}}
+		>
+			<span
+				style={{
+					fontSize: 'var(--font-size-xs)',
+					color: 'var(--color-text-muted)',
+					fontFamily: 'var(--font-mono)',
+				}}
+			>
+				{label}
+			</span>
+			<StatusBadge status={status} />
 		</div>
 	)
 }
@@ -113,6 +196,15 @@ export default function AlertWidget() {
 	// toggleExpanded below.
 	const [expandedId, setExpandedId] = useState<string | null>(null)
 	const unmountedRef = useRef(false)
+	// Demo sessions have no lifecycle authority (services/api's
+	// requireOperatorRole) -- action buttons render only for 'operator'.
+	// Fetched once, same pattern as WorkspaceScopeControl.
+	const [role, setRole] = useState<'operator' | 'demo' | 'unknown'>('unknown')
+	// alert_id currently mid-PATCH, disables that card's buttons and swaps
+	// their label to a pending indicator.
+	const [pendingIds, setPendingIds] = useState<Set<string>>(new Set())
+	// alert_id -> last transition error message, cleared on the next attempt.
+	const [actionErrors, setActionErrors] = useState<Map<string, string>>(new Map())
 
 	// CP7h (initial mount) and CP7k (reconnect) both re-run this same fetch —
 	// on reconnect, any alert published during the disconnected window was
@@ -140,6 +232,43 @@ export default function AlertWidget() {
 		}
 	}, [hydrateAlerts])
 
+	useEffect(() => {
+		fetch('/api/auth/me')
+			.then((r) => (r.ok ? r.json() : null))
+			.then((data: { role?: string } | null) => {
+				setRole(data?.role === 'operator' ? 'operator' : 'demo')
+			})
+			.catch(() => setRole('demo'))
+	}, [])
+
+	// PATCHes the transition, then merges the API's own returned state (which
+	// is authoritative on both success and a 409 conflict — see
+	// entities/alert/api.ts) the same way a live alert-events frame would.
+	// The WS broadcast this PATCH also triggers will arrive separately and
+	// merge again, harmlessly — applyAlertUpdate is idempotent by alert_id.
+	const handleTransition = useCallback(async (alertId: string, target: LifecycleTargetStatus) => {
+		setPendingIds((prev) => new Set(prev).add(alertId))
+		setActionErrors((prev) => {
+			if (!prev.has(alertId)) return prev
+			const next = new Map(prev)
+			next.delete(alertId)
+			return next
+		})
+		try {
+			const updated = await patchAlertStatus(alertId, target)
+			setAlerts((prev) => applyAlertUpdate(prev, updated))
+		} catch (err) {
+			const message = err instanceof AlertTransitionError ? err.message : 'Update failed'
+			setActionErrors((prev) => new Map(prev).set(alertId, message))
+		} finally {
+			setPendingIds((prev) => {
+				const next = new Set(prev)
+				next.delete(alertId)
+				return next
+			})
+		}
+	}, [])
+
 	// CP7i: new alerts appear without a page refresh. No ordering dependency
 	// between hydration and the live feed — both paths upsert by alert_id, so
 	// whichever arrives first, the final state converges the same either way.
@@ -162,7 +291,12 @@ export default function AlertWidget() {
 	// render), not from the child's own status field — that field can lag
 	// behind the COMPOSITE's publish (see applyAlertUpdate's monotonic merge).
 	const supersededIds = supersededEvidenceIds(alerts.values())
-	const topLevel = Array.from(alerts.values()).filter((a) => !supersededIds.has(a.id))
+	// RESOLVED is terminal and removed from view immediately (Phase 08): GET
+	// /alerts already only returns NEW/ACKNOWLEDGED rows, so lingering here
+	// with a RESOLVED badge would only diverge from what a page reload shows.
+	const topLevel = Array.from(alerts.values()).filter(
+		(a) => !supersededIds.has(a.id) && a.status !== 'RESOLVED',
+	)
 
 	// One alert card, expanded in place on click. `nested` renders it as
 	// superseded evidence tucked under its COMPOSITE parent: gray border
@@ -235,21 +369,10 @@ export default function AlertWidget() {
 							>
 								{alert.alertType.replace('_', ' ')}
 							</span>
-							{nested && (
-								<span
-									style={{
-										fontSize: '9px',
-										color: 'var(--color-text-muted)',
-										fontFamily: 'var(--font-mono)',
-										border: '1px solid var(--color-border)',
-										borderRadius: 'var(--panel-border-radius)',
-										padding: '1px 5px',
-										letterSpacing: '0.04em',
-									}}
-								>
-									SUPERSEDED
-								</span>
-							)}
+							{/* nested is always shown as SUPERSEDED regardless of its own
+							status field, which can lag behind the COMPOSITE's publish —
+							see the supersededIds comment above. */}
+							<StatusBadge status={nested ? 'SUPERSEDED' : alert.status} />
 							<span
 								style={{
 									fontSize: 'var(--font-size-xs)',
@@ -287,6 +410,7 @@ export default function AlertWidget() {
 								<>
 									<DetailRow label="ALERT ID" value={alert.id} />
 									<DetailRow label="PRIORITY" value={alert.priority} />
+									<StatusDetailRow label="STATUS" status={alert.status} />
 									<DetailRow
 										label="DARK SINCE"
 										value={
@@ -328,7 +452,7 @@ export default function AlertWidget() {
 									<DetailRow label="ENTITY ID (ICAO24)" value={alert.entityId} />
 									<DetailRow label="ENTITY TYPE" value={alert.entityType} />
 									<DetailRow label="PRIORITY" value={alert.priority} />
-									<DetailRow label="STATUS" value={alert.status} />
+									<StatusDetailRow label="STATUS" status={alert.status} />
 									<DetailRow label="DETECTED" value={formatUtcTime(alert.detectedAtMs)} />
 									<DetailRow
 										label="LAST KNOWN LAT"
@@ -351,6 +475,66 @@ export default function AlertWidget() {
 										value={formatPayloadNumber(alert.payload['last_known_course_deg'], '°')}
 									/>
 								</>
+							)}
+
+							{/* Never for nested/superseded evidence -- terminal, system-owned.
+							Only for NEW/ACKNOWLEDGED: RESOLVED is filtered out of topLevel
+							before it ever reaches here, and SUPERSEDED/RESOLVED are terminal
+							per US-13 either way. */}
+							{!nested &&
+								role === 'operator' &&
+								(alert.status === 'NEW' || alert.status === 'ACKNOWLEDGED') && (
+									<div
+										style={{
+											marginTop: 'var(--space-2)',
+											paddingTop: 'var(--space-2)',
+											borderTop: '1px solid var(--color-border-subtle)',
+											display: 'flex',
+											gap: 'var(--space-2)',
+										}}
+									>
+										{alert.status === 'NEW' && (
+											<button
+												onClick={(e) => {
+													e.stopPropagation()
+													void handleTransition(alert.id, 'ACKNOWLEDGED')
+												}}
+												disabled={pendingIds.has(alert.id)}
+												style={actionButtonStyle(
+													'var(--color-status-info)',
+													pendingIds.has(alert.id),
+												)}
+											>
+												{pendingIds.has(alert.id) ? '...' : 'Acknowledge'}
+											</button>
+										)}
+										<button
+											onClick={(e) => {
+												e.stopPropagation()
+												void handleTransition(alert.id, 'RESOLVED')
+											}}
+											disabled={pendingIds.has(alert.id)}
+											style={actionButtonStyle(
+												'var(--color-status-live)',
+												pendingIds.has(alert.id),
+											)}
+										>
+											{pendingIds.has(alert.id) ? '...' : 'Resolve'}
+										</button>
+									</div>
+								)}
+
+							{actionErrors.has(alert.id) && (
+								<div
+									style={{
+										marginTop: 'var(--space-1)',
+										fontSize: 'var(--font-size-xs)',
+										color: 'var(--color-status-critical)',
+										fontFamily: 'var(--font-mono)',
+									}}
+								>
+									{actionErrors.get(alert.id)}
+								</div>
 							)}
 						</div>
 					)}
