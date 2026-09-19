@@ -568,16 +568,9 @@ Published only on accepted live-state writes. Stale/equal-timestamp events are n
 
 Publisher: API. Subscribers: all API instances.
 
-Canonical envelope:
+Published as the flat, canonical alert row shape (same fields as the `alerts` table, transformed for the wire — see `PublishedAlert` in `compositeSupersession.ts`), not a `type`/`event_type`-tagged envelope. There is no separate "created" vs. "status changed" vs. "superseded" discriminator: the same shape is republished on initial insert (Phase 03) and on every subsequent lifecycle transition (Phase 08 — `PATCH` acknowledge/resolve, and composite supersession). A receiver distinguishes what happened by comparing the alert's own `status`/`superseded_by` fields against whatever it last rendered for that `alert_id`, not by reading a tag off the message.
 
-```json
-{
-  "type": "ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED",
-  "payload": {}
-}
-```
-
-Redis pub/sub and WebSocket delivery are at-least-once from the client's perspective; duplicate lifecycle messages are allowed and must be safe.
+Redis pub/sub and WebSocket delivery are at-least-once from the client's perspective; duplicate lifecycle messages (including a message that redelivers the same status the client already applied) are allowed and must be safe.
 
 ---
 
@@ -767,23 +760,27 @@ Clients must render the position with the highest `timestamp_ms` received for a 
 
 ### WebSocket — alert event message
 
-Forwarded from `alert-events` Redis pub/sub, scope-filtered per connection before delivery — same `matchesScope` rule as `GET /alerts`, see ADR-012. Clients append to the alert list; duplicate `alert_id` messages must be safe (idempotent render).
+Forwarded from `alert-events` Redis pub/sub, scope-filtered per connection before delivery — same `matchesScope` rule as `GET /alerts`, see ADR-012. The API wraps the published alert in a `channel`/`data` envelope; it does not add a `type`/`event_type` discriminator of its own:
 
 ```json
 {
-  "type": "alert",
-  "event_type": "ALERT_CREATED | ALERT_STATUS_CHANGED | ALERT_SUPERSEDED",
-  "alert_id": "abc123:SIGNAL_LOSS:1787634000000",
-  "alert_type": "SIGNAL_LOSS",
-  "entity_id": "abc123",
-  "entity_type": "aircraft",
-  "counterparty_entity_id": null,
-  "priority": "STANDARD",
-  "status": "NEW",
-  "detected_at_ms": 1787634583000,
-  "payload": {}
+  "channel": "alert-events",
+  "data": {
+    "alert_id": "abc123:SIGNAL_LOSS:1787634000000",
+    "alert_type": "SIGNAL_LOSS",
+    "entity_id": "abc123",
+    "entity_type": "aircraft",
+    "counterparty_entity_id": null,
+    "priority": "STANDARD",
+    "status": "NEW",
+    "superseded_by": null,
+    "detected_at_ms": 1787634583000,
+    "payload": {}
+  }
 }
 ```
+
+Clients merge by `alert_id`, keyed on the message's own `status`/`superseded_by` fields — the same shape arrives whether this is the alert's first delivery or a later lifecycle transition. Duplicate or redelivered messages (including ones that repeat a status the client already applied) must be safe: the dashboard's reducer (`applyAlertUpdate`) overwrites by `alert_id` but never lets a terminal status (`RESOLVED`/`SUPERSEDED`) regress to a non-terminal one from a stale, out-of-order delivery.
 
 ### WebSocket — subscribe message (client to API)
 
