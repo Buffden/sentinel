@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { redis } from '../redis.js';
 import { config } from '../config.js';
+import { asyncHandler } from '../shared/asyncHandler.js';
 
 const router = Router();
 
@@ -14,71 +15,74 @@ function nullIfEmpty(val: string | undefined): string | null {
 	return val === '' || val === undefined ? null : val;
 }
 
-router.get('/', async (req, res) => {
-	const bboxParam = req.query['bbox'] as string | undefined;
-	if (!bboxParam) {
-		res.status(400).json({ error: 'bbox query parameter is required' });
-		return;
-	}
-
-	const parts = bboxParam.split(',').map(Number);
-	if (parts.length !== 4 || parts.some((n) => !isFinite(n))) {
-		res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
-		return;
-	}
-	const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
-
-	const nowMs = Date.now();
-	const staleCutoffMs = nowMs - config.LIVE_ENTITY_STALE_AFTER_MS;
-
-	const entities: unknown[] = [];
-	let cursor = '0';
-
-	do {
-		const [nextCursor, keys] = await redis.scan(
-			cursor,
-			'MATCH',
-			'entity:live:*',
-			'COUNT',
-			config.REDIS_SCAN_COUNT,
-		);
-		cursor = nextCursor;
-
-		for (const key of keys) {
-			if (entities.length >= config.LIVE_ENTITIES_MAX) break;
-
-			const hash = await redis.hgetall(key);
-			if (!hash) continue;
-
-			const lat = parseFloat_(hash['lat']);
-			const lon = parseFloat_(hash['lon']);
-			if (lat === null || lon === null) continue;
-
-			// Bbox filter
-			if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
-
-			// Staleness filter
-			const lastSeenMs = parseFloat_(hash['last_seen_ms']);
-			if (lastSeenMs === null || lastSeenMs < staleCutoffMs) continue;
-
-			entities.push({
-				entity_id: key.replace('entity:live:', ''),
-				lat,
-				lon,
-				altitude_m: parseFloat_(hash['altitude_m']),
-				speed_mps: parseFloat_(hash['speed_mps']),
-				course_deg: parseFloat_(hash['course_deg']),
-				last_seen_ms: lastSeenMs,
-				entity_type: nullIfEmpty(hash['entity_type']),
-				entity_subtype: nullIfEmpty(hash['entity_subtype']),
-				callsign: nullIfEmpty(hash['callsign']),
-				on_ground:
-					hash['on_ground'] === 'true' ? true : hash['on_ground'] === 'false' ? false : null,
-			});
+router.get(
+	'/',
+	asyncHandler(async (req, res) => {
+		const bboxParam = req.query['bbox'] as string | undefined;
+		if (!bboxParam) {
+			res.status(400).json({ error: 'bbox query parameter is required' });
+			return;
 		}
-	} while (cursor !== '0' && entities.length < config.LIVE_ENTITIES_MAX);
 
-	res.json(entities);
-});
+		const parts = bboxParam.split(',').map(Number);
+		if (parts.length !== 4 || parts.some((n) => !isFinite(n))) {
+			res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
+			return;
+		}
+		const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
+
+		const nowMs = Date.now();
+		const staleCutoffMs = nowMs - config.LIVE_ENTITY_STALE_AFTER_MS;
+
+		const entities: unknown[] = [];
+		let cursor = '0';
+
+		do {
+			const [nextCursor, keys] = await redis.scan(
+				cursor,
+				'MATCH',
+				'entity:live:*',
+				'COUNT',
+				config.REDIS_SCAN_COUNT,
+			);
+			cursor = nextCursor;
+
+			for (const key of keys) {
+				if (entities.length >= config.LIVE_ENTITIES_MAX) break;
+
+				const hash = await redis.hgetall(key);
+				if (!hash) continue;
+
+				const lat = parseFloat_(hash['lat']);
+				const lon = parseFloat_(hash['lon']);
+				if (lat === null || lon === null) continue;
+
+				// Bbox filter
+				if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
+
+				// Staleness filter
+				const lastSeenMs = parseFloat_(hash['last_seen_ms']);
+				if (lastSeenMs === null || lastSeenMs < staleCutoffMs) continue;
+
+				entities.push({
+					entity_id: key.replace('entity:live:', ''),
+					lat,
+					lon,
+					altitude_m: parseFloat_(hash['altitude_m']),
+					speed_mps: parseFloat_(hash['speed_mps']),
+					course_deg: parseFloat_(hash['course_deg']),
+					last_seen_ms: lastSeenMs,
+					entity_type: nullIfEmpty(hash['entity_type']),
+					entity_subtype: nullIfEmpty(hash['entity_subtype']),
+					callsign: nullIfEmpty(hash['callsign']),
+					on_ground:
+						hash['on_ground'] === 'true' ? true : hash['on_ground'] === 'false' ? false : null,
+				});
+			}
+		} while (cursor !== '0' && entities.length < config.LIVE_ENTITIES_MAX);
+
+		res.json(entities);
+	}),
+);
 
 export { router as entitiesLiveRouter };

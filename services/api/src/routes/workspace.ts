@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { findPredefinedRegion, PREDEFINED_REGIONS, type GeoBounds } from '../shared/regions.js';
+import { asyncHandler } from '../shared/asyncHandler.js';
 
 const router = Router();
 
@@ -96,51 +97,63 @@ router.get('/regions', (_req, res) => {
 	res.json(PREDEFINED_REGIONS);
 });
 
-router.post('/', requireOperatorRole, async (_req, res) => {
-	const userId = res.locals['userId'] as string;
-	const result = await pool.query<{ scope: WorkspaceScope }>(
-		`SELECT scope FROM user_workspaces WHERE user_id = $1`,
-		[userId],
-	);
-	if (result.rows.length === 0) {
-		res.status(404).json({ error: 'no_workspace' });
-		return;
-	}
-	res.json(result.rows[0]!.scope);
-});
+router.post(
+	'/',
+	requireOperatorRole,
+	asyncHandler(async (_req, res) => {
+		const userId = res.locals['userId'] as string;
+		const result = await pool.query<{ scope: WorkspaceScope }>(
+			`SELECT scope FROM user_workspaces WHERE user_id = $1`,
+			[userId],
+		);
+		if (result.rows.length === 0) {
+			res.status(404).json({ error: 'no_workspace' });
+			return;
+		}
+		res.json(result.rows[0]!.scope);
+	}),
+);
 
-router.put('/', requireOperatorRole, async (req, res) => {
-	const body = req.body as { geo_region?: unknown; entity_types?: unknown; alert_types?: unknown };
+router.put(
+	'/',
+	requireOperatorRole,
+	asyncHandler(async (req, res) => {
+		const body = req.body as {
+			geo_region?: unknown;
+			entity_types?: unknown;
+			alert_types?: unknown;
+		};
 
-	const geoRegion = resolveGeoRegion(body.geo_region);
-	if (!geoRegion) {
-		res.status(400).json({ error: 'Invalid geo_region' });
-		return;
-	}
-	if (!isSubsetOfAllowed(body.entity_types, ALLOWED_ENTITY_TYPES)) {
-		res.status(400).json({ error: 'Invalid entity_types' });
-		return;
-	}
-	if (!isSubsetOfAllowed(body.alert_types, ALLOWED_ALERT_TYPES)) {
-		res.status(400).json({ error: 'Invalid alert_types' });
-		return;
-	}
+		const geoRegion = resolveGeoRegion(body.geo_region);
+		if (!geoRegion) {
+			res.status(400).json({ error: 'Invalid geo_region' });
+			return;
+		}
+		if (!isSubsetOfAllowed(body.entity_types, ALLOWED_ENTITY_TYPES)) {
+			res.status(400).json({ error: 'Invalid entity_types' });
+			return;
+		}
+		if (!isSubsetOfAllowed(body.alert_types, ALLOWED_ALERT_TYPES)) {
+			res.status(400).json({ error: 'Invalid alert_types' });
+			return;
+		}
 
-	const scope: WorkspaceScope = {
-		geo_region: geoRegion,
-		entity_types: body.entity_types,
-		alert_types: body.alert_types,
-	};
-	const userId = res.locals['userId'] as string;
+		const scope: WorkspaceScope = {
+			geo_region: geoRegion,
+			entity_types: body.entity_types,
+			alert_types: body.alert_types,
+		};
+		const userId = res.locals['userId'] as string;
 
-	await pool.query(
-		`INSERT INTO user_workspaces (user_id, scope, updated_at)
-		 VALUES ($1, $2, now())
-		 ON CONFLICT (user_id) DO UPDATE SET scope = EXCLUDED.scope, updated_at = EXCLUDED.updated_at`,
-		[userId, JSON.stringify(scope)],
-	);
+		await pool.query(
+			`INSERT INTO user_workspaces (user_id, scope, updated_at)
+			 VALUES ($1, $2, now())
+			 ON CONFLICT (user_id) DO UPDATE SET scope = EXCLUDED.scope, updated_at = EXCLUDED.updated_at`,
+			[userId, JSON.stringify(scope)],
+		);
 
-	res.json(scope);
-});
+		res.json(scope);
+	}),
+);
 
 export { router as workspaceRouter };

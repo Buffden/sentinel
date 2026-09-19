@@ -5,6 +5,7 @@ import { redis } from '../redis.js';
 import { config } from '../config.js';
 import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
 import type { GeoBounds } from '../shared/regions.js';
+import { asyncHandler } from '../shared/asyncHandler.js';
 import { transitionAlert, type LifecycleTargetStatus } from './alertLifecycle.js';
 
 const router = Router();
@@ -44,93 +45,100 @@ function parseBbox(raw: string | undefined): GeoBounds | null {
 	return { min_lat: minLat, max_lat: maxLat, min_lon: minLon, max_lon: maxLon };
 }
 
-router.get('/', async (req, res) => {
-	const result = await pool.query<AlertRow>(
-		`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status,
-						superseded_by, payload, detected_at, updated_at, acknowledged_at, resolved_at
-		 FROM alerts
-		 WHERE status IN ('NEW', 'ACKNOWLEDGED')
-		 ORDER BY detected_at DESC`,
-	);
-	const rows = result.rows;
-
-	// Operator: filtered by their saved workspace. No saved workspace means
-	// no alerts -- the same rule ADR-012 already applies to the WebSocket
-	// stream, applied here to the REST read for consistency.
-	if (res.locals['userRole'] === 'operator') {
-		const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
-			'SELECT scope FROM user_workspaces WHERE user_id = $1',
-			[res.locals['userId'] as string],
+router.get(
+	'/',
+	asyncHandler(async (req, res) => {
+		const result = await pool.query<AlertRow>(
+			`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status,
+							superseded_by, payload, detected_at, updated_at, acknowledged_at, resolved_at
+			 FROM alerts
+			 WHERE status IN ('NEW', 'ACKNOWLEDGED')
+			 ORDER BY detected_at DESC`,
 		);
-		if (scopeResult.rows.length === 0) {
-			res.json([]);
+		const rows = result.rows;
+
+		// Operator: filtered by their saved workspace. No saved workspace means
+		// no alerts -- the same rule ADR-012 already applies to the WebSocket
+		// stream, applied here to the REST read for consistency.
+		if (res.locals['userRole'] === 'operator') {
+			const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
+				'SELECT scope FROM user_workspaces WHERE user_id = $1',
+				[res.locals['userId'] as string],
+			);
+			if (scopeResult.rows.length === 0) {
+				res.json([]);
+				return;
+			}
+			const scope = scopeResult.rows[0]!.scope;
+			res.json(
+				rows.filter((row) =>
+					matchesScope(row, {
+						bounds: scope.geo_region.bounds,
+						entity_types: scope.entity_types,
+						alert_types: scope.alert_types,
+					}),
+				),
+			);
 			return;
 		}
-		const scope = scopeResult.rows[0]!.scope;
-		res.json(
-			rows.filter((row) =>
-				matchesScope(row, {
-					bounds: scope.geo_region.bounds,
-					entity_types: scope.entity_types,
-					alert_types: scope.alert_types,
-				}),
-			),
-		);
-		return;
-	}
 
-	// Demo (or any other non-operator caller, including no auth at all):
-	// an ad-hoc bbox is the only scope dimension available, since demo can
-	// never save a workspace. No bbox means fully unfiltered -- the
-	// transitional fallback until a frontend caller passes the map's
-	// current viewport.
-	const bboxParam = req.query['bbox'] as string | undefined;
-	if (bboxParam !== undefined) {
-		const bounds = parseBbox(bboxParam);
-		if (!bounds) {
-			res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
+		// Demo (or any other non-operator caller, including no auth at all):
+		// an ad-hoc bbox is the only scope dimension available, since demo can
+		// never save a workspace. No bbox means fully unfiltered -- the
+		// transitional fallback until a frontend caller passes the map's
+		// current viewport.
+		const bboxParam = req.query['bbox'] as string | undefined;
+		if (bboxParam !== undefined) {
+			const bounds = parseBbox(bboxParam);
+			if (!bounds) {
+				res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
+				return;
+			}
+			res.json(
+				rows.filter((row) => matchesScope(row, { bounds, entity_types: null, alert_types: null })),
+			);
 			return;
 		}
-		res.json(
-			rows.filter((row) => matchesScope(row, { bounds, entity_types: null, alert_types: null })),
+
+		res.json(rows);
+	}),
+);
+
+router.patch(
+	'/:alert_id',
+	requireOperatorRole,
+	asyncHandler(async (req, res) => {
+		const alertId = req.params['alert_id'] as string;
+		const target = (req.body as { status?: unknown }).status;
+		if (target !== 'ACKNOWLEDGED' && target !== 'RESOLVED') {
+			res.status(400).json({ error: 'status must be ACKNOWLEDGED or RESOLVED' });
+			return;
+		}
+
+		const outcome = await transitionAlert(
+			alertId,
+			target as LifecycleTargetStatus,
+			res.locals['userId'] as string,
 		);
-		return;
-	}
 
-	res.json(rows);
-});
-
-router.patch('/:alert_id', requireOperatorRole, async (req, res) => {
-	const alertId = req.params['alert_id'] as string;
-	const target = (req.body as { status?: unknown }).status;
-	if (target !== 'ACKNOWLEDGED' && target !== 'RESOLVED') {
-		res.status(400).json({ error: 'status must be ACKNOWLEDGED or RESOLVED' });
-		return;
-	}
-
-	const outcome = await transitionAlert(
-		alertId,
-		target as LifecycleTargetStatus,
-		res.locals['userId'] as string,
-	);
-
-	switch (outcome.kind) {
-		case 'not_found':
-			res.status(404).json({ error: 'alert not found' });
-			return;
-		case 'invalid_transition':
-			res.status(409).json(outcome.alert);
-			return;
-		case 'applied':
-		case 'idempotent':
-			// Always publish, even on an idempotent no-op write: this is the
-			// same "republish canonical state on every delivery" discipline
-			// compositeSupersession.ts already uses, so a client retrying a
-			// PATCH after a lost publish still converges.
-			await redis.publish(config.ALERT_EVENTS_CHANNEL, JSON.stringify(outcome.alert));
-			res.json(outcome.alert);
-			return;
-	}
-});
+		switch (outcome.kind) {
+			case 'not_found':
+				res.status(404).json({ error: 'alert not found' });
+				return;
+			case 'invalid_transition':
+				res.status(409).json(outcome.alert);
+				return;
+			case 'applied':
+			case 'idempotent':
+				// Always publish, even on an idempotent no-op write: this is the
+				// same "republish canonical state on every delivery" discipline
+				// compositeSupersession.ts already uses, so a client retrying a
+				// PATCH after a lost publish still converges.
+				await redis.publish(config.ALERT_EVENTS_CHANNEL, JSON.stringify(outcome.alert));
+				res.json(outcome.alert);
+				return;
+		}
+	}),
+);
 
 export { router as alertsRouter };
