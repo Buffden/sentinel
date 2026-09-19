@@ -1,9 +1,25 @@
+import type { NextFunction, Request, Response } from 'express';
 import { Router } from 'express';
 import { pool } from '../db.js';
+import { redis } from '../redis.js';
+import { config } from '../config.js';
 import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
 import type { GeoBounds } from '../shared/regions.js';
+import { transitionAlert, type LifecycleTargetStatus } from './alertLifecycle.js';
 
 const router = Router();
+
+// Demo sessions are valid, authenticated requests (requireAuth accepts
+// them) that simply have no lifecycle authority -- same rule and reasoning
+// as workspace.ts's requireOperatorRole, kept local here since the 403
+// message differs per route and this is the only other consumer so far.
+function requireOperatorRole(req: Request, res: Response, next: NextFunction): void {
+	if (res.locals['userRole'] !== 'operator') {
+		res.status(403).json({ error: 'Alert lifecycle changes are not available for this session' });
+		return;
+	}
+	next();
+}
 
 interface AlertRow extends AlertForScopeCheck {
 	alert_id: string;
@@ -82,6 +98,39 @@ router.get('/', async (req, res) => {
 	}
 
 	res.json(rows);
+});
+
+router.patch('/:alert_id', requireOperatorRole, async (req, res) => {
+	const alertId = req.params['alert_id'] as string;
+	const target = (req.body as { status?: unknown }).status;
+	if (target !== 'ACKNOWLEDGED' && target !== 'RESOLVED') {
+		res.status(400).json({ error: 'status must be ACKNOWLEDGED or RESOLVED' });
+		return;
+	}
+
+	const outcome = await transitionAlert(
+		alertId,
+		target as LifecycleTargetStatus,
+		res.locals['userId'] as string,
+	);
+
+	switch (outcome.kind) {
+		case 'not_found':
+			res.status(404).json({ error: 'alert not found' });
+			return;
+		case 'invalid_transition':
+			res.status(409).json(outcome.alert);
+			return;
+		case 'applied':
+		case 'idempotent':
+			// Always publish, even on an idempotent no-op write: this is the
+			// same "republish canonical state on every delivery" discipline
+			// compositeSupersession.ts already uses, so a client retrying a
+			// PATCH after a lost publish still converges.
+			await redis.publish(config.ALERT_EVENTS_CHANNEL, JSON.stringify(outcome.alert));
+			res.json(outcome.alert);
+			return;
+	}
 });
 
 export { router as alertsRouter };
