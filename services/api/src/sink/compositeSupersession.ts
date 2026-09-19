@@ -11,6 +11,10 @@ import type { AlertMessage } from './alertSink.js';
 // this codebase takes an advisory lock today.
 export const ALERT_SUPERSESSION_LOCK_NAMESPACE = 1001;
 
+// Exported for alertLifecycle.ts (PATCH /alerts/:alert_id, Phase 08): the
+// PATCH handler is a second writer to these same rows and must lock/read/
+// publish them exactly the same way this module's own writers already do,
+// so the two never diverge on how a row is represented on the wire.
 export interface AlertRow {
 	alert_id: string;
 	entity_id: string;
@@ -66,7 +70,7 @@ export class AlertSupersessionInvariantError extends Error {
 	}
 }
 
-function rowToPublishedAlert(row: AlertRow): PublishedAlert {
+export function rowToPublishedAlert(row: AlertRow): PublishedAlert {
 	return {
 		alert_id: row.alert_id,
 		entity_id: row.entity_id,
@@ -81,7 +85,7 @@ function rowToPublishedAlert(row: AlertRow): PublishedAlert {
 	};
 }
 
-async function lockAlertId(client: pg.PoolClient, alertId: string): Promise<void> {
+export async function lockAlertId(client: pg.PoolClient, alertId: string): Promise<void> {
 	await client.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [
 		ALERT_SUPERSESSION_LOCK_NAMESPACE,
 		alertId,
