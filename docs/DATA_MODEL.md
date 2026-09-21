@@ -670,26 +670,34 @@ Fields: `raw_payload`, `rejection_reason`, `source_topic`, `source_offset`, `con
 
 These are the shapes the browser actually receives. They are derived from upstream canonical schemas but are not identical to them — the API transforms and namespaces before sending.
 
-### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}`
+### `GET /entities` (Phase 09 CP1)
 
-Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes.
+Workspace-scoped live entity list, separate from `GET /entities/live`'s unscoped map-viewport query. Same Redis `entity:live:{entity_id}` source and response shape as `GET /entities/live`, filtered server-side by the caller's scope before the response is sent, following the same rule ADR-012 established for `GET /alerts`.
+
+- **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types`; there is no `alert_types` dimension for a plain entity). No saved workspace yields an empty array, not an unfiltered one.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided (`minLat,minLon,maxLat,maxLon`), entities are filtered to that box only, unrestricted by entity type. If `bbox` is omitted, the response is unfiltered.
+
+Response fields are identical to `GET /entities/live` below.
+
+### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}` (bbox required)
+
+Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace — this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.
 
 Response: array of entity snapshots.
 
 | Field | Type | Source |
 | --- | --- | --- |
-| `entity_id` | string | Redis hash |
-| `entity_type` | string | Redis hash |
-| `timestamp_ms` | number | `last_seen_ms` from Redis hash |
+| `entity_id` | string | Redis hash key suffix |
 | `lat` | number | Redis hash |
 | `lon` | number | Redis hash |
 | `altitude_m` | number \| null | Redis hash |
 | `speed_mps` | number \| null | Redis hash |
 | `course_deg` | number \| null | Redis hash |
+| `last_seen_ms` | number | Redis hash |
+| `entity_type` | string \| null | Redis hash |
+| `entity_subtype` | string \| null | Redis hash |
 | `callsign` | string \| null | Redis hash |
 | `on_ground` | boolean \| null | Redis hash |
-| `entity_subtype` | string \| null | Redis hash |
-| `live_geo_cell` | string | Redis hash |
 
 ### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}` (`bbox` optional)
 

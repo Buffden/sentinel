@@ -35,3 +35,15 @@ export const PREDEFINED_REGIONS: readonly PredefinedRegion[] = [
 export function findPredefinedRegion(name: string): PredefinedRegion | undefined {
 	return PREDEFINED_REGIONS.find((region) => region.name === name);
 }
+
+// One bounds-comparison definition, shared by alertScopeFilter.ts and
+// entityScopeFilter.ts -- both need the same inclusive lat/lon rectangle
+// check against a workspace scope's geo_region.bounds.
+export function withinBounds(pos: { lat: number; lon: number }, bounds: GeoBounds): boolean {
+	return (
+		pos.lat >= bounds.min_lat &&
+		pos.lat <= bounds.max_lat &&
+		pos.lon >= bounds.min_lon &&
+		pos.lon <= bounds.max_lon
+	);
+}

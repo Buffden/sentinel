@@ -1,4 +1,4 @@
-import type { GeoBounds } from './regions.js';
+import { withinBounds, type GeoBounds } from './regions.js';
 
 export interface AlertForScopeCheck {
 	entity_type: string;
@@ -59,15 +59,6 @@ export function extractAlertPosition(alert: AlertForScopeCheck): Position | null
 		default:
 			return null;
 	}
-}
-
-function withinBounds(pos: Position, bounds: GeoBounds): boolean {
-	return (
-		pos.lat >= bounds.min_lat &&
-		pos.lat <= bounds.max_lat &&
-		pos.lon >= bounds.min_lon &&
-		pos.lon <= bounds.max_lon
-	);
 }
 
 // One definition, reused by GET /alerts (CP2) and the future WebSocket
