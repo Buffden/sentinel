@@ -626,3 +626,34 @@ describe('GET /entities and GET /entities/live mounted together (integration)', 
 		expect(body.error).toBe('entity not found');
 	});
 });
+
+// The code-level guard in entities.ts (entity_id === 'live' -> next()) is a
+// second, independent layer of defense on top of index.ts's mount order --
+// this proves it holds even if a future refactor gets the order wrong,
+// rather than only proving today's correct order works.
+describe('GET /entities/live still resolves even with the routers mounted in the wrong order (integration)', () => {
+	let wrongOrderServer: Server;
+	let wrongOrderBaseUrl: string;
+
+	beforeAll(async () => {
+		const app = express();
+		// Deliberately the wrong order: /entities before /entities/live.
+		app.use('/entities', entitiesRouter);
+		app.use('/entities/live', entitiesLiveRouter);
+		wrongOrderServer = app.listen(0);
+		await new Promise<void>((resolve) => wrongOrderServer.once('listening', resolve));
+		const { port } = wrongOrderServer.address() as AddressInfo;
+		wrongOrderBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => wrongOrderServer.close(() => resolve()));
+	});
+
+	it('still reaches entitiesLiveRouter, not GET /:entity_id, thanks to the code-level guard', async () => {
+		const res = await fetch(`${wrongOrderBaseUrl}/entities/live`);
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe('bbox query parameter is required');
+	});
+});

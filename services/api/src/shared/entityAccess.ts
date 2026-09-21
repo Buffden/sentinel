@@ -1,4 +1,5 @@
 import { pool } from '../db.js';
+import { config } from '../config.js';
 import { matchesEntityScope } from './entityScopeFilter.js';
 import { matchesScope, type AlertForScopeCheck } from './alertScopeFilter.js';
 import type { LiveEntity } from './liveEntities.js';
@@ -14,6 +15,19 @@ export type EntityAccessResult =
 	| { kind: 'no_workspace' }
 	| { kind: 'out_of_scope' }
 	| { kind: 'in_scope'; scope: WorkspaceScopeRow };
+
+// The one workspace-scope lookup, shared by GET /entities, GET /alerts, and
+// this file's own resolveOperatorEntityAccess -- previously three
+// independently-typed copies of the same query, which could drift apart on
+// the row shape (or a future WHERE clause change) without any of the three
+// call sites signaling the others.
+export async function fetchWorkspaceScope(userId: string): Promise<WorkspaceScopeRow | null> {
+	const result = await pool.query<{ scope: WorkspaceScopeRow }>(
+		'SELECT scope FROM user_workspaces WHERE user_id = $1',
+		[userId],
+	);
+	return result.rows.length > 0 ? result.rows[0]!.scope : null;
+}
 
 // Resolves whether an operator may see a given entity at all -- shared by
 // every by-id entity endpoint (GET /entities/:entity_id, its /history) so
@@ -32,13 +46,9 @@ export async function resolveOperatorEntityAccess(
 	entityId: string,
 	liveEntity: LiveEntity | null,
 ): Promise<EntityAccessResult> {
-	const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
-		'SELECT scope FROM user_workspaces WHERE user_id = $1',
-		[userId],
-	);
-	if (scopeResult.rows.length === 0) return { kind: 'no_workspace' };
+	const scope = await fetchWorkspaceScope(userId);
+	if (scope === null) return { kind: 'no_workspace' };
 
-	const scope = scopeResult.rows[0]!.scope;
 	const entityScope = { bounds: scope.geo_region.bounds, entity_types: scope.entity_types };
 
 	if (liveEntity) {
@@ -47,10 +57,17 @@ export async function resolveOperatorEntityAccess(
 			: { kind: 'out_of_scope' };
 	}
 
+	// Newest first, same cap as the sibling display query in entities.ts --
+	// without an ORDER BY, an entity with more alerts than the limit could
+	// have its one in-scope alert fall outside an arbitrary row set Postgres
+	// happens to return, producing a false out-of-scope result.
 	const alertScope = { ...entityScope, alert_types: scope.alert_types };
 	const result = await pool.query<AlertForScopeCheck>(
-		`SELECT entity_type, alert_type, payload FROM alerts WHERE entity_id = $1 LIMIT 50`,
-		[entityId],
+		`SELECT entity_type, alert_type, payload FROM alerts
+		 WHERE entity_id = $1
+		 ORDER BY detected_at DESC
+		 LIMIT $2`,
+		[entityId, config.ENTITY_RECENT_ALERTS_MAX],
 	);
 	const inScope = result.rows.some((a) => matchesScope(a, alertScope));
 	return inScope ? { kind: 'in_scope', scope } : { kind: 'out_of_scope' };

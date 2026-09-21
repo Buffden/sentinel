@@ -681,27 +681,27 @@ Response fields are identical to `GET /entities/live` below.
 
 ### `GET /entities/:entity_id` (Phase 09 CP2)
 
-Joins the entity's current Redis live state with its recent alert history from Postgres (`entity_id = :entity_id OR counterparty_entity_id = :entity_id`, newest first, capped at `ENTITY_RECENT_ALERTS_MAX`). Unlike `GET /entities`/`GET /entities/live`, this lookup does **not** apply the staleness cutoff — a dark entity's last known live state is exactly what a `SIGNAL_LOSS` investigation needs to see.
+Joins the entity's current Redis live state with its recent alert history from Postgres (`entity_id = :entity_id OR counterparty_entity_id = :entity_id`, newest first, capped at `ENTITY_RECENT_ALERTS_MAX`). Unlike `GET /entities`/`GET /entities/live`, this lookup does **not** apply the staleness cutoff: a dark entity's last known live state is exactly what a `SIGNAL_LOSS` investigation needs to see.
 
 Response: `{ "entity": <live snapshot | null>, "alerts": [...] }`. `entity` is `null` when Redis has no hash for this id (e.g. a fully dark entity past its TTL); this is a valid `200`, not an error, as long as alert history or scope permits a response at all.
 
 - **404** when neither live state nor any alert exists for the id, or (operator session) when the id is outside the caller's saved scope. A `404`, not `403`, is returned for an out-of-scope id so the response itself never confirms the entity exists.
-- **Operator session**: in scope if the live state itself matches the saved `geo_region.bounds`/`entity_types`, or — when there is no live state — if the id is the *primary* `entity_id` (not just a counterparty) on at least one alert that matches the saved scope. No saved workspace: always `404`. The returned `alerts` array is itself filtered through the same `matchesScope` predicate `GET /alerts` uses, so an in-scope entity's alerts can still be individually excluded (e.g. by `alert_types`, or a payload position outside bounds).
-- **Demo session**: unrestricted — no bbox-equivalent scope dimension applies to a single-id lookup.
+- **Operator session**: in scope if the live state itself matches the saved `geo_region.bounds`/`entity_types`, or, when there is no live state, if the id is the *primary* `entity_id` (not just a counterparty) on at least one alert that matches the saved scope. No saved workspace: always `404`. The returned `alerts` array is itself filtered through the same `matchesScope` predicate `GET /alerts` uses, so an in-scope entity's alerts can still be individually excluded (e.g. by `alert_types`, or a payload position outside bounds).
+- **Demo session**: unrestricted: no bbox-equivalent scope dimension applies to a single-id lookup.
 
 ### `GET /entities/:entity_id/history?from_ms={ms}&to_ms={ms}` (Phase 09 CP3)
 
-Chronological position track from TimescaleDB's `position_history` for the given time window (both params required — an investigation always has a concrete window, usually an alert's own `detected_at` range; there is no sensible default to guess). Capped at `ENTITY_HISTORY_MAX_POINTS`, independent of how wide the window is.
+Chronological position track from TimescaleDB's `position_history` for the given time window (both params required: an investigation always has a concrete window, usually an alert's own `detected_at` range; there is no sensible default to guess). Capped at `ENTITY_HISTORY_MAX_POINTS`, independent of how wide the window is.
 
-Response: array of `{ entity_id, timestamp_ms, lat, lon, altitude_m, speed_mps, course_deg, heading_deg, on_ground, callsign, entity_subtype }`, ordered ascending (a track, read chronologically — unlike the alert feed's newest-first).
+Response: array of `{ entity_id, timestamp_ms, lat, lon, altitude_m, speed_mps, course_deg, heading_deg, on_ground, callsign, entity_subtype }`, ordered ascending (a track, read chronologically, unlike the alert feed's newest-first).
 
 - **400** when `from_ms`/`to_ms` are missing, non-numeric, or `from_ms > to_ms`.
-- **Operator session**: uses the exact same by-id access decision as `GET /entities/:entity_id` (`resolveOperatorEntityAccess`, `services/api/src/shared/entityAccess.ts`) — in scope via current live state, or via being the primary entity on an in-scope alert when dark. `404` (not `403`) when out of scope or with no saved workspace. Once in scope, the full requested window is returned unfiltered by bounds — the scope check gates the entity, not each individual point (fragmenting a track at a bounds edge would defeat the investigation this endpoint exists for).
+- **Operator session**: uses the exact same by-id access decision as `GET /entities/:entity_id` (`resolveOperatorEntityAccess`, `services/api/src/shared/entityAccess.ts`): in scope via current live state, or via being the primary entity on an in-scope alert when dark. `404` (not `403`) when out of scope or with no saved workspace. Once in scope, the full requested window is returned unfiltered by bounds: the scope check gates the entity, not each individual point (fragmenting a track at a bounds edge would defeat the investigation this endpoint exists for).
 - **Demo session**: unrestricted, same as `GET /entities/:entity_id`.
 
 ### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}` (bbox required)
 
-Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace — this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.
+Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace: this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.
 
 Response: array of entity snapshots.
 

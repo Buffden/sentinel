@@ -1,4 +1,4 @@
-# Entity List Scope Filtering — Design and Learning Reference
+# Entity List Scope Filtering -- Design and Learning Reference
 
 Plain language first, then technical depth, then the code. Use this to understand, inspect, and defend CP1 (`GET /entities`).
 
@@ -6,9 +6,9 @@ Plain language first, then technical depth, then the code. Use this to understan
 
 ## What this checkpoint is, and deliberately isn't
 
-CP1 adds a new, separate `GET /entities` endpoint that returns the operator's currently-visible live entities, filtered by their saved workspace scope — the same "no saved workspace, no data" contract ADR-012 already established for `GET /alerts`. It does not touch `GET /entities/live?bbox=...`, which stays exactly what it always was: an unscoped, viewport-driven query the map widget uses to render whatever the operator is currently looking at, regardless of their saved scope.
+CP1 adds a new, separate `GET /entities` endpoint that returns the operator's currently-visible live entities, filtered by their saved workspace scope -- the same "no saved workspace, no data" contract ADR-012 already established for `GET /alerts`. It does not touch `GET /entities/live?bbox=...`, which stays exactly what it always was: an unscoped, viewport-driven query the map widget uses to render whatever the operator is currently looking at, regardless of their saved scope.
 
-This checkpoint does not add entity detail, history, or graph endpoints — those are CP2–CP4.
+This checkpoint does not add entity detail, history, or graph endpoints -- those are CP2–CP4.
 
 ---
 
@@ -16,23 +16,23 @@ This checkpoint does not add entity detail, history, or graph endpoints — thos
 
 ### Why this isn't just `/entities/live` with a filter bolted on
 
-`/entities/live` answers "what's in this map viewport right now" — a UI concern, not an authorization concern. `/entities` answers "what is this operator allowed to see" — the same question `GET /alerts` already answers, just for the entity list instead of the alert list. Conflating them would mean the map's viewport query silently inherits workspace-scope semantics it was never designed around (and that operators reasonably expect to pan past — the workspace scope, unlike the map viewport, is not something they adjust every few seconds).
+`/entities/live` answers "what's in this map viewport right now" -- a UI concern, not an authorization concern. `/entities` answers "what is this operator allowed to see" -- the same question `GET /alerts` already answers, just for the entity list instead of the alert list. Conflating them would mean the map's viewport query silently inherits workspace-scope semantics it was never designed around (and that operators reasonably expect to pan past -- the workspace scope, unlike the map viewport, is not something they adjust every few seconds).
 
 ### Why `matchesScope` (from `alertScopeFilter.ts`) couldn't be reused directly
 
-`matchesScope` extracts a position from an *alert's payload*, keyed by `alert_type` — `SIGNAL_LOSS` reads `payload.last_known_lat/lon`, `UNSCHEDULED_PROXIMITY` reads flat `payload.lat/lon`, `COMPOSITE` reads a nested `payload.proximity.lat/lon`. A live entity has none of that: its position is already sitting directly on the Redis hash as `lat`/`lon`, and there is no `alert_type`-equivalent dimension to check for a plain entity (no `alert_types` filter applies to an entity list). Duplicating the position-extraction *and* the bounds math would have been wrong; duplicating only the bounds math would have left two independently-maintained copies of the same four-line rectangle check. `withinBounds` was pulled out into `regions.ts` (the existing home of `GeoBounds`) as the one shared definition; `alertScopeFilter.ts` was updated to import it instead of keeping its own private copy, and `entityScopeFilter.ts` is a new, entity-shaped predicate that uses the same shared bounds check but never touches alert-specific concepts.
+`matchesScope` extracts a position from an *alert's payload*, keyed by `alert_type` -- `SIGNAL_LOSS` reads `payload.last_known_lat/lon`, `UNSCHEDULED_PROXIMITY` reads flat `payload.lat/lon`, `COMPOSITE` reads a nested `payload.proximity.lat/lon`. A live entity has none of that: its position is already sitting directly on the Redis hash as `lat`/`lon`, and there is no `alert_type`-equivalent dimension to check for a plain entity (no `alert_types` filter applies to an entity list). Duplicating the position-extraction *and* the bounds math would have been wrong; duplicating only the bounds math would have left two independently-maintained copies of the same four-line rectangle check. `withinBounds` was pulled out into `regions.ts` (the existing home of `GeoBounds`) as the one shared definition; `alertScopeFilter.ts` was updated to import it instead of keeping its own private copy, and `entityScopeFilter.ts` is a new, entity-shaped predicate that uses the same shared bounds check but never touches alert-specific concepts.
 
 ### Why the Redis scan itself was extracted, not copied a second time
 
-`GET /entities/live` already had a full `SCAN entity:live:*` → parse → filter → cap loop. `GET /entities` needs the identical scan and parse step, with a different inclusion predicate (workspace scope vs. viewport bbox) and a different mandatory-ness of the bbox/scope input. Rather than hand-copy the loop, `scanLiveEntities(predicate)` in `shared/liveEntities.ts` now owns the scan/parse/cap mechanics once, and both routes supply their own predicate. `GET /entities/live`'s behavior is unchanged — same fields, same staleness cutoff, same cap — verified by its existing test suite passing unmodified against the refactored implementation.
+`GET /entities/live` already had a full `SCAN entity:live:*` → parse → filter → cap loop. `GET /entities` needs the identical scan and parse step, with a different inclusion predicate (workspace scope vs. viewport bbox) and a different mandatory-ness of the bbox/scope input. Rather than hand-copy the loop, `scanLiveEntities(predicate)` in `shared/liveEntities.ts` now owns the scan/parse/cap mechanics once, and both routes supply their own predicate. `GET /entities/live`'s behavior is unchanged -- same fields, same staleness cutoff, same cap -- verified by its existing test suite passing unmodified against the refactored implementation.
 
 ### Why "no saved workspace" returns `[]` instead of an unfiltered list
 
-An operator's workspace scope is how Sentinel enforces "you only see what you're supposed to see" at the server, per ADR-012. If a missing scope defaulted to unfiltered, a new operator would briefly see every tracked entity worldwide before setting up a scope — the exact alert-flood problem ADR-012 was written to prevent, just on the entity list instead of the alert list. Fail-closed (empty, not everything) is the same choice `GET /alerts` already made.
+An operator's workspace scope is how Sentinel enforces "you only see what you're supposed to see" at the server, per ADR-012. If a missing scope defaulted to unfiltered, a new operator would briefly see every tracked entity worldwide before setting up a scope -- the exact alert-flood problem ADR-012 was written to prevent, just on the entity list instead of the alert list. Fail-closed (empty, not everything) is the same choice `GET /alerts` already made.
 
 ### Why demo sessions still get a bbox fallback, not a workspace lookup
 
-A demo JWT (`role: 'demo'`) has no `users` row and can't hold a `user_workspaces` row — this is unchanged from ADR-012. `GET /entities` reuses the identical "ad-hoc `bbox` query param filters geography only, no `bbox` means fully unfiltered" rule `GET /alerts` already uses for demo, for the same reason: it's one shared predicate function, just fed a request parameter instead of a persisted row.
+A demo JWT (`role: 'demo'`) has no `users` row and can't hold a `user_workspaces` row -- this is unchanged from ADR-012. `GET /entities` reuses the identical "ad-hoc `bbox` query param filters geography only, no `bbox` means fully unfiltered" rule `GET /alerts` already uses for demo, for the same reason: it's one shared predicate function, just fed a request parameter instead of a persisted row.
 
 ---
 

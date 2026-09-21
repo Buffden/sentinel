@@ -4,7 +4,8 @@ import { pool } from '../db.js';
 import { redis } from '../redis.js';
 import { config } from '../config.js';
 import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
-import type { GeoBounds } from '../shared/regions.js';
+import { parseBboxParam } from '../shared/regions.js';
+import { fetchWorkspaceScope } from '../shared/entityAccess.js';
 import { asyncHandler } from '../shared/asyncHandler.js';
 import { transitionAlert, type LifecycleTargetStatus } from './alertLifecycle.js';
 
@@ -28,23 +29,6 @@ interface AlertRow extends AlertForScopeCheck {
 	counterparty_entity_id: string | null;
 }
 
-interface WorkspaceScopeRow {
-	geo_region: { bounds: GeoBounds };
-	entity_types: string[];
-	alert_types: string[];
-}
-
-// Same bbox shape/order as GET /entities/live (minLat,minLon,maxLat,maxLon).
-// Unlike that endpoint, bbox is optional here -- it only ever applies to a
-// demo session's ad-hoc filter, never to an operator's saved scope.
-function parseBbox(raw: string | undefined): GeoBounds | null {
-	if (raw === undefined) return null;
-	const parts = raw.split(',').map(Number);
-	if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
-	const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
-	return { min_lat: minLat, max_lat: maxLat, min_lon: minLon, max_lon: maxLon };
-}
-
 router.get(
 	'/',
 	asyncHandler(async (req, res) => {
@@ -61,15 +45,11 @@ router.get(
 		// no alerts -- the same rule ADR-012 already applies to the WebSocket
 		// stream, applied here to the REST read for consistency.
 		if (res.locals['userRole'] === 'operator') {
-			const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
-				'SELECT scope FROM user_workspaces WHERE user_id = $1',
-				[res.locals['userId'] as string],
-			);
-			if (scopeResult.rows.length === 0) {
+			const scope = await fetchWorkspaceScope(res.locals['userId'] as string);
+			if (scope === null) {
 				res.json([]);
 				return;
 			}
-			const scope = scopeResult.rows[0]!.scope;
 			res.json(
 				rows.filter((row) =>
 					matchesScope(row, {
@@ -89,7 +69,7 @@ router.get(
 		// current viewport.
 		const bboxParam = req.query['bbox'] as string | undefined;
 		if (bboxParam !== undefined) {
-			const bounds = parseBbox(bboxParam);
+			const bounds = parseBboxParam(bboxParam);
 			if (!bounds) {
 				res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
 				return;

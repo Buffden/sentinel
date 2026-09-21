@@ -5,8 +5,8 @@ import { asyncHandler } from '../shared/asyncHandler.js';
 import { scanLiveEntities, getLiveEntity } from '../shared/liveEntities.js';
 import { matchesEntityScope } from '../shared/entityScopeFilter.js';
 import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
-import { resolveOperatorEntityAccess, type WorkspaceScopeRow } from '../shared/entityAccess.js';
-import type { GeoBounds } from '../shared/regions.js';
+import { resolveOperatorEntityAccess, fetchWorkspaceScope } from '../shared/entityAccess.js';
+import { parseBboxParam } from '../shared/regions.js';
 
 const router = Router();
 
@@ -14,16 +14,6 @@ interface AlertRow extends AlertForScopeCheck {
 	alert_id: string;
 	entity_id: string;
 	counterparty_entity_id: string | null;
-}
-
-// Same bbox shape/order as GET /entities/live and GET /alerts
-// (minLat,minLon,maxLat,maxLon). Demo-only fallback, same as GET /alerts.
-function parseBbox(raw: string | undefined): GeoBounds | null {
-	if (raw === undefined) return null;
-	const parts = raw.split(',').map(Number);
-	if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
-	const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
-	return { min_lat: minLat, max_lat: maxLat, min_lon: minLon, max_lon: maxLon };
 }
 
 router.get(
@@ -34,15 +24,11 @@ router.get(
 		// GET /alerts, applied here for the same reason: an operator's view is
 		// scoped by design, not by omission.
 		if (res.locals['userRole'] === 'operator') {
-			const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
-				'SELECT scope FROM user_workspaces WHERE user_id = $1',
-				[res.locals['userId'] as string],
-			);
-			if (scopeResult.rows.length === 0) {
+			const scope = await fetchWorkspaceScope(res.locals['userId'] as string);
+			if (scope === null) {
 				res.json([]);
 				return;
 			}
-			const scope = scopeResult.rows[0]!.scope;
 			const entities = await scanLiveEntities((e) =>
 				matchesEntityScope(e, {
 					bounds: scope.geo_region.bounds,
@@ -61,7 +47,7 @@ router.get(
 		// caller with no scope to draw from" rule GET /alerts already uses).
 		const bboxParam = req.query['bbox'] as string | undefined;
 		if (bboxParam !== undefined) {
-			const bounds = parseBbox(bboxParam);
+			const bounds = parseBboxParam(bboxParam);
 			if (!bounds) {
 				res.status(400).json({ error: 'bbox must be minLat,minLon,maxLat,maxLon' });
 				return;
@@ -80,8 +66,20 @@ router.get(
 
 router.get(
 	'/:entity_id',
-	asyncHandler(async (req, res) => {
+	asyncHandler(async (req, res, next) => {
 		const entityId = req.params['entity_id'] as string;
+
+		// Structural guard against the /entities/live collision, independent of
+		// index.ts's mount order: "live" is never a real entity_id (Position
+		// Consumer never writes an entity:live:live hash), so falling through
+		// to the next mounted router is always correct here, and it makes this
+		// route correct even if a future refactor reorders the mounts -- the
+		// one regression test for that (entities.integration.test.ts) still
+		// exists too, but shouldn't be the only thing preventing it.
+		if (entityId === 'live') {
+			next();
+			return;
+		}
 
 		const [liveEntity, alertsResult] = await Promise.all([
 			getLiveEntity(entityId),
