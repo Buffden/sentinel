@@ -54,6 +54,13 @@ export const config = {
 	// Maximum entities returned by GET /entities/live.
 	LIVE_ENTITIES_MAX: requirePositiveInt('LIVE_ENTITIES_MAX', process.env['LIVE_ENTITIES_MAX'], 500),
 
+	// Maximum alert rows returned by GET /entities/:entity_id's recent-alerts join.
+	ENTITY_RECENT_ALERTS_MAX: requirePositiveInt(
+		'ENTITY_RECENT_ALERTS_MAX',
+		process.env['ENTITY_RECENT_ALERTS_MAX'],
+		50,
+	),
+
 	// Maximum concurrent demo WebSocket connections.
 	MAX_DEMO_CONNECTIONS: requirePositiveInt(
 		'MAX_DEMO_CONNECTIONS',

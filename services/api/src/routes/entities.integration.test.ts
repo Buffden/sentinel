@@ -15,6 +15,7 @@ import { redis } from '../redis.js';
 import { config } from '../config.js';
 import { requireAuth } from '../middleware/auth.js';
 import { entitiesRouter } from './entities.js';
+import { entitiesLiveRouter } from './entitiesLive.js';
 
 let server: Server;
 let baseUrl: string;
@@ -75,6 +76,32 @@ async function insertUserWithoutWorkspace(userId: string): Promise<void> {
 	);
 }
 
+async function insertAlert(
+	entityId: string,
+	overrides: Partial<{
+		counterpartyEntityId: string;
+		alertType: string;
+		entityType: string;
+		payload: Record<string, unknown>;
+	}> = {},
+): Promise<string> {
+	const alertId = `test-alert-${randomUUID()}`;
+	await pool.query(
+		`INSERT INTO alerts
+			 (alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, 'STANDARD', 'NEW', $6, now(), now())`,
+		[
+			alertId,
+			entityId,
+			overrides.counterpartyEntityId ?? null,
+			overrides.entityType ?? 'aircraft',
+			overrides.alertType ?? 'SIGNAL_LOSS',
+			JSON.stringify(overrides.payload ?? {}),
+		],
+	);
+	return alertId;
+}
+
 describe('GET /entities (integration)', () => {
 	const seededEntityIds: string[] = [];
 	const seededUserIds: string[] = [];
@@ -95,8 +122,10 @@ describe('GET /entities (integration)', () => {
 
 	afterAll(async () => {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
-		await redis.quit();
-		await pool.end();
+		// pool/redis are shared module-level singletons also used by the two
+		// describe blocks below in this same file -- ended in the last one
+		// instead, once every block is done with them (same convention
+		// alerts.integration.test.ts already uses).
 	});
 
 	afterEach(async () => {
@@ -217,5 +246,200 @@ describe('GET /entities (integration)', () => {
 			headers: { Cookie: signCookie('demo', 'demo') },
 		});
 		expect(res.status).toBe(400);
+	});
+});
+
+// Phase 09 CP2: GET /entities/:entity_id -- live state + recent alerts join.
+describe('GET /entities/:entity_id (integration)', () => {
+	let authedServer: Server;
+	let authedBaseUrl: string;
+	const seededEntityIds: string[] = [];
+	const seededAlertIds: string[] = [];
+	const seededUserIds: string[] = [];
+
+	beforeAll(async () => {
+		const app = express();
+		app.use(cookieParser());
+		app.use(requireAuth);
+		app.use('/entities', entitiesRouter);
+		authedServer = app.listen(0);
+		await new Promise<void>((resolve) => authedServer.once('listening', resolve));
+		const { port } = authedServer.address() as AddressInfo;
+		authedBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => authedServer.close(() => resolve()));
+	});
+
+	afterEach(async () => {
+		if (seededEntityIds.length > 0) {
+			await redis.del(...seededEntityIds.map((id) => `entity:live:${id}`));
+			seededEntityIds.length = 0;
+		}
+		if (seededAlertIds.length > 0) {
+			await pool.query('DELETE FROM alerts WHERE alert_id = ANY($1)', [seededAlertIds]);
+			seededAlertIds.length = 0;
+		}
+		if (seededUserIds.length > 0) {
+			await pool.query('DELETE FROM user_workspaces WHERE user_id = ANY($1)', [seededUserIds]);
+			await pool.query('DELETE FROM users WHERE user_id = ANY($1)', [seededUserIds]);
+			seededUserIds.length = 0;
+		}
+	});
+
+	it('returns 404 for an id with no live state and no alerts', async () => {
+		const res = await fetch(`${authedBaseUrl}/entities/no-such-entity`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it('returns live state plus alerts where the entity is primary or counterparty', async () => {
+		const entityId = `test-entity-${randomUUID()}`;
+		const counterpartyId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 45, 2);
+
+		const ownAlert = await insertAlert(entityId);
+		const asCounterparty = await insertAlert(counterpartyId, { counterpartyEntityId: entityId });
+		seededAlertIds.push(ownAlert, asCounterparty);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${entityId}`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			entity: LiveEntity | null;
+			alerts: Array<{ alert_id: string }>;
+		};
+		expect(body.entity?.entity_id).toBe(entityId);
+		const alertIds = body.alerts.map((a) => a.alert_id);
+		expect(alertIds).toContain(ownAlert);
+		expect(alertIds).toContain(asCounterparty);
+	});
+
+	it('returns entity: null with populated alerts for a dark entity with no Redis state', async () => {
+		const entityId = `test-entity-${randomUUID()}`;
+		const alertId = await insertAlert(entityId);
+		seededAlertIds.push(alertId);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${entityId}`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { entity: LiveEntity | null; alerts: unknown[] };
+		expect(body.entity).toBeNull();
+		expect(body.alerts.length).toBeGreaterThan(0);
+	});
+
+	it('returns 404 for an operator with no saved workspace, even if the entity exists', async () => {
+		const userId = randomUUID();
+		await insertUserWithoutWorkspace(userId);
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 45, 2);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${entityId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it("returns 404 for an operator when the entity's live position is outside their saved bounds", async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 40.7, -74); // New York -- outside France bounds
+
+		const res = await fetch(`${authedBaseUrl}/entities/${entityId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it("returns the entity and its alerts for an operator when it's inside their saved scope", async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 45, 2); // Paris -- inside France bounds
+
+		const inScopeAlert = await insertAlert(entityId, {
+			payload: { last_known_lat: 45, last_known_lon: 2 },
+		});
+		seededAlertIds.push(inScopeAlert);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${entityId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			entity: LiveEntity | null;
+			alerts: Array<{ alert_id: string }>;
+		};
+		expect(body.entity?.entity_id).toBe(entityId);
+		expect(body.alerts.map((a) => a.alert_id)).toContain(inScopeAlert);
+	});
+});
+
+// Regression coverage for the route-mount-order bug this checkpoint's own
+// GET /:entity_id could otherwise reintroduce: mounted in the wrong order,
+// "/entities/live" would match GET /:entity_id with entity_id="live" and
+// entitiesLiveRouter would never run. Mounts both routers exactly as
+// index.ts does (live before the param route) to prove that doesn't happen.
+describe('GET /entities and GET /entities/live mounted together (integration)', () => {
+	let mountedServer: Server;
+	let mountedBaseUrl: string;
+
+	beforeAll(async () => {
+		const app = express();
+		app.use('/entities/live', entitiesLiveRouter);
+		app.use('/entities', entitiesRouter);
+		mountedServer = app.listen(0);
+		await new Promise<void>((resolve) => mountedServer.once('listening', resolve));
+		const { port } = mountedServer.address() as AddressInfo;
+		mountedBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => mountedServer.close(() => resolve()));
+		await redis.quit();
+		await pool.end();
+	});
+
+	it('routes /entities/live to entitiesLiveRouter, not to GET /:entity_id', async () => {
+		// entitiesLiveRouter requires bbox and returns 400 without it --
+		// entitiesRouter's GET /:entity_id has no such validation and would
+		// return 200 (404 at worst) if it wrongly received this request.
+		const res = await fetch(`${mountedBaseUrl}/entities/live`);
+		expect(res.status).toBe(400);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe('bbox query parameter is required');
+	});
+
+	it('still routes a real entity_id to GET /:entity_id', async () => {
+		const res = await fetch(`${mountedBaseUrl}/entities/some-entity-id`);
+		expect(res.status).toBe(404);
+		const body = (await res.json()) as { error: string };
+		expect(body.error).toBe('entity not found');
 	});
 });

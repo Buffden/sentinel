@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
+import { config } from '../config.js';
 import { asyncHandler } from '../shared/asyncHandler.js';
-import { scanLiveEntities } from '../shared/liveEntities.js';
+import { scanLiveEntities, getLiveEntity } from '../shared/liveEntities.js';
 import { matchesEntityScope } from '../shared/entityScopeFilter.js';
+import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
 import type { GeoBounds } from '../shared/regions.js';
 
 const router = Router();
@@ -10,6 +12,13 @@ const router = Router();
 interface WorkspaceScopeRow {
 	geo_region: { bounds: GeoBounds };
 	entity_types: string[];
+	alert_types: string[];
+}
+
+interface AlertRow extends AlertForScopeCheck {
+	alert_id: string;
+	entity_id: string;
+	counterparty_entity_id: string | null;
 }
 
 // Same bbox shape/order as GET /entities/live and GET /alerts
@@ -71,6 +80,77 @@ router.get(
 
 		const entities = await scanLiveEntities(() => true);
 		res.json(entities);
+	}),
+);
+
+router.get(
+	'/:entity_id',
+	asyncHandler(async (req, res) => {
+		const entityId = req.params['entity_id'] as string;
+
+		const [liveEntity, alertsResult] = await Promise.all([
+			getLiveEntity(entityId),
+			pool.query<AlertRow>(
+				`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority,
+								status, superseded_by, payload, detected_at, updated_at, acknowledged_at, resolved_at
+				 FROM alerts
+				 WHERE entity_id = $1 OR counterparty_entity_id = $1
+				 ORDER BY detected_at DESC
+				 LIMIT $2`,
+				[entityId, config.ENTITY_RECENT_ALERTS_MAX],
+			),
+		]);
+		const alerts = alertsResult.rows;
+
+		if (liveEntity === null && alerts.length === 0) {
+			res.status(404).json({ error: 'entity not found' });
+			return;
+		}
+
+		// Operator: same fail-closed rule as GET /entities and GET /alerts,
+		// extended to a direct by-id lookup -- otherwise an operator could
+		// enumerate entity_ids to see data their saved scope was supposed to
+		// hide. A 404 here (not 403) doesn't confirm the entity exists outside
+		// their scope.
+		if (res.locals['userRole'] === 'operator') {
+			const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
+				'SELECT scope FROM user_workspaces WHERE user_id = $1',
+				[res.locals['userId'] as string],
+			);
+			if (scopeResult.rows.length === 0) {
+				res.status(404).json({ error: 'entity not found' });
+				return;
+			}
+			const scope = scopeResult.rows[0]!.scope;
+			const entityScope = { bounds: scope.geo_region.bounds, entity_types: scope.entity_types };
+			const alertScope = { ...entityScope, alert_types: scope.alert_types };
+
+			const scopedAlerts = alerts.filter((a) => matchesScope(a, alertScope));
+
+			// In scope if the live state itself matches, or -- when the entity
+			// has gone dark and Redis has nothing -- if this entity is the
+			// primary (not just counterparty) on at least one in-scope alert.
+			// A counterparty-only match doesn't establish the primary entity's
+			// own scope membership; it would let an operator confirm entities
+			// outside their scope exist just by them being someone else's
+			// counterparty.
+			const inScope = liveEntity
+				? matchesEntityScope(liveEntity, entityScope)
+				: scopedAlerts.some((a) => a.entity_id === entityId);
+
+			if (!inScope) {
+				res.status(404).json({ error: 'entity not found' });
+				return;
+			}
+
+			res.json({ entity: liveEntity, alerts: scopedAlerts });
+			return;
+		}
+
+		// Demo (or any other non-operator caller): unrestricted, same as
+		// GET /entities/live's own demo behavior -- there is no sensible bbox
+		// for a single-id lookup.
+		res.json({ entity: liveEntity, alerts });
 	}),
 );
 

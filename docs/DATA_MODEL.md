@@ -679,6 +679,16 @@ Workspace-scoped live entity list, separate from `GET /entities/live`'s unscoped
 
 Response fields are identical to `GET /entities/live` below.
 
+### `GET /entities/:entity_id` (Phase 09 CP2)
+
+Joins the entity's current Redis live state with its recent alert history from Postgres (`entity_id = :entity_id OR counterparty_entity_id = :entity_id`, newest first, capped at `ENTITY_RECENT_ALERTS_MAX`). Unlike `GET /entities`/`GET /entities/live`, this lookup does **not** apply the staleness cutoff — a dark entity's last known live state is exactly what a `SIGNAL_LOSS` investigation needs to see.
+
+Response: `{ "entity": <live snapshot | null>, "alerts": [...] }`. `entity` is `null` when Redis has no hash for this id (e.g. a fully dark entity past its TTL); this is a valid `200`, not an error, as long as alert history or scope permits a response at all.
+
+- **404** when neither live state nor any alert exists for the id, or (operator session) when the id is outside the caller's saved scope. A `404`, not `403`, is returned for an out-of-scope id so the response itself never confirms the entity exists.
+- **Operator session**: in scope if the live state itself matches the saved `geo_region.bounds`/`entity_types`, or — when there is no live state — if the id is the *primary* `entity_id` (not just a counterparty) on at least one alert that matches the saved scope. No saved workspace: always `404`. The returned `alerts` array is itself filtered through the same `matchesScope` predicate `GET /alerts` uses, so an in-scope entity's alerts can still be individually excluded (e.g. by `alert_types`, or a payload position outside bounds).
+- **Demo session**: unrestricted — no bbox-equivalent scope dimension applies to a single-id lookup.
+
 ### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}` (bbox required)
 
 Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace — this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.

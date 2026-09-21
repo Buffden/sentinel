@@ -33,8 +33,11 @@ app.get('/healthz-auth', (_req, res) => {
 });
 
 app.use('/alerts', alertsRouter);
-app.use('/entities', entitiesRouter);
+// /entities/live must be registered before /entities: entitiesRouter's
+// GET /:entity_id would otherwise match "live" as an entity_id and shadow
+// this route entirely, since Express tries mounts in registration order.
 app.use('/entities/live', entitiesLiveRouter);
+app.use('/entities', entitiesRouter);
 app.use('/users/me/workspace', workspaceRouter);
 
 // Express 4 does not forward a rejected promise from an async route handler
