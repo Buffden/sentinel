@@ -699,6 +699,16 @@ Response: array of `{ entity_id, timestamp_ms, lat, lon, altitude_m, speed_mps, 
 - **Operator session**: uses the exact same by-id access decision as `GET /entities/:entity_id` (`resolveOperatorEntityAccess`, `services/api/src/shared/entityAccess.ts`): in scope via current live state, or via being the primary entity on an in-scope alert when dark. `404` (not `403`) when out of scope or with no saved workspace. Once in scope, the full requested window is returned unfiltered by bounds: the scope check gates the entity, not each individual point (fragmenting a track at a bounds edge would defeat the investigation this endpoint exists for).
 - **Demo session**: unrestricted, same as `GET /entities/:entity_id`.
 
+### `GET /entities/:entity_id/graph` (Phase 09 CP4)
+
+The entity's 1-hop relationship neighborhood from Neo4j: every `PROXIMITY_EVENT` episode and `KNOWN_ASSOCIATE` relationship on record, in either direction. The first Neo4j read in the API service (`services/api/src/neo4j.ts`); Correlation Worker remains the only writer, per ADR-003. Capped at `ENTITY_GRAPH_MAX_EDGES`, ordered by `last_seen_ms` descending.
+
+Response: `{ "entity_id": string, "edges": [{ edge_type: "PROXIMITY_EVENT" | "KNOWN_ASSOCIATE", other_entity_id, other_entity_type, episode_start_ms, last_seen_ms, min_distance_metres, established_at, known_associate_type }] }`. Fields that don't apply to a given `edge_type` are `null` (e.g. `known_associate_type` for a `PROXIMITY_EVENT`).
+
+- An entity with no recorded relationships returns a valid `200` with `edges: []`, not a `404` -- most entities have none, and that's a normal result, not an error.
+- **Operator session**: uses the same by-id access decision as `GET /entities/:entity_id` and its `/history` (`resolveOperatorEntityAccess`). `404` when out of scope or with no saved workspace. Unlike the entity itself, individual neighbors in the response are **not** separately filtered by the operator's bounds: Neo4j's `Entity` node carries no geography (just `id`/`type`/`name`, per ADR-003), so there is nothing to filter a neighbor against without an extra Redis/Postgres lookup per neighbor. The scope check gates the primary entity only.
+- **Demo session**: unrestricted, same as the other by-id endpoints.
+
 ### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}` (bbox required)
 
 Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace: this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.

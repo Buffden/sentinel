@@ -12,6 +12,7 @@ import jwt from 'jsonwebtoken';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pool } from '../db.js';
 import { redis } from '../redis.js';
+import { neo4jDriver } from '../neo4j.js';
 import { config } from '../config.js';
 import { requireAuth } from '../middleware/auth.js';
 import { entitiesRouter } from './entities.js';
@@ -584,6 +585,206 @@ describe('GET /entities/:entity_id/history (integration)', () => {
 	});
 });
 
+interface GraphEdge {
+	edge_type: string;
+	other_entity_id: string;
+	other_entity_type: string | null;
+	episode_start_ms: number | null;
+	last_seen_ms: number | null;
+	min_distance_metres: number | null;
+	established_at: string | null;
+	known_associate_type: string | null;
+}
+
+async function mergeTestProximityEvent(
+	a: string,
+	b: string,
+	episodeStartMs: number,
+	lastSeenMs: number,
+	distanceMetres: number,
+): Promise<void> {
+	const session = neo4jDriver.session();
+	try {
+		await session.run(
+			`MERGE (x:Entity {id: $a}) ON CREATE SET x.type = 'aircraft'
+			 MERGE (y:Entity {id: $b}) ON CREATE SET y.type = 'aircraft'
+			 MERGE (x)-[r:PROXIMITY_EVENT {idempotency_key: $a + ':' + $b + ':' + toString($episodeStartMs)}]->(y)
+			 SET r.episode_start_ms = $episodeStartMs, r.last_seen_ms = $lastSeenMs,
+					 r.min_distance_metres = $distanceMetres, r.lat = 0.0, r.lon = 0.0,
+					 r.distance_at_detection = $distanceMetres`,
+			{ a, b, episodeStartMs, lastSeenMs, distanceMetres },
+		);
+	} finally {
+		await session.close();
+	}
+}
+
+async function mergeTestKnownAssociate(
+	a: string,
+	b: string,
+	relationshipType: string,
+): Promise<void> {
+	const session = neo4jDriver.session();
+	try {
+		await session.run(
+			`MERGE (x:Entity {id: $a}) ON CREATE SET x.type = 'aircraft'
+			 MERGE (y:Entity {id: $b}) ON CREATE SET y.type = 'aircraft'
+			 MERGE (x)-[r:KNOWN_ASSOCIATE]-(y)
+			 SET r.established_at = '2026-01-01T00:00:00.000Z', r.relationship_type = $relationshipType`,
+			{ a, b, relationshipType },
+		);
+	} finally {
+		await session.close();
+	}
+}
+
+async function deleteTestEntities(ids: string[]): Promise<void> {
+	if (ids.length === 0) return;
+	const session = neo4jDriver.session();
+	try {
+		await session.run('MATCH (e:Entity) WHERE e.id IN $ids DETACH DELETE e', { ids });
+	} finally {
+		await session.close();
+	}
+}
+
+// Phase 09 CP4: GET /entities/:entity_id/graph -- first Neo4j read in the API
+// service. Seeds its own real Entity/PROXIMITY_EVENT/KNOWN_ASSOCIATE data via
+// the real driver, rather than depending on whatever earlier phases' own
+// dev-seeded graph happens to contain.
+describe('GET /entities/:entity_id/graph (integration)', () => {
+	let authedServer: Server;
+	let authedBaseUrl: string;
+	const seededNeo4jIds: string[] = [];
+	const seededEntityIds: string[] = [];
+	const seededUserIds: string[] = [];
+
+	beforeAll(async () => {
+		const app = express();
+		app.use(cookieParser());
+		app.use(requireAuth);
+		app.use('/entities', entitiesRouter);
+		authedServer = app.listen(0);
+		await new Promise<void>((resolve) => authedServer.once('listening', resolve));
+		const { port } = authedServer.address() as AddressInfo;
+		authedBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => authedServer.close(() => resolve()));
+	});
+
+	afterEach(async () => {
+		await deleteTestEntities(seededNeo4jIds);
+		seededNeo4jIds.length = 0;
+		if (seededEntityIds.length > 0) {
+			await redis.del(...seededEntityIds.map((id) => `entity:live:${id}`));
+			seededEntityIds.length = 0;
+		}
+		if (seededUserIds.length > 0) {
+			await pool.query('DELETE FROM user_workspaces WHERE user_id = ANY($1)', [seededUserIds]);
+			await pool.query('DELETE FROM users WHERE user_id = ANY($1)', [seededUserIds]);
+			seededUserIds.length = 0;
+		}
+	});
+
+	it('returns an empty edge list, not a 404, for an id with no graph data', async () => {
+		const res = await fetch(`${authedBaseUrl}/entities/no-such-graph-entity/graph`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { entity_id: string; edges: GraphEdge[] };
+		expect(body.edges).toEqual([]);
+	});
+
+	it('returns both PROXIMITY_EVENT and KNOWN_ASSOCIATE edges with their own shapes', async () => {
+		const a = `test-graph-${randomUUID()}`;
+		const b = `test-graph-${randomUUID()}`;
+		const c = `test-graph-${randomUUID()}`;
+		seededNeo4jIds.push(a, b, c);
+
+		await mergeTestProximityEvent(a, b, 1_700_000_000_000, 1_700_000_010_000, 500);
+		await mergeTestKnownAssociate(a, c, 'same_fleet');
+
+		const res = await fetch(`${authedBaseUrl}/entities/${a}/graph`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { entity_id: string; edges: GraphEdge[] };
+		const byOther = new Map(body.edges.map((e) => [e.other_entity_id, e]));
+
+		const proximity = byOther.get(b);
+		expect(proximity?.edge_type).toBe('PROXIMITY_EVENT');
+		expect(proximity?.min_distance_metres).toBe(500);
+		expect(proximity?.known_associate_type).toBeNull();
+
+		const associate = byOther.get(c);
+		expect(associate?.edge_type).toBe('KNOWN_ASSOCIATE');
+		expect(associate?.known_associate_type).toBe('same_fleet');
+		expect(associate?.episode_start_ms).toBeNull();
+	});
+
+	it('orders edges by last_seen_ms descending', async () => {
+		const a = `test-graph-${randomUUID()}`;
+		const older = `test-graph-${randomUUID()}`;
+		const newer = `test-graph-${randomUUID()}`;
+		seededNeo4jIds.push(a, older, newer);
+
+		await mergeTestProximityEvent(a, older, 1_700_000_000_000, 1_700_000_000_000, 100);
+		await mergeTestProximityEvent(a, newer, 1_700_000_100_000, 1_700_000_100_000, 100);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${a}/graph`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		const body = (await res.json()) as { entity_id: string; edges: GraphEdge[] };
+		const ids = body.edges.map((e) => e.other_entity_id);
+		expect(ids.indexOf(newer)).toBeLessThan(ids.indexOf(older));
+	});
+
+	it('returns 404 for an operator with no saved workspace, even though real graph data exists', async () => {
+		const userId = randomUUID();
+		await insertUserWithoutWorkspace(userId);
+		seededUserIds.push(userId);
+		const a = `test-graph-${randomUUID()}`;
+		const b = `test-graph-${randomUUID()}`;
+		seededNeo4jIds.push(a, b);
+		seededEntityIds.push(a);
+		await seedEntity(a, 45, 2);
+		await mergeTestProximityEvent(a, b, 1_700_000_000_000, 1_700_000_000_000, 100);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${a}/graph`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it('returns the graph for an operator when the entity is inside their saved scope', async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const a = `test-graph-${randomUUID()}`;
+		const b = `test-graph-${randomUUID()}`;
+		seededNeo4jIds.push(a, b);
+		seededEntityIds.push(a);
+		await seedEntity(a, 45, 2); // Paris -- inside France bounds
+		await mergeTestProximityEvent(a, b, 1_700_000_000_000, 1_700_000_000_000, 100);
+
+		const res = await fetch(`${authedBaseUrl}/entities/${a}/graph`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { entity_id: string; edges: GraphEdge[] };
+		expect(body.edges.map((e) => e.other_entity_id)).toContain(b);
+	});
+});
+
 // Regression coverage for the route-mount-order bug this checkpoint's own
 // GET /:entity_id could otherwise reintroduce: mounted in the wrong order,
 // "/entities/live" would match GET /:entity_id with entity_id="live" and
@@ -607,6 +808,7 @@ describe('GET /entities and GET /entities/live mounted together (integration)', 
 		await new Promise<void>((resolve) => mountedServer.close(() => resolve()));
 		await redis.quit();
 		await pool.end();
+		await neo4jDriver.close();
 	});
 
 	it('routes /entities/live to entitiesLiveRouter, not to GET /:entity_id', async () => {

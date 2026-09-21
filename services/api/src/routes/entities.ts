@@ -1,6 +1,8 @@
 import { Router } from 'express';
+import neo4j from 'neo4j-driver';
 import { pool } from '../db.js';
 import { config } from '../config.js';
+import { neo4jDriver } from '../neo4j.js';
 import { asyncHandler } from '../shared/asyncHandler.js';
 import { scanLiveEntities, getLiveEntity } from '../shared/liveEntities.js';
 import { matchesEntityScope } from '../shared/entityScopeFilter.js';
@@ -198,6 +200,79 @@ router.get(
 				timestamp_ms: Number(row.timestamp_ms),
 			})),
 		);
+	}),
+);
+
+interface GraphEdge {
+	edge_type: 'PROXIMITY_EVENT' | 'KNOWN_ASSOCIATE';
+	other_entity_id: string;
+	other_entity_type: string | null;
+	episode_start_ms: number | null;
+	last_seen_ms: number | null;
+	min_distance_metres: number | null;
+	established_at: string | null;
+	known_associate_type: string | null;
+}
+
+router.get(
+	'/:entity_id/graph',
+	asyncHandler(async (req, res) => {
+		const entityId = req.params['entity_id'] as string;
+
+		const liveEntity = await getLiveEntity(entityId);
+
+		// Same fail-closed by-id access rule as the other by-id endpoints -- see
+		// entityAccess.ts. Reachable directly, so it needs this check on its
+		// own. Note what this check does NOT do: Neo4j's Entity node carries no
+		// geography (ADR-003 -- just id/type/name), so once the primary entity
+		// passes the scope check, individual neighbors below are not separately
+		// filtered by the operator's bounds -- there's nothing geographic on
+		// them to filter against without an extra Redis/Postgres lookup per
+		// neighbor. Same "scope gates the entity, not sub-resources" trade-off
+		// GET /:entity_id/history already made, restated here because this
+		// store genuinely has less to filter with.
+		if (res.locals['userRole'] === 'operator') {
+			const access = await resolveOperatorEntityAccess(
+				res.locals['userId'] as string,
+				entityId,
+				liveEntity,
+			);
+			if (access.kind !== 'in_scope') {
+				res.status(404).json({ error: 'entity not found' });
+				return;
+			}
+		}
+
+		const session = neo4jDriver.session({ defaultAccessMode: neo4j.session.READ });
+		try {
+			const result = await session.run(
+				`MATCH (:Entity {id: $entityId})-[r:PROXIMITY_EVENT|KNOWN_ASSOCIATE]-(other:Entity)
+				 RETURN type(r) AS edge_type, other.id AS other_entity_id, other.type AS other_entity_type,
+								properties(r) AS props
+				 ORDER BY coalesce(r.last_seen_ms, 0) DESC
+				 LIMIT $max`,
+				{ entityId, max: neo4j.int(config.ENTITY_GRAPH_MAX_EDGES) },
+			);
+
+			const edges: GraphEdge[] = result.records.map((record) => {
+				const edgeType = record.get('edge_type') as 'PROXIMITY_EVENT' | 'KNOWN_ASSOCIATE';
+				const props = record.get('props') as Record<string, unknown>;
+				return {
+					edge_type: edgeType,
+					other_entity_id: record.get('other_entity_id') as string,
+					other_entity_type: (record.get('other_entity_type') as string | null) ?? null,
+					episode_start_ms: (props['episode_start_ms'] as number | undefined) ?? null,
+					last_seen_ms: (props['last_seen_ms'] as number | undefined) ?? null,
+					min_distance_metres: (props['min_distance_metres'] as number | undefined) ?? null,
+					established_at: (props['established_at'] as string | undefined) ?? null,
+					known_associate_type: (props['relationship_type'] as string | undefined) ?? null,
+				};
+			});
+
+			res.json({ entity_id: entityId, edges });
+		} finally {
+			await session.close();
+		}
 	}),
 );
 
