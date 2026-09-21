@@ -29,15 +29,51 @@ interface AlertRow extends AlertForScopeCheck {
 	counterparty_entity_id: string | null;
 }
 
+const KNOWN_STATUSES = ['NEW', 'ACKNOWLEDGED', 'RESOLVED', 'SUPERSEDED'];
+
+// Comma-separated status list, e.g. "RESOLVED,SUPERSEDED" for investigation
+// pulling closed history. Returns null (caller keeps today's NEW/ACKNOWLEDGED
+// default) when the param is absent, and an error string when present but
+// invalid -- never a silently-empty result for a typo'd status.
+function parseStatusFilter(
+	raw: string | undefined,
+): { statuses: string[] } | { error: string } | null {
+	if (raw === undefined) return null;
+	const statuses = raw.split(',').map((s) => s.trim());
+	const invalid = statuses.find((s) => !KNOWN_STATUSES.includes(s));
+	if (invalid !== undefined) {
+		return { error: `unknown status "${invalid}"; must be one of ${KNOWN_STATUSES.join(', ')}` };
+	}
+	return { statuses };
+}
+
 router.get(
 	'/',
 	asyncHandler(async (req, res) => {
+		const statusParam = req.query['status'] as string | undefined;
+		const parsedStatus = parseStatusFilter(statusParam);
+		if (parsedStatus !== null && 'error' in parsedStatus) {
+			res.status(400).json({ error: parsedStatus.error });
+			return;
+		}
+		// Default unchanged from before this checkpoint: the dashboard's
+		// AlertWidget depends on exactly this restriction when no status param
+		// is supplied, and must see no behavior change.
+		const statuses = parsedStatus?.statuses ?? ['NEW', 'ACKNOWLEDGED'];
+
+		// Optional investigation filter: alerts where this entity is primary or
+		// counterparty, same join GET /entities/:entity_id already uses for its
+		// own alerts array. Absent means unfiltered by entity, same as today.
+		const entityIdParam = (req.query['entity_id'] as string | undefined) ?? null;
+
 		const result = await pool.query<AlertRow>(
 			`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status,
 							superseded_by, payload, detected_at, updated_at, acknowledged_at, resolved_at
 			 FROM alerts
-			 WHERE status IN ('NEW', 'ACKNOWLEDGED')
+			 WHERE status = ANY($1)
+				 AND ($2::text IS NULL OR entity_id = $2 OR counterparty_entity_id = $2)
 			 ORDER BY detected_at DESC`,
+			[statuses, entityIdParam],
 		);
 		const rows = result.rows;
 
@@ -81,6 +117,54 @@ router.get(
 		}
 
 		res.json(rows);
+	}),
+);
+
+router.get(
+	'/:alert_id',
+	asyncHandler(async (req, res) => {
+		const alertId = req.params['alert_id'] as string;
+		const result = await pool.query<AlertRow>(
+			`SELECT alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status,
+							superseded_by, payload, detected_at, updated_at, acknowledged_at, resolved_at
+			 FROM alerts
+			 WHERE alert_id = $1`,
+			[alertId],
+		);
+		const row = result.rows[0];
+		if (!row) {
+			res.status(404).json({ error: 'alert not found' });
+			return;
+		}
+
+		// Same fail-closed by-scope rule as GET /alerts, extended to a direct
+		// by-id lookup for the same reason every other by-id endpoint this
+		// phase needed it: otherwise an operator could enumerate alert_ids to
+		// read evidence their saved scope was supposed to hide. Unlike the
+		// entity by-id endpoints, there's no "dark" fallback to consider here --
+		// an alert row always carries its own entity_type/alert_type/payload,
+		// nothing else to check.
+		if (res.locals['userRole'] === 'operator') {
+			const scope = await fetchWorkspaceScope(res.locals['userId'] as string);
+			if (scope === null) {
+				res.status(404).json({ error: 'alert not found' });
+				return;
+			}
+			const inScope = matchesScope(row, {
+				bounds: scope.geo_region.bounds,
+				entity_types: scope.entity_types,
+				alert_types: scope.alert_types,
+			});
+			if (!inScope) {
+				res.status(404).json({ error: 'alert not found' });
+				return;
+			}
+		}
+
+		// Demo (or any other non-operator caller): unrestricted, same as every
+		// other by-id endpoint's demo path this phase -- no bbox-equivalent
+		// scope dimension applies to a single-id lookup.
+		res.json(row);
 	}),
 );
 

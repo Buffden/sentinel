@@ -729,14 +729,23 @@ Response: array of entity snapshots.
 | `callsign` | string \| null | Redis hash |
 | `on_ground` | boolean \| null | Redis hash |
 
-### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}` (`bbox` optional)
+### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}&status={list}&entity_id={id}` (all optional)
 
-Returns persisted `NEW`/`ACKNOWLEDGED` alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
+Returns persisted alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
 
+- `status`: comma-separated list (`NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`). Defaults to `NEW,ACKNOWLEDGED` when omitted (Phase 09 CP5, additive-only — the dashboard's live feed depends on exactly this default and sees no change). An unrecognized status value is a `400`, not a silently-empty result.
+- `entity_id`: matches alerts where this id is the primary `entity_id` or the `counterparty_entity_id` (Phase 09 CP5). Omitted means unfiltered by entity, same as before CP5.
 - **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types` + `alert_types`). No saved workspace yields an empty array, not an unfiltered one — the dashboard is expected to show the scope setup prompt instead. Any `bbox` query param is ignored for an operator; the saved scope is authoritative.
-- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered (every `NEW`/`ACKNOWLEDGED` alert) — the transitional behavior until a frontend caller passes the map's current viewport.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered by geography (every alert matching `status`/`entity_id`) — the transitional behavior until a frontend caller passes the map's current viewport.
 
 Position is read from the alert's own `payload`, not current Redis state, and the field path differs by `alert_type` — see ADR-012's corrected field list. An alert whose payload doesn't yield a usable position for its type (this can only be `ROUTE_DEVIATION` today, whose payload shape is undecided since Phase 04 is deferred) is excluded, never included by a fallback guess.
+
+### `GET /alerts/:alert_id` (Phase 09 CP5)
+
+Single-alert investigation read, unrestricted by `status` (unlike the list, since opening a specific alert's evidence panel per US-14 must work for a `RESOLVED` or `SUPERSEDED` alert too, not just an open one).
+
+- **404** for an unknown `alert_id`, or (operator session) when the alert is outside the caller's saved scope (`matchesScope`, the same predicate the list already uses) or the operator has no saved workspace. `404`, not `403`, so the response itself never confirms an out-of-scope alert exists.
+- **Demo session**: unrestricted, same as the entity by-id endpoints — no bbox-equivalent scope dimension applies to a single-id lookup.
 
 ### `POST /users/me/workspace`
 

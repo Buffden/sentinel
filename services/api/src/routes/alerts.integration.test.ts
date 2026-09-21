@@ -21,6 +21,7 @@ let baseUrl: string;
 
 async function insertAlert(
 	overrides: Partial<{
+		entityId: string;
 		status: string;
 		detectedAt: Date;
 		counterpartyEntityId: string;
@@ -34,9 +35,10 @@ async function insertAlert(
 	await pool.query(
 		`INSERT INTO alerts
 			 (alert_id, entity_id, counterparty_entity_id, entity_type, alert_type, priority, status, payload, detected_at, updated_at)
-		 VALUES ($1, 'test-entity', $2, $3, $4, 'STANDARD', $5, $6, $7, $7)`,
+		 VALUES ($1, $2, $3, $4, $5, 'STANDARD', $6, $7, $8, $8)`,
 		[
 			alertId,
+			overrides.entityId ?? 'test-entity',
 			overrides.counterpartyEntityId ?? null,
 			overrides.entityType ?? 'aircraft',
 			overrides.alertType ?? 'SIGNAL_LOSS',
@@ -116,6 +118,192 @@ describe('GET /alerts (integration)', () => {
 		const ids = body.map((a) => a.alert_id);
 
 		expect(ids.indexOf(newer)).toBeLessThan(ids.indexOf(older));
+	});
+
+	// Phase 09 CP5: richer filtering. Default (no status/entity_id params)
+	// behavior is proven unchanged by the tests above, which never pass either.
+	it('returns only the statuses requested via ?status=, overriding the default', async () => {
+		const newId = await insertAlert({ status: 'NEW' });
+		const resolvedId = await insertAlert({ status: 'RESOLVED' });
+		const supersededId = await insertAlert({ status: 'SUPERSEDED' });
+		seededIds.push(newId, resolvedId, supersededId);
+
+		const res = await fetch(`${baseUrl}/alerts?status=RESOLVED,SUPERSEDED`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Array<{ alert_id: string }>;
+		const ids = body.map((a) => a.alert_id);
+		expect(ids).toContain(resolvedId);
+		expect(ids).toContain(supersededId);
+		expect(ids).not.toContain(newId);
+	});
+
+	it('rejects an unknown status value in ?status=', async () => {
+		const res = await fetch(`${baseUrl}/alerts?status=NOT_A_REAL_STATUS`);
+		expect(res.status).toBe(400);
+	});
+
+	it('filters by ?entity_id=, matching either primary entity_id or counterparty_entity_id', async () => {
+		const targetId = `test-entity-${randomUUID()}`;
+		const asPrimary = await insertAlert({ entityId: targetId });
+		const asCounterparty = await insertAlert({ counterpartyEntityId: targetId });
+		const unrelated = await insertAlert({});
+		seededIds.push(asPrimary, asCounterparty, unrelated);
+
+		const res = await fetch(`${baseUrl}/alerts?entity_id=${targetId}`);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as Array<{ alert_id: string }>;
+		const ids = body.map((a) => a.alert_id);
+		expect(ids).toContain(asPrimary);
+		expect(ids).toContain(asCounterparty);
+		expect(ids).not.toContain(unrelated);
+	});
+});
+
+// Phase 09 CP5: GET /alerts/:alert_id -- single-alert investigation read, not
+// restricted to NEW/ACKNOWLEDGED, with the same by-scope fail-closed rule
+// GET /alerts already established for the list.
+describe('GET /alerts/:alert_id (integration)', () => {
+	let authedServer: Server;
+	let authedBaseUrl: string;
+	const seededAlertIds: string[] = [];
+	const seededUserIds: string[] = [];
+
+	function signCookie(userId: string, role: 'operator' | 'demo'): string {
+		const token = jwt.sign(
+			{ user_id: userId, email: `${userId}@example.com`, role },
+			config.JWT_SECRET,
+			{ expiresIn: '1h' },
+		);
+		return `sentinel_jwt=${token}`;
+	}
+
+	async function insertUserWithWorkspace(
+		userId: string,
+		scope: {
+			geo_region: { name: string | null; bounds: Record<string, number> };
+			entity_types: string[];
+			alert_types: string[];
+		},
+	): Promise<void> {
+		await pool.query(
+			`INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
+			 VALUES ($1, $2, $3, now(), now())`,
+			[userId, `google-${userId}`, `${userId}@example.com`],
+		);
+		await pool.query(
+			`INSERT INTO user_workspaces (user_id, scope, updated_at) VALUES ($1, $2, now())`,
+			[userId, JSON.stringify(scope)],
+		);
+	}
+
+	async function insertUserWithoutWorkspace(userId: string): Promise<void> {
+		await pool.query(
+			`INSERT INTO users (user_id, google_sub, email, last_login_at, created_at)
+			 VALUES ($1, $2, $3, now(), now())`,
+			[userId, `google-${userId}`, `${userId}@example.com`],
+		);
+	}
+
+	beforeAll(async () => {
+		const app = express();
+		app.use(cookieParser());
+		app.use(requireAuth);
+		app.use('/alerts', alertsRouter);
+		authedServer = app.listen(0);
+		await new Promise<void>((resolve) => authedServer.once('listening', resolve));
+		const { port } = authedServer.address() as AddressInfo;
+		authedBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => authedServer.close(() => resolve()));
+	});
+
+	afterEach(async () => {
+		if (seededAlertIds.length > 0) {
+			await pool.query('DELETE FROM alerts WHERE alert_id = ANY($1)', [seededAlertIds]);
+			seededAlertIds.length = 0;
+		}
+		if (seededUserIds.length > 0) {
+			await pool.query('DELETE FROM user_workspaces WHERE user_id = ANY($1)', [seededUserIds]);
+			await pool.query('DELETE FROM users WHERE user_id = ANY($1)', [seededUserIds]);
+			seededUserIds.length = 0;
+		}
+	});
+
+	it('returns 404 for an unknown alert_id', async () => {
+		const res = await fetch(`${authedBaseUrl}/alerts/does-not-exist`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it('returns a RESOLVED alert -- not restricted to NEW/ACKNOWLEDGED like the list', async () => {
+		const alertId = await insertAlert({ status: 'RESOLVED' });
+		seededAlertIds.push(alertId);
+
+		const res = await fetch(`${authedBaseUrl}/alerts/${alertId}`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { alert_id: string; status: string };
+		expect(body.alert_id).toBe(alertId);
+		expect(body.status).toBe('RESOLVED');
+	});
+
+	it('returns 404 for an operator with no saved workspace, even for a real alert', async () => {
+		const userId = randomUUID();
+		await insertUserWithoutWorkspace(userId);
+		seededUserIds.push(userId);
+		const alertId = await insertAlert({ payload: { last_known_lat: 45, last_known_lon: 2 } });
+		seededAlertIds.push(alertId);
+
+		const res = await fetch(`${authedBaseUrl}/alerts/${alertId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it("returns 404 for an operator when the alert's position is outside their saved bounds", async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const alertId = await insertAlert({ payload: { last_known_lat: 40.7, last_known_lon: -74.0 } });
+		seededAlertIds.push(alertId);
+
+		const res = await fetch(`${authedBaseUrl}/alerts/${alertId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(404);
+	});
+
+	it("returns the alert for an operator when it's inside their saved scope", async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const alertId = await insertAlert({ payload: { last_known_lat: 45, last_known_lon: 2 } });
+		seededAlertIds.push(alertId);
+
+		const res = await fetch(`${authedBaseUrl}/alerts/${alertId}`, {
+			headers: { Cookie: signCookie(userId, 'operator') },
+		});
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as { alert_id: string };
+		expect(body.alert_id).toBe(alertId);
 	});
 });
 
