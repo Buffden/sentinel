@@ -401,6 +401,189 @@ describe('GET /entities/:entity_id (integration)', () => {
 	});
 });
 
+interface HistoryPoint {
+	entity_id: string;
+	timestamp_ms: number;
+	lat: number;
+	lon: number;
+}
+
+async function insertPosition(
+	entityId: string,
+	timestampMs: number,
+	lat: number,
+	lon: number,
+): Promise<void> {
+	await pool.query(
+		`INSERT INTO position_history (entity_id, entity_type, observed_at, timestamp_ms, lat, lon, source)
+		 VALUES ($1, 'aircraft', to_timestamp($2 / 1000.0), $2, $3, $4, 'synthetic')
+		 ON CONFLICT (entity_id, observed_at) DO NOTHING`,
+		[entityId, timestampMs, lat, lon],
+	);
+}
+
+// Phase 09 CP3: GET /entities/:entity_id/history -- TimescaleDB position timeline.
+describe('GET /entities/:entity_id/history (integration)', () => {
+	let authedServer: Server;
+	let authedBaseUrl: string;
+	const seededEntityIds: string[] = [];
+	const seededUserIds: string[] = [];
+	const seededAlertIdsForHistory: string[] = [];
+
+	beforeAll(async () => {
+		const app = express();
+		app.use(cookieParser());
+		app.use(requireAuth);
+		app.use('/entities', entitiesRouter);
+		authedServer = app.listen(0);
+		await new Promise<void>((resolve) => authedServer.once('listening', resolve));
+		const { port } = authedServer.address() as AddressInfo;
+		authedBaseUrl = `http://localhost:${port}`;
+	});
+
+	afterAll(async () => {
+		await new Promise<void>((resolve) => authedServer.close(() => resolve()));
+	});
+
+	afterEach(async () => {
+		if (seededEntityIds.length > 0) {
+			await pool.query('DELETE FROM position_history WHERE entity_id = ANY($1)', [seededEntityIds]);
+			await redis.del(...seededEntityIds.map((id) => `entity:live:${id}`));
+			seededEntityIds.length = 0;
+		}
+		if (seededAlertIdsForHistory.length > 0) {
+			await pool.query('DELETE FROM alerts WHERE alert_id = ANY($1)', [seededAlertIdsForHistory]);
+			seededAlertIdsForHistory.length = 0;
+		}
+		if (seededUserIds.length > 0) {
+			await pool.query('DELETE FROM user_workspaces WHERE user_id = ANY($1)', [seededUserIds]);
+			await pool.query('DELETE FROM users WHERE user_id = ANY($1)', [seededUserIds]);
+			seededUserIds.length = 0;
+		}
+	});
+
+	it('rejects a request with missing from_ms/to_ms', async () => {
+		const res = await fetch(`${authedBaseUrl}/entities/some-id/history`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it('rejects from_ms greater than to_ms', async () => {
+		const res = await fetch(`${authedBaseUrl}/entities/some-id/history?from_ms=200&to_ms=100`, {
+			headers: { Cookie: signCookie('demo', 'demo') },
+		});
+		expect(res.status).toBe(400);
+	});
+
+	it('returns points inside the window, ascending, and excludes points outside it', async () => {
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		const baseMs = Date.parse('2026-01-01T00:00:00.000Z');
+
+		await insertPosition(entityId, baseMs, 45, 2); // before window
+		await insertPosition(entityId, baseMs + 60_000, 45.1, 2.1); // inside window
+		await insertPosition(entityId, baseMs + 120_000, 45.2, 2.2); // inside window
+		await insertPosition(entityId, baseMs + 600_000, 46, 3); // after window
+
+		const res = await fetch(
+			`${authedBaseUrl}/entities/${entityId}/history?from_ms=${baseMs + 1}&to_ms=${baseMs + 300_000}`,
+			{ headers: { Cookie: signCookie('demo', 'demo') } },
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as HistoryPoint[];
+		expect(body.map((p) => p.timestamp_ms)).toEqual([baseMs + 60_000, baseMs + 120_000]);
+	});
+
+	it('caps the response at ENTITY_HISTORY_MAX_POINTS', async () => {
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		const baseMs = Date.parse('2026-01-02T00:00:00.000Z');
+		const count = config.ENTITY_HISTORY_MAX_POINTS + 20;
+
+		for (let i = 0; i < count; i++) {
+			await insertPosition(entityId, baseMs + i * 1000, 45, 2);
+		}
+
+		const res = await fetch(
+			`${authedBaseUrl}/entities/${entityId}/history?from_ms=${baseMs}&to_ms=${baseMs + count * 1000}`,
+			{ headers: { Cookie: signCookie('demo', 'demo') } },
+		);
+		const body = (await res.json()) as HistoryPoint[];
+		expect(body.length).toBe(config.ENTITY_HISTORY_MAX_POINTS);
+	});
+
+	it('returns 404 for an operator with no saved workspace', async () => {
+		const userId = randomUUID();
+		await insertUserWithoutWorkspace(userId);
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 45, 2);
+		await insertPosition(entityId, Date.now(), 45, 2);
+
+		const res = await fetch(
+			`${authedBaseUrl}/entities/${entityId}/history?from_ms=0&to_ms=${Date.now() + 1_000_000}`,
+			{ headers: { Cookie: signCookie(userId, 'operator') } },
+		);
+		expect(res.status).toBe(404);
+	});
+
+	it("returns 404 for an operator when the entity's live position is outside their saved bounds", async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		await seedEntity(entityId, 40.7, -74); // New York -- outside France bounds
+		await insertPosition(entityId, Date.now(), 40.7, -74);
+
+		const res = await fetch(
+			`${authedBaseUrl}/entities/${entityId}/history?from_ms=0&to_ms=${Date.now() + 1_000_000}`,
+			{ headers: { Cookie: signCookie(userId, 'operator') } },
+		);
+		expect(res.status).toBe(404);
+	});
+
+	it('returns history for a dark entity when it is the primary on an in-scope alert', async () => {
+		const userId = randomUUID();
+		await insertUserWithWorkspace(userId, {
+			geo_region: {
+				name: 'France',
+				bounds: { min_lat: 41.3, max_lat: 51.1, min_lon: -5.2, max_lon: 9.6 },
+			},
+			entity_types: ['aircraft'],
+			alert_types: ['SIGNAL_LOSS'],
+		});
+		seededUserIds.push(userId);
+		const entityId = `test-entity-${randomUUID()}`;
+		seededEntityIds.push(entityId);
+		// No live Redis state -- entity has gone dark.
+		const baseMs = Date.parse('2026-01-03T00:00:00.000Z');
+		await insertPosition(entityId, baseMs, 45, 2);
+
+		const alertId = await insertAlert(entityId, {
+			payload: { last_known_lat: 45, last_known_lon: 2 },
+		});
+		seededAlertIdsForHistory.push(alertId);
+
+		const res = await fetch(
+			`${authedBaseUrl}/entities/${entityId}/history?from_ms=${baseMs - 1000}&to_ms=${baseMs + 1000}`,
+			{ headers: { Cookie: signCookie(userId, 'operator') } },
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as HistoryPoint[];
+		expect(body.map((p) => p.timestamp_ms)).toContain(baseMs);
+	});
+});
+
 // Regression coverage for the route-mount-order bug this checkpoint's own
 // GET /:entity_id could otherwise reintroduce: mounted in the wrong order,
 // "/entities/live" would match GET /:entity_id with entity_id="live" and

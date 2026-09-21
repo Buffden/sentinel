@@ -5,15 +5,10 @@ import { asyncHandler } from '../shared/asyncHandler.js';
 import { scanLiveEntities, getLiveEntity } from '../shared/liveEntities.js';
 import { matchesEntityScope } from '../shared/entityScopeFilter.js';
 import { matchesScope, type AlertForScopeCheck } from '../shared/alertScopeFilter.js';
+import { resolveOperatorEntityAccess, type WorkspaceScopeRow } from '../shared/entityAccess.js';
 import type { GeoBounds } from '../shared/regions.js';
 
 const router = Router();
-
-interface WorkspaceScopeRow {
-	geo_region: { bounds: GeoBounds };
-	entity_types: string[];
-	alert_types: string[];
-}
 
 interface AlertRow extends AlertForScopeCheck {
 	alert_id: string;
@@ -108,40 +103,26 @@ router.get(
 		}
 
 		// Operator: same fail-closed rule as GET /entities and GET /alerts,
-		// extended to a direct by-id lookup -- otherwise an operator could
-		// enumerate entity_ids to see data their saved scope was supposed to
-		// hide. A 404 here (not 403) doesn't confirm the entity exists outside
-		// their scope.
+		// extended to a direct by-id lookup via the shared access check -- see
+		// entityAccess.ts for why this can't just be "was it in the list".
+		// A 404 here (not 403) doesn't confirm the entity exists outside scope.
 		if (res.locals['userRole'] === 'operator') {
-			const scopeResult = await pool.query<{ scope: WorkspaceScopeRow }>(
-				'SELECT scope FROM user_workspaces WHERE user_id = $1',
-				[res.locals['userId'] as string],
+			const access = await resolveOperatorEntityAccess(
+				res.locals['userId'] as string,
+				entityId,
+				liveEntity,
 			);
-			if (scopeResult.rows.length === 0) {
+			if (access.kind !== 'in_scope') {
 				res.status(404).json({ error: 'entity not found' });
 				return;
 			}
-			const scope = scopeResult.rows[0]!.scope;
-			const entityScope = { bounds: scope.geo_region.bounds, entity_types: scope.entity_types };
-			const alertScope = { ...entityScope, alert_types: scope.alert_types };
 
+			const alertScope = {
+				bounds: access.scope.geo_region.bounds,
+				entity_types: access.scope.entity_types,
+				alert_types: access.scope.alert_types,
+			};
 			const scopedAlerts = alerts.filter((a) => matchesScope(a, alertScope));
-
-			// In scope if the live state itself matches, or -- when the entity
-			// has gone dark and Redis has nothing -- if this entity is the
-			// primary (not just counterparty) on at least one in-scope alert.
-			// A counterparty-only match doesn't establish the primary entity's
-			// own scope membership; it would let an operator confirm entities
-			// outside their scope exist just by them being someone else's
-			// counterparty.
-			const inScope = liveEntity
-				? matchesEntityScope(liveEntity, entityScope)
-				: scopedAlerts.some((a) => a.entity_id === entityId);
-
-			if (!inScope) {
-				res.status(404).json({ error: 'entity not found' });
-				return;
-			}
 
 			res.json({ entity: liveEntity, alerts: scopedAlerts });
 			return;
@@ -151,6 +132,74 @@ router.get(
 		// GET /entities/live's own demo behavior -- there is no sensible bbox
 		// for a single-id lookup.
 		res.json({ entity: liveEntity, alerts });
+	}),
+);
+
+interface PositionHistoryRow {
+	entity_id: string;
+	timestamp_ms: string;
+	lat: number;
+	lon: number;
+	altitude_m: number | null;
+	speed_mps: number | null;
+	course_deg: number | null;
+	heading_deg: number | null;
+	on_ground: boolean | null;
+	callsign: string | null;
+	entity_subtype: string | null;
+}
+
+router.get(
+	'/:entity_id/history',
+	asyncHandler(async (req, res) => {
+		const entityId = req.params['entity_id'] as string;
+
+		// Required, not defaulted: an investigation view always has a concrete
+		// window in mind (usually an alert's own detected_at range), and there
+		// is no sensible width to guess -- same reasoning GET /entities/live
+		// already applies to its own required bbox.
+		const fromMs = Number(req.query['from_ms']);
+		const toMs = Number(req.query['to_ms']);
+		if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) {
+			res
+				.status(400)
+				.json({ error: 'from_ms and to_ms are required and from_ms must be <= to_ms' });
+			return;
+		}
+
+		const liveEntity = await getLiveEntity(entityId);
+
+		// Same fail-closed by-id access rule as GET /entities/:entity_id -- see
+		// entityAccess.ts. History is reachable directly, without ever calling
+		// the entity-detail endpoint first, so it needs this check on its own.
+		if (res.locals['userRole'] === 'operator') {
+			const access = await resolveOperatorEntityAccess(
+				res.locals['userId'] as string,
+				entityId,
+				liveEntity,
+			);
+			if (access.kind !== 'in_scope') {
+				res.status(404).json({ error: 'entity not found' });
+				return;
+			}
+		}
+
+		const result = await pool.query<PositionHistoryRow>(
+			`SELECT entity_id, timestamp_ms, lat, lon, altitude_m, speed_mps, course_deg,
+							heading_deg, on_ground, callsign, entity_subtype
+			 FROM position_history
+			 WHERE entity_id = $1 AND observed_at >= to_timestamp($2 / 1000.0) AND observed_at <= to_timestamp($3 / 1000.0)
+			 ORDER BY observed_at ASC
+			 LIMIT $4`,
+			[entityId, fromMs, toMs, config.ENTITY_HISTORY_MAX_POINTS],
+		);
+
+		res.json(
+			result.rows.map((row) => ({
+				...row,
+				timestamp_ms: Number(row.timestamp_ms),
+			})),
+		);
 	}),
 );
 

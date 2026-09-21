@@ -61,6 +61,14 @@ export const config = {
 		50,
 	),
 
+	// Maximum position_history rows returned by GET /entities/:entity_id/history,
+	// regardless of how wide the requested time window is.
+	ENTITY_HISTORY_MAX_POINTS: requirePositiveInt(
+		'ENTITY_HISTORY_MAX_POINTS',
+		process.env['ENTITY_HISTORY_MAX_POINTS'],
+		1000,
+	),
+
 	// Maximum concurrent demo WebSocket connections.
 	MAX_DEMO_CONNECTIONS: requirePositiveInt(
 		'MAX_DEMO_CONNECTIONS',
