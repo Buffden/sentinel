@@ -381,7 +381,9 @@ export default function AlertWidget() {
 								!isComposite && workspacePanel
 									? (e) => {
 											e.stopPropagation()
-											workspacePanel.openEntityDetail(alert.entityId)
+											workspacePanel.openEntityDetail(alert.entityId, {
+												anchorMs: alert.detectedAtMs,
+											})
 										}
 									: undefined
 							}
@@ -468,7 +470,10 @@ export default function AlertWidget() {
 										value={alert.counterpartyEntityId ?? '—'}
 										onClick={
 											alert.counterpartyEntityId && workspacePanel
-												? () => workspacePanel.openEntityDetail(alert.counterpartyEntityId!)
+												? () =>
+														workspacePanel.openEntityDetail(alert.counterpartyEntityId!, {
+															anchorMs: alert.detectedAtMs,
+														})
 												: undefined
 										}
 									/>
@@ -498,7 +503,10 @@ export default function AlertWidget() {
 										value={alert.entityId}
 										onClick={
 											workspacePanel
-												? () => workspacePanel.openEntityDetail(alert.entityId)
+												? () =>
+														workspacePanel.openEntityDetail(alert.entityId, {
+															anchorMs: alert.detectedAtMs,
+														})
 												: undefined
 										}
 									/>

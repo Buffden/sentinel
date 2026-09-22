@@ -11,12 +11,21 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
 import type { DockviewApi } from 'dockview-react'
 
+interface OpenEntityDetailOptions {
+	// Source-event-time anchor for the History tab's default window (Phase 09
+	// FE-CP2) -- an alert's own detected_at when opened from an alert card, so
+	// the track that led up to it is what's shown by default. Only applied at
+	// panel creation; re-clicking an already-open panel just focuses it and
+	// does not retroactively change its window (see openEntityDetail below).
+	anchorMs?: number
+}
+
 interface WorkspacePanelApi {
 	// Opens (or, if already open, focuses) an Entity Detail panel for this
 	// entity_id. Deterministic panel id keyed by entity_id is what makes a
 	// repeat click idempotent -- it can never spawn a duplicate panel for the
 	// same entity, only ever surface the one that already exists.
-	openEntityDetail: (entityId: string) => void
+	openEntityDetail: (entityId: string, options?: OpenEntityDetailOptions) => void
 }
 
 const WorkspacePanelContext = createContext<WorkspacePanelApi | null>(null)
@@ -34,7 +43,7 @@ export function WorkspacePanelProvider({
 }) {
 	const value = useMemo<WorkspacePanelApi>(
 		() => ({
-			openEntityDetail: (entityId: string) => {
+			openEntityDetail: (entityId: string, options?: OpenEntityDetailOptions) => {
 				if (!api) return
 				const id = entityDetailPanelId(entityId)
 				const existing = api.getPanel(id)
@@ -46,7 +55,7 @@ export function WorkspacePanelProvider({
 					id,
 					component: 'entity-detail-widget',
 					title: entityId,
-					params: { entityId },
+					params: { entityId, anchorMs: options?.anchorMs },
 					position: { direction: 'right' },
 				})
 			},

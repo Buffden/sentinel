@@ -6,12 +6,14 @@ import { formatUtcTime } from '@/shared/lib/formatTime'
 import { fetchEntityDetail, EntityDetailNotFoundError } from '@/entities/entity-detail/api'
 import type { EntityDetail } from '@/entities/entity-detail/model'
 import type { Alert } from '@/entities/alert/model'
+import HistoryTab from './HistoryTab'
 
-// Overview tab only (Phase 09 FE-CP1). HISTORY and RELATIONSHIPS render as
-// inert tabs -- matching the approved mockup's own annotation that those are
-// later checkpoints (TimescaleDB track, Neo4j graph pivot respectively), not
-// a broken or half-built feature.
+// Overview (Phase 09 FE-CP1) and History (FE-CP2) are wired up. RELATIONSHIPS
+// stays an inert tab -- matching the approved mockup's own annotation that
+// it's a later checkpoint (Neo4j graph pivot), not a broken or half-built
+// feature.
 type Tab = 'overview' | 'history' | 'relationships'
+const ENABLED_TABS: readonly Tab[] = ['overview', 'history']
 
 type LoadState =
 	| { kind: 'loading' }
@@ -20,10 +22,11 @@ type LoadState =
 	| { kind: 'ready'; detail: EntityDetail }
 
 interface EntityDetailWidgetProps {
-	// Direct prop when used standalone/in tests; params fallback when Dockview
-	// renders this as a panel -- same convention as MapWidgetProps.
+	// Direct props when used standalone/in tests; params fallback when
+	// Dockview renders this as a panel -- same convention as MapWidgetProps.
 	entityId?: string
-	params?: { entityId?: string }
+	anchorMs?: number
+	params?: { entityId?: string; anchorMs?: number }
 }
 
 const TAB_LABELS: Record<Tab, string> = {
@@ -32,28 +35,32 @@ const TAB_LABELS: Record<Tab, string> = {
 	relationships: 'RELATIONSHIPS',
 }
 
-function TabBar({ active }: { active: Tab }) {
+function TabBar({ active, onSelect }: { active: Tab; onSelect: (tab: Tab) => void }) {
 	return (
 		<div style={{ display: 'flex', borderBottom: '1px solid var(--color-border)' }}>
-			{(Object.keys(TAB_LABELS) as Tab[]).map((tab) => (
-				<div
-					key={tab}
-					style={{
-						flex: 1,
-						textAlign: 'center',
-						padding: 'var(--space-2) 0',
-						fontSize: 'var(--font-size-xs)',
-						fontFamily: 'var(--font-mono)',
-						fontWeight: tab === active ? 600 : 400,
-						color: tab === active ? 'var(--color-text-primary)' : 'var(--color-text-muted)',
-						background: tab === active ? 'var(--color-bg-elevated)' : 'transparent',
-						cursor: tab === active ? 'default' : 'not-allowed',
-					}}
-					title={tab === active ? undefined : 'Not yet implemented'}
-				>
-					{TAB_LABELS[tab]}
-				</div>
-			))}
+			{(Object.keys(TAB_LABELS) as Tab[]).map((tab) => {
+				const enabled = ENABLED_TABS.includes(tab)
+				return (
+					<div
+						key={tab}
+						onClick={enabled ? () => onSelect(tab) : undefined}
+						style={{
+							flex: 1,
+							textAlign: 'center',
+							padding: 'var(--space-2) 0',
+							fontSize: 'var(--font-size-xs)',
+							fontFamily: 'var(--font-mono)',
+							fontWeight: tab === active ? 600 : 400,
+							color: tab === active ? 'var(--color-text-primary)' : 'var(--color-text-muted)',
+							background: tab === active ? 'var(--color-bg-elevated)' : 'transparent',
+							cursor: enabled ? 'pointer' : 'not-allowed',
+						}}
+						title={enabled ? undefined : 'Not yet implemented'}
+					>
+						{TAB_LABELS[tab]}
+					</div>
+				)
+			})}
 		</div>
 	)
 }
@@ -159,9 +166,12 @@ function AlertRow({ alert }: { alert: Alert }) {
 
 export default function EntityDetailWidget({
 	entityId: entityIdProp,
+	anchorMs: anchorMsProp,
 	params,
 }: EntityDetailWidgetProps) {
 	const entityId = entityIdProp ?? params?.entityId
+	const anchorMs = anchorMsProp ?? params?.anchorMs
+	const [activeTab, setActiveTab] = useState<Tab>('overview')
 	const [state, setState] = useState<LoadState>({ kind: 'loading' })
 
 	useEffect(() => {
@@ -206,10 +216,12 @@ export default function EntityDetailWidget({
 			}}
 		>
 			<WidgetHeader title={entityId} />
-			<TabBar active="overview" />
+			<TabBar active={activeTab} onSelect={setActiveTab} />
 
 			<div style={{ flex: 1, overflowY: 'auto' }}>
-				{state.kind === 'loading' && (
+				{activeTab === 'history' && <HistoryTab entityId={entityId} anchorMs={anchorMs} />}
+
+				{activeTab === 'overview' && state.kind === 'loading' && (
 					<div
 						style={{
 							padding: 'var(--space-3)',
@@ -222,7 +234,7 @@ export default function EntityDetailWidget({
 					</div>
 				)}
 
-				{state.kind === 'not_found' && (
+				{activeTab === 'overview' && state.kind === 'not_found' && (
 					<div
 						style={{
 							padding: 'var(--space-3)',
@@ -235,7 +247,7 @@ export default function EntityDetailWidget({
 					</div>
 				)}
 
-				{state.kind === 'error' && (
+				{activeTab === 'overview' && state.kind === 'error' && (
 					<div
 						style={{
 							padding: 'var(--space-3)',
@@ -248,7 +260,7 @@ export default function EntityDetailWidget({
 					</div>
 				)}
 
-				{state.kind === 'ready' && (
+				{activeTab === 'overview' && state.kind === 'ready' && (
 					<>
 						<div
 							style={{
