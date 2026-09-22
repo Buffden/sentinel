@@ -17,6 +17,7 @@ import {
 	type LifecycleTargetStatus,
 } from '@/entities/alert/api'
 import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
+import { useWorkspacePanel } from '@/features/workspace/WorkspacePanelContext'
 
 // STANDARD and ELEVATED are the only priorities the Alert Evaluator emits
 // (docs/DATA_MODEL.md's priority-by-alert_type mapping): SIGNAL_LOSS and
@@ -82,7 +83,19 @@ function actionButtonStyle(color: string, disabled: boolean): CSSProperties {
 // Renders one label/value row inside an expanded alert card. Mirrors the
 // Row pattern in FlightInfoWidget — not extracted to a shared component
 // since these two callers are the only consumers so far.
-function DetailRow({ label, value }: { label: string; value: string }) {
+//
+// onClick (Phase 09 FE-CP1): when given, the value opens that entity_id's
+// Entity Detail panel instead of rendering as plain text — the entry point
+// AlertWidget provides into entity investigation.
+function DetailRow({
+	label,
+	value,
+	onClick,
+}: {
+	label: string
+	value: string
+	onClick?: () => void
+}) {
 	return (
 		<div
 			style={{
@@ -102,10 +115,20 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 				{label}
 			</span>
 			<span
+				onClick={
+					onClick
+						? (e) => {
+								e.stopPropagation()
+								onClick()
+							}
+						: undefined
+				}
 				style={{
 					fontSize: 'var(--font-size-xs)',
-					color: 'var(--color-text-primary)',
+					color: onClick ? 'var(--color-status-info)' : 'var(--color-text-primary)',
 					fontFamily: 'var(--font-mono)',
+					cursor: onClick ? 'pointer' : 'default',
+					textDecoration: onClick ? 'underline' : 'none',
 				}}
 			>
 				{value}
@@ -187,6 +210,10 @@ function compositeLabel(alert: Alert, alerts: Map<string, Alert>): string {
 }
 
 export default function AlertWidget() {
+	// null outside a WorkspacePanelProvider (e.g. this widget rendered
+	// standalone in a test) -- entity_id values then render as plain,
+	// non-clickable text instead of throwing.
+	const workspacePanel = useWorkspacePanel()
 	// Keyed by alert_id: idempotent hydration, and the same shape the live
 	// feed below merges into (duplicate alert_id must not create a second
 	// entry — see applyAlertUpdate).
@@ -350,11 +377,20 @@ export default function AlertWidget() {
 						}}
 					>
 						<span
+							onClick={
+								!isComposite && workspacePanel
+									? (e) => {
+											e.stopPropagation()
+											workspacePanel.openEntityDetail(alert.entityId)
+										}
+									: undefined
+							}
 							style={{
 								fontFamily: 'var(--font-mono)',
 								fontSize: 'var(--font-size-sm)',
 								color: nested ? 'var(--color-text-secondary)' : 'var(--color-text-primary)',
 								fontWeight: 600,
+								cursor: !isComposite && workspacePanel ? 'pointer' : 'default',
 							}}
 						>
 							{isComposite ? compositeLabel(alert, alerts) : flightLabel(alert)}
@@ -427,7 +463,15 @@ export default function AlertWidget() {
 												: '—'
 										}
 									/>
-									<DetailRow label="COUNTERPARTY" value={alert.counterpartyEntityId ?? '—'} />
+									<DetailRow
+										label="COUNTERPARTY"
+										value={alert.counterpartyEntityId ?? '—'}
+										onClick={
+											alert.counterpartyEntityId && workspacePanel
+												? () => workspacePanel.openEntityDetail(alert.counterpartyEntityId!)
+												: undefined
+										}
+									/>
 									<DetailRow label="DISTANCE" value={formatPayloadNumber(distanceMetres, ' m')} />
 									<DetailRow
 										label="EPISODE START"
@@ -449,7 +493,15 @@ export default function AlertWidget() {
 							) : (
 								<>
 									<DetailRow label="ALERT ID" value={alert.id} />
-									<DetailRow label="ENTITY ID (ICAO24)" value={alert.entityId} />
+									<DetailRow
+										label="ENTITY ID (ICAO24)"
+										value={alert.entityId}
+										onClick={
+											workspacePanel
+												? () => workspacePanel.openEntityDetail(alert.entityId)
+												: undefined
+										}
+									/>
 									<DetailRow label="ENTITY TYPE" value={alert.entityType} />
 									<DetailRow label="PRIORITY" value={alert.priority} />
 									<StatusDetailRow label="STATUS" status={alert.status} />
