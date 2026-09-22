@@ -4,7 +4,17 @@
 
 Build the operator workflow for understanding an incident across Sentinel's polyglot stores.
 
-This is expected to be the largest frontend phase in the roadmap. Deliberately kept high-level here — refine into a real checkpoint sequence when this phase actually starts, not now.
+This was the largest frontend phase in the roadmap. The checkpoint sequence it was broken into, with a concept note and debrief for each, is tracked in [concepts/README.md](concepts/README.md).
+
+## Status
+
+Complete and merged to `develop` and `main` (PRs #155 and #156). The exit criteria below are met.
+
+- Backend: five checkpoints, one per read endpoint group listed below.
+- Frontend: three checkpoints building the entity detail panel's Overview, History and Relationships tabs.
+- A later product change replaced the one-panel-per-entity design with a single, always visible entity detail panel that updates in place on each selection.
+
+Not built: the map-overlay position track. The approved mockup names it, but the History tab checkpoint deliberately shipped only the in-panel altitude chart and left the overlay as a separate follow-on. It has not been scheduled into a phase yet.
 
 ## Backend
 
@@ -16,7 +26,7 @@ This is expected to be the largest frontend phase in the roadmap. Deliberately k
 
 ## Frontend
 
-One or more dedicated investigation-UI checkpoints, detailed later. Follows the mockup → approval → implementation gate, same as every other operator-visible checkpoint in this roadmap.
+Dedicated investigation-UI checkpoints, listed in [concepts/README.md](concepts/README.md). Followed the mockup → approval → implementation gate, same as every other operator-visible checkpoint in this roadmap.
 
 - entity details panel
 - position/state timeline
@@ -41,5 +51,3 @@ For every query ask: **which datastore best matches this access pattern?**
 ## Exit Criteria
 
 An operator can open an alert, inspect current state and track, pivot into relationship evidence, and do so through the dashboard, server-side workspace scope enforced, without direct datastore access.
-
-Do not fully break this phase into micro-checkpoints yet — refine when Phase 09 starts.
