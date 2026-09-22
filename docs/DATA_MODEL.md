@@ -670,35 +670,82 @@ Fields: `raw_payload`, `rejection_reason`, `source_topic`, `source_offset`, `con
 
 These are the shapes the browser actually receives. They are derived from upstream canonical schemas but are not identical to them — the API transforms and namespaces before sending.
 
-### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}`
+### `GET /entities` (Phase 09 CP1)
 
-Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes.
+Workspace-scoped live entity list, separate from `GET /entities/live`'s unscoped map-viewport query. Same Redis `entity:live:{entity_id}` source and response shape as `GET /entities/live`, filtered server-side by the caller's scope before the response is sent, following the same rule ADR-012 established for `GET /alerts`.
+
+- **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types`; there is no `alert_types` dimension for a plain entity). No saved workspace yields an empty array, not an unfiltered one.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided (`minLat,minLon,maxLat,maxLon`), entities are filtered to that box only, unrestricted by entity type. If `bbox` is omitted, the response is unfiltered.
+
+Response fields are identical to `GET /entities/live` below.
+
+### `GET /entities/:entity_id` (Phase 09 CP2)
+
+Joins the entity's current Redis live state with its recent alert history from Postgres (`entity_id = :entity_id OR counterparty_entity_id = :entity_id`, newest first, capped at `ENTITY_RECENT_ALERTS_MAX`). Unlike `GET /entities`/`GET /entities/live`, this lookup does **not** apply the staleness cutoff: a dark entity's last known live state is exactly what a `SIGNAL_LOSS` investigation needs to see.
+
+Response: `{ "entity": <live snapshot | null>, "alerts": [...] }`. `entity` is `null` when Redis has no hash for this id (e.g. a fully dark entity past its TTL); this is a valid `200`, not an error, as long as alert history or scope permits a response at all.
+
+- **404** when neither live state nor any alert exists for the id, or (operator session) when the id is outside the caller's saved scope. A `404`, not `403`, is returned for an out-of-scope id so the response itself never confirms the entity exists.
+- **Operator session**: in scope if the live state itself matches the saved `geo_region.bounds`/`entity_types`, or, when there is no live state, if the id is the *primary* `entity_id` (not just a counterparty) on at least one alert that matches the saved scope. No saved workspace: always `404`. The returned `alerts` array is itself filtered through the same `matchesScope` predicate `GET /alerts` uses, so an in-scope entity's alerts can still be individually excluded (e.g. by `alert_types`, or a payload position outside bounds).
+- **Demo session**: unrestricted: no bbox-equivalent scope dimension applies to a single-id lookup.
+
+### `GET /entities/:entity_id/history?from_ms={ms}&to_ms={ms}` (Phase 09 CP3)
+
+Chronological position track from TimescaleDB's `position_history` for the given time window (both params required: an investigation always has a concrete window, usually an alert's own `detected_at` range; there is no sensible default to guess). Capped at `ENTITY_HISTORY_MAX_POINTS`, independent of how wide the window is.
+
+Response: array of `{ entity_id, timestamp_ms, lat, lon, altitude_m, speed_mps, course_deg, heading_deg, on_ground, callsign, entity_subtype }`, ordered ascending (a track, read chronologically, unlike the alert feed's newest-first).
+
+- **400** when `from_ms`/`to_ms` are missing, non-numeric, or `from_ms > to_ms`.
+- **Operator session**: uses the exact same by-id access decision as `GET /entities/:entity_id` (`resolveOperatorEntityAccess`, `services/api/src/shared/entityAccess.ts`): in scope via current live state, or via being the primary entity on an in-scope alert when dark. `404` (not `403`) when out of scope or with no saved workspace. Once in scope, the full requested window is returned unfiltered by bounds: the scope check gates the entity, not each individual point (fragmenting a track at a bounds edge would defeat the investigation this endpoint exists for).
+- **Demo session**: unrestricted, same as `GET /entities/:entity_id`.
+
+### `GET /entities/:entity_id/graph` (Phase 09 CP4)
+
+The entity's 1-hop relationship neighborhood from Neo4j: every `PROXIMITY_EVENT` episode and `KNOWN_ASSOCIATE` relationship on record, in either direction. The first Neo4j read in the API service (`services/api/src/neo4j.ts`); Correlation Worker remains the only writer, per ADR-003. Capped at `ENTITY_GRAPH_MAX_EDGES`, ordered by `last_seen_ms` descending.
+
+Response: `{ "entity_id": string, "edges": [{ edge_type: "PROXIMITY_EVENT" | "KNOWN_ASSOCIATE", other_entity_id, other_entity_type, episode_start_ms, last_seen_ms, min_distance_metres, established_at, known_associate_type }] }`. Fields that don't apply to a given `edge_type` are `null` (e.g. `known_associate_type` for a `PROXIMITY_EVENT`).
+
+- An entity with no recorded relationships returns a valid `200` with `edges: []`, not a `404` -- most entities have none, and that's a normal result, not an error.
+- **Operator session**: uses the same by-id access decision as `GET /entities/:entity_id` and its `/history` (`resolveOperatorEntityAccess`). `404` when out of scope or with no saved workspace. Unlike the entity itself, individual neighbors in the response are **not** separately filtered by the operator's bounds: Neo4j's `Entity` node carries no geography (just `id`/`type`/`name`, per ADR-003), so there is nothing to filter a neighbor against without an extra Redis/Postgres lookup per neighbor. The scope check gates the primary entity only.
+- **Demo session**: unrestricted, same as the other by-id endpoints.
+
+### `GET /entities/live?bbox={minLat},{minLon},{maxLat},{maxLon}` (bbox required)
+
+Seeds the map on page load. Returns all entities whose current `lat`/`lon` fall within the bbox, read from Redis `entity:live:{entity_id}` hashes. Unscoped by workspace: this is a viewport query, not an authorization boundary; see `GET /entities` above for the scoped equivalent.
 
 Response: array of entity snapshots.
 
 | Field | Type | Source |
 | --- | --- | --- |
-| `entity_id` | string | Redis hash |
-| `entity_type` | string | Redis hash |
-| `timestamp_ms` | number | `last_seen_ms` from Redis hash |
+| `entity_id` | string | Redis hash key suffix |
 | `lat` | number | Redis hash |
 | `lon` | number | Redis hash |
 | `altitude_m` | number \| null | Redis hash |
 | `speed_mps` | number \| null | Redis hash |
 | `course_deg` | number \| null | Redis hash |
+| `last_seen_ms` | number | Redis hash |
+| `entity_type` | string \| null | Redis hash |
+| `entity_subtype` | string \| null | Redis hash |
 | `callsign` | string \| null | Redis hash |
 | `on_ground` | boolean \| null | Redis hash |
-| `entity_subtype` | string \| null | Redis hash |
-| `live_geo_cell` | string | Redis hash |
 
-### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}` (`bbox` optional)
+### `GET /alerts?bbox={minLat},{minLon},{maxLat},{maxLon}&status={list}&entity_id={id}` (all optional)
 
-Returns persisted `NEW`/`ACKNOWLEDGED` alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
+Returns persisted alerts from TimescaleDB. Fields match the `alerts` table schema. Filtered server-side by scope before the response is sent — see ADR-012.
 
+- `status`: comma-separated list (`NEW`, `ACKNOWLEDGED`, `RESOLVED`, `SUPERSEDED`). Defaults to `NEW,ACKNOWLEDGED` when omitted (Phase 09 CP5, additive-only — the dashboard's live feed depends on exactly this default and sees no change). An unrecognized status value is a `400`, not a silently-empty result.
+- `entity_id`: matches alerts where this id is the primary `entity_id` or the `counterparty_entity_id` (Phase 09 CP5). Omitted means unfiltered by entity, same as before CP5.
 - **Operator session**: filtered by the caller's saved `user_workspaces` scope (geo bounds + `entity_types` + `alert_types`). No saved workspace yields an empty array, not an unfiltered one — the dashboard is expected to show the scope setup prompt instead. Any `bbox` query param is ignored for an operator; the saved scope is authoritative.
-- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered (every `NEW`/`ACKNOWLEDGED` alert) — the transitional behavior until a frontend caller passes the map's current viewport.
+- **Demo session**: has no saved workspace and cannot acquire one. If `bbox` is provided, alerts are filtered to that box only (geography only, no entity/alert-type restriction). If `bbox` is omitted, the response is unfiltered by geography (every alert matching `status`/`entity_id`) — the transitional behavior until a frontend caller passes the map's current viewport.
 
 Position is read from the alert's own `payload`, not current Redis state, and the field path differs by `alert_type` — see ADR-012's corrected field list. An alert whose payload doesn't yield a usable position for its type (this can only be `ROUTE_DEVIATION` today, whose payload shape is undecided since Phase 04 is deferred) is excluded, never included by a fallback guess.
+
+### `GET /alerts/:alert_id` (Phase 09 CP5)
+
+Single-alert investigation read, unrestricted by `status` (unlike the list, since opening a specific alert's evidence panel per US-14 must work for a `RESOLVED` or `SUPERSEDED` alert too, not just an open one).
+
+- **404** for an unknown `alert_id`, or (operator session) when the alert is outside the caller's saved scope (`matchesScope`, the same predicate the list already uses) or the operator has no saved workspace. `404`, not `403`, so the response itself never confirms an out-of-scope alert exists.
+- **Demo session**: unrestricted, same as the entity by-id endpoints — no bbox-equivalent scope dimension applies to a single-id lookup.
 
 ### `POST /users/me/workspace`
 

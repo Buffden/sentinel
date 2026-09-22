@@ -63,6 +63,20 @@ jobs:
     # alertSink.integration.test.ts. Ports here (5433/6379) must match what
     # vitest.config.ts hardcodes: vitest's `test.env` overrides shell-provided
     # env vars, so a job-level env override would be silently ignored.
+    #
+    # neo4j (Phase 09 CP4): entities.integration.test.ts's GET
+    # /entities/:entity_id/graph suite seeds and reads real PROXIMITY_EVENT/
+    # KNOWN_ASSOCIATE edges. This was missing entirely when CP4 first shipped
+    # a real Neo4j dependency to the API service — those tests could only
+    # ever fail in CI (ServiceUnavailable, nothing listening on 7687), never
+    # actually verified here despite passing locally against `make up`.
+    # config.ts's own defaults (bolt://localhost:7687, neo4j/sentinel-dev)
+    # already match this without any extra env vars needed. No schema/
+    # constraint application here (infra/neo4j/apply-schema.sh assumes a
+    # docker-compose container name this services: block doesn't give us) —
+    # the graph read tests use randomUUID()-based ids and plain MERGE, which
+    # works correctly with or without the uniqueness constraints; nothing
+    # here exercises the constraint itself.
     services:
       timescaledb:
         image: timescale/timescaledb:2.15.3-pg16
@@ -83,6 +97,24 @@ jobs:
           - 6379:6379
         options: >-
           --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        image: neo4j:5.19.0-community
+        env:
+          NEO4J_AUTH: neo4j/sentinel-dev
+        ports:
+          - 7687:7687
+          - 7474:7474
+        # cypher-shell (bundled in the image), not an HTTP check: Neo4j's
+        # HTTP port can report ready before Bolt (7687, what neo4j-driver
+        # actually connects to) accepts connections -- the exact race
+        # infra/neo4j/apply-schema.sh already documents and works around
+        # locally. This health check exercises Bolt + auth directly, the
+        # same thing the tests themselves depend on.
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p sentinel-dev 'RETURN 1' || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10

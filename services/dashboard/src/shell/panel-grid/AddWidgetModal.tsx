@@ -9,7 +9,7 @@ export interface WidgetDefinition {
 }
 
 export const AVAILABLE_WIDGETS: WidgetDefinition[] = [
-	{ id: 'flight-info', label: 'Flight Info', category: 'Aviation' },
+	{ id: 'entity-detail', label: 'Entity Detail', category: 'Aviation' },
 	{ id: 'alerts', label: 'Alerts', category: 'Aviation' },
 	{ id: 'route-status', label: 'Route Status', category: 'Aviation' },
 ]
@@ -47,7 +47,7 @@ export default function AddWidgetModal({ activeWidgetIds, onSave, onClose }: Add
 	}
 
 	const filtered = AVAILABLE_WIDGETS.filter((w) =>
-		w.label.toLowerCase().includes(search.toLowerCase())
+		w.label.toLowerCase().includes(search.toLowerCase()),
 	)
 
 	const categories = Array.from(new Set(filtered.map((w) => w.category)))
@@ -55,7 +55,9 @@ export default function AddWidgetModal({ activeWidgetIds, onSave, onClose }: Add
 	return (
 		<div
 			ref={overlayRef}
-			onClick={(e) => { if (e.target === overlayRef.current) onClose() }}
+			onClick={(e) => {
+				if (e.target === overlayRef.current) onClose()
+			}}
 			style={{
 				position: 'fixed',
 				inset: 0,
@@ -118,7 +120,13 @@ export default function AddWidgetModal({ activeWidgetIds, onSave, onClose }: Add
 				</div>
 
 				{/* Search */}
-				<div style={{ padding: 'var(--space-3) var(--space-4)', flexShrink: 0, borderBottom: '1px solid var(--color-border-subtle)' }}>
+				<div
+					style={{
+						padding: 'var(--space-3) var(--space-4)',
+						flexShrink: 0,
+						borderBottom: '1px solid var(--color-border-subtle)',
+					}}
+				>
 					<input
 						type="text"
 						placeholder="Search widgets..."
@@ -178,10 +186,11 @@ export default function AddWidgetModal({ activeWidgetIds, onSave, onClose }: Add
 												textAlign: 'left',
 											}}
 											onMouseEnter={(e) => {
-												(e.currentTarget as HTMLButtonElement).style.background = 'var(--color-bg-panel)'
+												;(e.currentTarget as HTMLButtonElement).style.background =
+													'var(--color-bg-panel)'
 											}}
 											onMouseLeave={(e) => {
-												(e.currentTarget as HTMLButtonElement).style.background = 'none'
+												;(e.currentTarget as HTMLButtonElement).style.background = 'none'
 											}}
 										>
 											<span>{w.label}</span>

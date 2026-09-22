@@ -1,8 +1,14 @@
 'use client'
 
 import { useRef } from 'react'
-import { DockviewReact, type DockviewApi, type DockviewReadyEvent, type IDockviewPanelProps } from 'dockview-react'
+import {
+	DockviewReact,
+	type DockviewApi,
+	type DockviewReadyEvent,
+	type IDockviewPanelProps,
+} from 'dockview-react'
 import MapWidget from '@/widgets/map-widget/MapWidget'
+import { WorkspacePanelProvider } from '@/features/workspace/WorkspacePanelContext'
 import WidgetPanel from './WidgetPanel'
 
 type DvFC = React.FunctionComponent<IDockviewPanelProps>
@@ -37,7 +43,10 @@ export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 		swappedRef.current = !swappedRef.current
 		// moveTo with 'right'/'left' position relative to the other group
 		// effectively swaps which side the map lives on.
-		mapPanel.api.moveTo({ group: widgetsPanel.group, position: swappedRef.current ? 'right' : 'left' })
+		mapPanel.api.moveTo({
+			group: widgetsPanel.group,
+			position: swappedRef.current ? 'right' : 'left',
+		})
 		// Dockview resets header visibility after a move — restore immediately.
 		setTimeout(() => hideHeaders(api), 0)
 	}
@@ -64,12 +73,17 @@ export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 	}
 
 	return (
-		<div className="sentinel-workspace" style={{ flex: 1, minHeight: 0, overflow: 'hidden', width: '100%', height: '100%' }}>
-			<DockviewReact
-				className="dockview-theme-dark"
-				components={COMPONENTS}
-				onReady={handleReady}
-			/>
+		<div
+			className="sentinel-workspace"
+			style={{ flex: 1, minHeight: 0, overflow: 'hidden', width: '100%', height: '100%' }}
+		>
+			<WorkspacePanelProvider>
+				<DockviewReact
+					className="dockview-theme-dark"
+					components={COMPONENTS}
+					onReady={handleReady}
+				/>
+			</WorkspacePanelProvider>
 		</div>
 	)
 }

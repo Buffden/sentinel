@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="700" viewBox="0 0 1400 700" font-family="JetBrains Mono, ui-monospace, monospace">
+  <rect width="1400" height="700" fill="#0a0a0a"/>
+
+  <text x="24" y="26" fill="#a0a0a0" font-size="13" font-weight="700">ENTITY DETAIL WIDGET — one registry-driven widget, three tabs, one instance per opened entity</text>
+  <text x="24" y="44" fill="#606060" font-size="10" font-style="italic">Opened by clicking any entity_id: an alert card's counterparty, a map marker, or a relationship-graph node. Docks into the workspace like any other widget.</text>
+
+  <!-- ===== Column 1: Overview tab, FE-CP1, this checkpoint ===== -->
+  <text x="24" y="70" fill="#3b82f6" font-size="12" font-weight="700">OVERVIEW — FE-CP1 (this checkpoint)</text>
+  <text x="24" y="86" fill="#606060" font-size="9">Redis live state + Postgres alerts join</text>
+
+  <g transform="translate(24,92)">
+    <rect width="420" height="560" fill="#111111" stroke="#1e1e1e"/>
+
+    <!-- widget header: tabs -->
+    <rect x="0" y="0" width="420" height="32" fill="#0e0e0e"/>
+    <rect x="0" y="0" width="140" height="32" fill="#1a1a1a"/>
+    <text x="70" y="20" fill="#e0e0e0" font-size="11" font-weight="600" text-anchor="middle">OVERVIEW</text>
+    <text x="210" y="20" fill="#606060" font-size="11" text-anchor="middle">HISTORY</text>
+    <text x="350" y="20" fill="#606060" font-size="11" text-anchor="middle">RELATIONSHIPS</text>
+    <line x1="0" y1="32" x2="420" y2="32" stroke="#2a2a2a"/>
+
+    <!-- entity header -->
+    <text x="16" y="56" fill="#e0e0e0" font-size="14" font-weight="600">EZY92XM</text>
+    <circle cx="380" cy="51" r="5" fill="#22c55e"/>
+    <text x="392" y="55" fill="#22c55e" font-size="9">LIVE</text>
+    <text x="16" y="74" fill="#606060" font-size="10">427c0b · aircraft · last seen 14:32:18 UTC</text>
+    <line x1="16" y1="86" x2="404" y2="86" stroke="#1e1e1e"/>
+
+    <!-- current state rows -->
+    <g font-size="11">
+      <text x="16" y="108" fill="#606060">LAT / LON</text>
+      <text x="404" y="108" fill="#e0e0e0" text-anchor="end">48.2124°N, 16.3743°E</text>
+      <line x1="16" y1="120" x2="404" y2="120" stroke="#1e1e1e"/>
+
+      <text x="16" y="140" fill="#606060">ALTITUDE</text>
+      <text x="404" y="140" fill="#e0e0e0" text-anchor="end">38,000 ft</text>
+      <line x1="16" y1="152" x2="404" y2="152" stroke="#1e1e1e"/>
+
+      <text x="16" y="172" fill="#606060">SPEED</text>
+      <text x="404" y="172" fill="#e0e0e0" text-anchor="end">487 kts</text>
+      <line x1="16" y1="184" x2="404" y2="184" stroke="#1e1e1e"/>
+
+      <text x="16" y="204" fill="#606060">COURSE</text>
+      <text x="404" y="204" fill="#e0e0e0" text-anchor="end">312°</text>
+      <line x1="16" y1="216" x2="404" y2="216" stroke="#2a2a2a"/>
+    </g>
+
+    <!-- recent alerts section -->
+    <text x="16" y="238" fill="#a0a0a0" font-size="10" font-weight="700">RECENT ALERTS</text>
+
+    <rect x="16" y="248" width="388" height="44" fill="#0e0e0e"/>
+    <rect x="16" y="248" width="3" height="44" fill="#f59e0b"/>
+    <text x="28" y="264" fill="#e0e0e0" font-size="11">SIGNAL_LOSS</text>
+    <rect x="330" y="254" width="64" height="14" rx="2" fill="none" stroke="#f59e0b"/>
+    <text x="362" y="264" fill="#f59e0b" font-size="8" text-anchor="middle">ACKNOWLEDGED</text>
+    <text x="28" y="282" fill="#606060" font-size="10">Dark since 14:31:02 UTC</text>
+    <line x1="16" y1="292" x2="404" y2="292" stroke="#1e1e1e"/>
+
+    <rect x="16" y="300" width="388" height="44" fill="#0e0e0e"/>
+    <rect x="16" y="300" width="3" height="44" fill="#606060"/>
+    <text x="28" y="316" fill="#a0a0a0" font-size="11">UNSCHEDULED_PROXIMITY</text>
+    <rect x="330" y="306" width="64" height="14" rx="2" fill="none" stroke="#606060"/>
+    <text x="362" y="316" fill="#606060" font-size="8" text-anchor="middle">RESOLVED</text>
+    <text x="28" y="334" fill="#606060" font-size="10">with 4b91aa · 06:02:11 UTC</text>
+
+    <text x="16" y="364" fill="#606060" font-size="9" font-style="italic">GET /entities/:id -- click a row to open</text>
+    <text x="16" y="378" fill="#606060" font-size="9" font-style="italic">that alert's own detail (GET /alerts/:alert_id,</text>
+    <text x="16" y="392" fill="#606060" font-size="9" font-style="italic">Phase 09 CP5) in place, same panel.</text>
+
+    <line x1="16" y1="410" x2="404" y2="410" stroke="#2a2a2a"/>
+    <text x="16" y="430" fill="#606060" font-size="9" font-style="italic">A dark entity (no live Redis state) shows the</text>
+    <text x="16" y="444" fill="#606060" font-size="9" font-style="italic">same layout with the LIVE dot replaced by a</text>
+    <text x="16" y="458" fill="#ef4444" font-size="9" font-style="italic">red DARK dot and rows reading "last known" --</text>
+    <text x="16" y="472" fill="#606060" font-size="9" font-style="italic">never hidden, since a dark entity is exactly</text>
+    <text x="16" y="486" fill="#606060" font-size="9" font-style="italic">what a SIGNAL_LOSS investigation needs to see</text>
+    <text x="16" y="500" fill="#606060" font-size="9" font-style="italic">(GET /entities/:id already returns entity:null</text>
+    <text x="16" y="514" fill="#606060" font-size="9" font-style="italic">+ alerts for this case, not a 404).</text>
+  </g>
+
+  <!-- ===== Column 2: History tab, FE-CP2 (later) ===== -->
+  <text x="476" y="70" fill="#606060" font-size="12" font-weight="700">HISTORY — FE-CP2 (later checkpoint)</text>
+  <text x="476" y="86" fill="#606060" font-size="9">TimescaleDB position track</text>
+
+  <g transform="translate(476,92)">
+    <rect width="420" height="560" fill="#111111" stroke="#1e1e1e"/>
+    <rect x="0" y="0" width="420" height="32" fill="#0e0e0e"/>
+    <text x="70" y="20" fill="#606060" font-size="11" text-anchor="middle">OVERVIEW</text>
+    <rect x="140" y="0" width="140" height="32" fill="#1a1a1a"/>
+    <text x="210" y="20" fill="#e0e0e0" font-size="11" font-weight="600" text-anchor="middle">HISTORY</text>
+    <text x="350" y="20" fill="#606060" font-size="11" text-anchor="middle">RELATIONSHIPS</text>
+    <line x1="0" y1="32" x2="420" y2="32" stroke="#2a2a2a"/>
+
+    <text x="16" y="56" fill="#e0e0e0" font-size="11">WINDOW</text>
+    <rect x="300" y="44" width="104" height="20" rx="2" fill="none" stroke="#2a2a2a"/>
+    <text x="352" y="58" fill="#a0a0a0" font-size="9" text-anchor="middle">last 2h ▾</text>
+    <text x="16" y="76" fill="#606060" font-size="9" font-style="italic">defaults to the opening alert's own</text>
+    <text x="16" y="88" fill="#606060" font-size="9" font-style="italic">detected_at window when opened from</text>
+    <text x="16" y="100" fill="#606060" font-size="9" font-style="italic">an alert card, else a manual range</text>
+    <line x1="16" y1="112" x2="404" y2="112" stroke="#1e1e1e"/>
+
+    <!-- simple track sketch -->
+    <polyline points="30,300 70,260 120,280 170,200 220,220 270,150 320,170 370,120" fill="none" stroke="#3b82f6" stroke-width="2"/>
+    <circle cx="30" cy="300" r="3" fill="#606060"/>
+    <circle cx="370" cy="120" r="4" fill="#22c55e"/>
+    <text x="30" y="318" fill="#606060" font-size="8">13:02</text>
+    <text x="360" y="112" fill="#606060" font-size="8">14:32</text>
+    <text x="16" y="360" fill="#606060" font-size="9" font-style="italic">GET /entities/:id/history?from_ms=&amp;to_ms= --</text>
+    <text x="16" y="374" fill="#606060" font-size="9" font-style="italic">rendered as a track on the Map widget too</text>
+    <text x="16" y="388" fill="#606060" font-size="9" font-style="italic">(existing map-widget layer registry), not just</text>
+    <text x="16" y="402" fill="#606060" font-size="9" font-style="italic">this sparkline -- the real deliverable is the</text>
+    <text x="16" y="416" fill="#606060" font-size="9" font-style="italic">map overlay; this panel is a compact summary.</text>
+  </g>
+
+  <!-- ===== Column 3: Relationships tab, FE-CP3 (later) ===== -->
+  <text x="928" y="70" fill="#606060" font-size="12" font-weight="700">RELATIONSHIPS — FE-CP3 (later checkpoint)</text>
+  <text x="928" y="86" fill="#606060" font-size="9">Neo4j 1-hop neighborhood</text>
+
+  <g transform="translate(928,92)">
+    <rect width="420" height="560" fill="#111111" stroke="#1e1e1e"/>
+    <rect x="0" y="0" width="420" height="32" fill="#0e0e0e"/>
+    <text x="70" y="20" fill="#606060" font-size="11" text-anchor="middle">OVERVIEW</text>
+    <text x="210" y="20" fill="#606060" font-size="11" text-anchor="middle">HISTORY</text>
+    <rect x="280" y="0" width="140" height="32" fill="#1a1a1a"/>
+    <text x="350" y="20" fill="#e0e0e0" font-size="11" font-weight="600" text-anchor="middle">RELATIONSHIPS</text>
+    <line x1="0" y1="32" x2="420" y2="32" stroke="#2a2a2a"/>
+
+    <!-- node-link sketch -->
+    <circle cx="210" cy="140" r="20" fill="#1a1a1a" stroke="#3b82f6" stroke-width="2"/>
+    <text x="210" y="144" fill="#e0e0e0" font-size="9" text-anchor="middle">EZY92XM</text>
+
+    <line x1="210" y1="160" x2="120" y2="240" stroke="#606060"/>
+    <circle cx="120" cy="255" r="16" fill="#1a1a1a" stroke="#606060"/>
+    <text x="120" y="259" fill="#a0a0a0" font-size="8" text-anchor="middle">a5a30a</text>
+
+    <line x1="210" y1="160" x2="300" y2="240" stroke="#606060"/>
+    <circle cx="300" cy="255" r="16" fill="#1a1a1a" stroke="#606060"/>
+    <text x="300" y="259" fill="#a0a0a0" font-size="8" text-anchor="middle">a2b134</text>
+
+    <line x1="210" y1="160" x2="210" y2="260" stroke="#606060" stroke-dasharray="4,3"/>
+    <circle cx="210" cy="275" r="16" fill="#1a1a1a" stroke="#a0a0a0"/>
+    <text x="210" y="279" fill="#a0a0a0" font-size="8" text-anchor="middle">4b91aa</text>
+
+    <text x="16" y="330" fill="#606060" font-size="9" font-style="italic">solid edge = PROXIMITY_EVENT (min distance</text>
+    <text x="16" y="344" fill="#606060" font-size="9" font-style="italic">+ time on hover); dashed = KNOWN_ASSOCIATE.</text>
+    <text x="16" y="358" fill="#606060" font-size="9" font-style="italic">Clicking any neighbor node opens ITS OWN</text>
+    <text x="16" y="372" fill="#606060" font-size="9" font-style="italic">Entity Detail widget (a new instance) -- this</text>
+    <text x="16" y="386" fill="#606060" font-size="9" font-style="italic">is the "graph pivot" from US-14, not a</text>
+    <text x="16" y="400" fill="#606060" font-size="9" font-style="italic">server-side multi-hop query.</text>
+    <text x="16" y="420" fill="#606060" font-size="9" font-style="italic">GET /entities/:id/graph -- empty state:</text>
+    <text x="16" y="434" fill="#606060" font-size="9" font-style="italic">"No recorded relationships" (valid, common,</text>
+    <text x="16" y="448" fill="#606060" font-size="9" font-style="italic">most entities have none).</text>
+  </g>
+
+  <text x="24" y="670" fill="#606060" font-size="10">Dark/data-dense per CLAUDE.md's Workspace Visual Language. Semantic colors only: green=live, amber=warning/ACKNOWLEDGED, red=critical/dark, blue=info/interactive, gray=secondary/disabled/SUPERSEDED.</text>
+  <text x="24" y="686" fill="#606060" font-size="10">Map is unaffected -- this widget docks alongside it, matching the Alert widget's own panel conventions (WidgetHeader, Row pattern already used by FlightInfoWidget).</text>
+</svg>

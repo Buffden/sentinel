@@ -35,3 +35,27 @@ export const PREDEFINED_REGIONS: readonly PredefinedRegion[] = [
 export function findPredefinedRegion(name: string): PredefinedRegion | undefined {
 	return PREDEFINED_REGIONS.find((region) => region.name === name);
 }
+
+// One bounds-comparison definition, shared by alertScopeFilter.ts and
+// entityScopeFilter.ts -- both need the same inclusive lat/lon rectangle
+// check against a workspace scope's geo_region.bounds.
+export function withinBounds(pos: { lat: number; lon: number }, bounds: GeoBounds): boolean {
+	return (
+		pos.lat >= bounds.min_lat &&
+		pos.lat <= bounds.max_lat &&
+		pos.lon >= bounds.min_lon &&
+		pos.lon <= bounds.max_lon
+	);
+}
+
+// One bbox-param parse, shared by GET /alerts and GET /entities's demo
+// ad-hoc fallback -- both accept the same minLat,minLon,maxLat,maxLon shape
+// for the same reason (no saved scope to draw from), and both need to keep
+// accepting/rejecting the same malformed inputs identically.
+export function parseBboxParam(raw: string | undefined): GeoBounds | null {
+	if (raw === undefined) return null;
+	const parts = raw.split(',').map(Number);
+	if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+	const [minLat, minLon, maxLat, maxLon] = parts as [number, number, number, number];
+	return { min_lat: minLat, max_lat: maxLat, min_lon: minLon, max_lon: maxLon };
+}
