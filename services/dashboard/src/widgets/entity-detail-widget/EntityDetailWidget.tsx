@@ -6,7 +6,9 @@ import { formatUtcTime } from '@/shared/lib/formatTime'
 import { fetchEntityDetail, EntityDetailNotFoundError } from '@/entities/entity-detail/api'
 import type { EntityDetail } from '@/entities/entity-detail/model'
 import type { Alert } from '@/entities/alert/model'
+import { applyPositionUpdate } from '@/entities/tracked-entity/model'
 import { useWorkspacePanel } from '@/features/workspace/WorkspacePanelContext'
+import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 import HistoryTab from './HistoryTab'
 import RelationshipsTab from './RelationshipsTab'
 
@@ -188,6 +190,34 @@ function EntityDetailBody({ entityId, anchorMs }: { entityId: string; anchorMs?:
 			cancelled = true
 		}
 	}, [entityId])
+
+	// Keeps the Overview tab's position fields live: MapWidget already holds a
+	// WebSocket subscription filtered to the current map viewport, and this
+	// hook's underlying connection is a shared singleton multiple callers can
+	// listen on (see useLiveFeed's own header comment) -- this is that
+	// mechanism's third consumer, not a new one. Only applies to updates for
+	// this specific entityId; everything else is ignored.
+	//
+	// Real limit, not silently hidden: this only receives updates for
+	// entities inside the map's *current* viewport bbox, since that's the
+	// one server-side filter this shared connection has (MapWidget owns
+	// calling subscribe()). A selected entity that's scrolled out of the map
+	// view stops getting live updates here until it's back in view.
+	useLiveFeed({
+		onPositionUpdate: (update) => {
+			if (update.id !== entityId) return
+			setState((prev) => {
+				if (prev.kind !== 'ready') return prev
+				const currentMap = prev.detail.entity
+					? new Map([[prev.detail.entity.id, prev.detail.entity]])
+					: new Map()
+				const merged = applyPositionUpdate(currentMap, update)
+				const mergedEntity = merged.get(entityId) ?? null
+				if (mergedEntity === prev.detail.entity) return prev // stale/duplicate frame, discarded
+				return { kind: 'ready', detail: { ...prev.detail, entity: mergedEntity } }
+			})
+		},
+	})
 
 	return (
 		<>
