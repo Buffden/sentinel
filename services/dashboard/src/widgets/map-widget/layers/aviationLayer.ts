@@ -2,7 +2,15 @@ import { IconLayer } from '@deck.gl/layers'
 import type { MapLayerDefinition } from '../types'
 
 export interface AircraftPosition {
+	// Display/diffing key -- callsign when known, else the entity_id (see
+	// MapWidget's own construction of this array). NOT the same as entityId
+	// below: a callsign is not a valid GET /entities/:entity_id lookup key.
 	id: string
+	// The real, canonical entity_id -- always present, always what
+	// GET /entities/:entity_id and the Entity Detail widget expect. Kept
+	// separate from `id` so a click handler never accidentally resolves a
+	// callsign as if it were an entity_id.
+	entityId: string
 	lon: number
 	lat: number
 	// Degrees clockwise from north. Null when unknown — icon renders pointing north.

@@ -43,3 +43,11 @@ Does not prove on its own: the History tab (FE-CP2, TimescaleDB), the Relationsh
 ## Recommendation
 
 No project skill existed for running this app end to end (dev server + auth + browser drive). Since real setup work was needed (installing Playwright, working around the demo rate limit, discovering the `/dashboard` route), this is a good candidate for `/run-skill-generator` to capture for future sessions — flagged here rather than acted on unprompted.
+
+## Addendum (2026-09-22): the map-marker trigger, closed after the fact
+
+This debrief's own mental-model doc states the widget is "opened by clicking any entity_id: an alert card's counterparty, a map marker, or a relationship-graph node" — but only the first and (later, FE-CP3) third of those three were ever actually wired. The map-marker click was named as intent and never implemented, surfaced when the developer tried it against a real running instance with real OpenSky-fed traffic.
+
+Closed the same day, reusing `WorkspacePanelContext` a fourth time (no context changes needed): `MapWidget`'s deck.gl overlay now takes an `onClick` that resolves the picked aircraft and calls `openEntityDetail`. Caught a real, separate bug while wiring it: `AircraftPosition.id` (the aviation layer's data key) is set to the aircraft's **callsign** when known, for display purposes — passing that straight into `openEntityDetail` would have looked up a callsign as if it were an `entity_id` and always 404'd for any aircraft with a known callsign (i.e. almost all of them). Fixed by adding a separate `entityId` field to `AircraftPosition`, kept distinct from the display-oriented `id`, so a click always resolves the real canonical id regardless of what `id` is used for elsewhere.
+
+Verified against the real, now-fully-live pipeline (ingestion-poller → position-consumer → correlation-worker → alert-evaluator, all started for this same manual testing session, real OpenSky traffic over the SF Bay Area): a real headless-browser click on a real aircraft icon opened the Entity Detail panel showing real current state (`AB5B2B` / `SWA4468`, `LIVE`, real lat/lon/altitude/speed/course), confirmed by screenshot, zero console errors. `tsc`/`eslint`/the full 50-test suite all stayed clean after the fix.
