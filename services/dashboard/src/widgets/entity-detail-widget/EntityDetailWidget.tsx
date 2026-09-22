@@ -7,13 +7,12 @@ import { fetchEntityDetail, EntityDetailNotFoundError } from '@/entities/entity-
 import type { EntityDetail } from '@/entities/entity-detail/model'
 import type { Alert } from '@/entities/alert/model'
 import HistoryTab from './HistoryTab'
+import RelationshipsTab from './RelationshipsTab'
 
-// Overview (Phase 09 FE-CP1) and History (FE-CP2) are wired up. RELATIONSHIPS
-// stays an inert tab -- matching the approved mockup's own annotation that
-// it's a later checkpoint (Neo4j graph pivot), not a broken or half-built
-// feature.
+// All three tabs are wired up as of Phase 09 FE-CP3: Overview (FE-CP1),
+// History (FE-CP2), Relationships (FE-CP3).
 type Tab = 'overview' | 'history' | 'relationships'
-const ENABLED_TABS: readonly Tab[] = ['overview', 'history']
+const ENABLED_TABS: readonly Tab[] = ['overview', 'history', 'relationships']
 
 type LoadState =
 	| { kind: 'loading' }
@@ -220,6 +219,7 @@ export default function EntityDetailWidget({
 
 			<div style={{ flex: 1, overflowY: 'auto' }}>
 				{activeTab === 'history' && <HistoryTab entityId={entityId} anchorMs={anchorMs} />}
+				{activeTab === 'relationships' && <RelationshipsTab entityId={entityId} />}
 
 				{activeTab === 'overview' && state.kind === 'loading' && (
 					<div
