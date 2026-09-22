@@ -17,6 +17,8 @@ import { type TrackedEntity, applyPositionUpdate } from '@/entities/tracked-enti
 import { wireToTrackedEntity, isValidWireEntityDto } from '@/entities/tracked-entity/adapter'
 import { useLiveFeed } from '@/features/live-feed/useLiveFeed'
 import FilterPanel from '@/features/entity-filtering/FilterPanel'
+import { useWorkspacePanel } from '@/features/workspace/WorkspacePanelContext'
+import type { PickingInfo } from '@deck.gl/core'
 
 // Point the GL worker at the static copy in /public so Turbopack
 // does not need to bundle the worker file as a module chunk.
@@ -71,6 +73,15 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	// applying state after the map instance they were reading from is gone —
 	// set in the map-creation effect's cleanup, checked before every setEntities.
 	const destroyedRef = useRef(false)
+	// The deck.gl overlay is constructed once, inside map.on('load'), so its
+	// onClick closure can't see later renders' values directly. Mirrored into
+	// a ref (kept current below) so that one-time closure always reads the
+	// latest workspace panel API instead of a stale null from first render.
+	const workspacePanel = useWorkspacePanel()
+	const workspacePanelRef = useRef(workspacePanel)
+	useEffect(() => {
+		workspacePanelRef.current = workspacePanel
+	}, [workspacePanel])
 	const [is3D, setIs3D] = useState(false)
 	// Entity state: keyed by entity id for O(1) idempotent updates.
 	// Seeded from REST on map load (CP7e); live WS updates applied on top (CP7f).
@@ -201,6 +212,15 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 				interleaved: false,
 				useDevicePixels: true,
 				layers: [],
+				// Clicking an aircraft opens its Entity Detail panel -- the map
+				// marker trigger the approved mockup named alongside the alert-card
+				// and graph-pivot triggers (FE-CP1/FE-CP3), closing the one gap left
+				// between those two and the mockup's stated intent.
+				onClick: (info: PickingInfo) => {
+					if (info.layer?.id !== aviationLayer.id || !info.object) return
+					const aircraft = info.object as AircraftPosition
+					workspacePanelRef.current?.openEntityDetail(aircraft.entityId)
+				},
 			})
 
 			map.addControl(overlay as unknown as import('maplibre-gl').IControl)
@@ -227,8 +247,8 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 			map.remove()
 			mapRef.current = null
 		}
-	// hydrateAndSubscribe wraps subscribe, itself stable for the component's
-	// lifetime — adding it here does not cause the map to reinitialize.
+		// hydrateAndSubscribe wraps subscribe, itself stable for the component's
+		// lifetime — adding it here does not cause the map to reinitialize.
 	}, [hydrateAndSubscribe])
 
 	// Sync entity state → deck.gl overlay whenever entities change.
@@ -238,6 +258,7 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 		if (!overlayRef.current) return
 		const aircraft: AircraftPosition[] = Array.from(entities.values()).map((e) => ({
 			id: e.callsign ?? e.id,
+			entityId: e.id,
 			lon: e.lon,
 			lat: e.lat,
 			courseDeg: e.courseDeg,
@@ -251,7 +272,18 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 
 	const aircraftCount = entities.size
 	const shownCount = Array.from(entities.values()).filter((e) =>
-		matchesStatus({ id: e.id, lon: e.lon, lat: e.lat, courseDeg: e.courseDeg, callsign: e.callsign, onGround: e.onGround }, filters.status),
+		matchesStatus(
+			{
+				id: e.id,
+				entityId: e.id,
+				lon: e.lon,
+				lat: e.lat,
+				courseDeg: e.courseDeg,
+				callsign: e.callsign,
+				onGround: e.onGround,
+			},
+			filters.status,
+		),
 	).length
 
 	function toggle3D() {
@@ -272,7 +304,14 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	const actions = (
 		<>
 			{/* 2D / 3D projection toggle */}
-			<div style={{ display: 'flex', borderRadius: 3, overflow: 'hidden', border: '1px solid var(--color-border)' }}>
+			<div
+				style={{
+					display: 'flex',
+					borderRadius: 3,
+					overflow: 'hidden',
+					border: '1px solid var(--color-border)',
+				}}
+			>
 				<button
 					style={{ ...BTN, borderWidth: 0, borderRadius: 0, ...(is3D ? {} : BTN_ACTIVE) }}
 					onClick={() => !is3D || toggle3D()}
@@ -297,7 +336,16 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 
 			{/* Swap map/workspace sides */}
 			<button style={ICON_BTN} onClick={toggleFn} title="Toggle map side">
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					strokeWidth="2.5"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
 					<rect x="3" y="3" width="18" height="18" rx="2" />
 					<path d="M15 3v18" />
 				</svg>
@@ -305,7 +353,16 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 
 			{/* Fullscreen */}
 			<button style={ICON_BTN} onClick={toggleFullscreen} title="Fullscreen">
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+				<svg
+					width="14"
+					height="14"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					strokeWidth="2.5"
+					strokeLinecap="round"
+					strokeLinejoin="round"
+				>
 					<path d="M8 3H5a2 2 0 0 0-2 2v3" />
 					<path d="M21 8V5a2 2 0 0 0-2-2h-3" />
 					<path d="M3 16v3a2 2 0 0 0 2 2h3" />
@@ -316,7 +373,10 @@ export default function MapWidget({ onToggleLayout, onDemoExpired, params }: Map
 	)
 
 	return (
-		<div ref={outerRef} style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+		<div
+			ref={outerRef}
+			style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}
+		>
 			<WidgetHeader title="Global Map" actions={actions} />
 			<div style={{ flex: 1, position: 'relative' }}>
 				<div ref={containerRef} style={{ width: '100%', height: '100%' }} />
