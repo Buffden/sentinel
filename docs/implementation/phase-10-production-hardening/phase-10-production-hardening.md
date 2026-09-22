@@ -21,7 +21,7 @@ This section records what earlier phases actually left in place, checked directl
 
 **Not in place yet**
 
-- **The ingestion poller runs out of OpenSky credits.** Its default bounding box (latitude 49 to 61, longitude -8 to 10) is 216 square degrees, which costs 3 credits per call, and it polls every 10 seconds. That is about 26,000 credits a day against a budget of 400 (anonymous) or 4,000 (logged in). The poller treats a `429` like any other failure: it logs a warning and tries again on the next cycle, ignoring OpenSky's rate-limit headers. A config comment also describes the limit incorrectly. The full analysis is in ADR-020 (Proposed).
+- **The ingestion poller runs out of OpenSky credits.** It polls every 10 seconds by default, which is 8,640 calls a day. OpenSky's daily budget is 400 credits anonymous or 4,000 logged in, and each call costs 1 to 4 credits depending on the size of the bounding box. The code's default box (latitude 49 to 61, longitude -8 to 10) is 216 square degrees, 3 credits per call, so about 26,000 credits a day. The local, uncommitted `.env` sets a small San Francisco Bay Area box (1 credit per call) and OpenSky login credentials, which still needs 8,640 credits a day against 4,000. Nothing in the poller's start script loads `.env` automatically, so which of these two configurations actually runs depends on how the poller is started, and has to be confirmed first. The poller treats a `429` like any other failure: it logs a warning and tries again on the next cycle, ignoring OpenSky's rate-limit headers. A config comment also describes the limit incorrectly. The full analysis is in ADR-020 (Proposed).
 - **A provider outage looks like every aircraft going dark.** The Alert Evaluator declares signal loss after 5 minutes without a position. Nothing tells it that the provider, not the aircraft, stopped reporting. An exhausted OpenSky budget should therefore produce a signal-loss alert for every tracked aircraft. This is expected from reading the code but has not been observed on purpose yet.
 - **Logs are not consistent across services.** The poller and Position Consumer include timestamp, level, service and message. The API writes JSON but without a timestamp or service name, and uses a different field name for the message. The Alert Evaluator passes an object and a string to the console directly, so some of its lines are not JSON at all.
 - **Health checks do not check anything.** The API's `/healthz` always answers "ok", even if Postgres, Redis, Neo4j or its Kafka consumer is down. The other application services have no health endpoint.
@@ -62,6 +62,7 @@ The order puts the failure already hit in real use first, then the observability
 | --- | --- | --- | --- |
 | 1 | OpenSky credit budget | The poller logs its remaining credit balance each cycle, stays inside the daily budget over a full day, and when deliberately pushed past it, waits the time OpenSky asks for instead of retrying every cycle | Pending |
 | 2 | Provider outage versus aircraft dark | First, stop the poller for more than 5 minutes and observe what the Alert Evaluator does. Then decide how Sentinel should tell the two cases apart | Pending, needs a design decision |
+| 2b | Fallback live source | With the primary provider deliberately cut off, positions keep flowing from a second provider, the switch and the switch back are both logged, and no aircraft seen by both providers raises a false signal-loss alert | Pending, depends on checkpoint 2 and a provider ADR |
 | 3 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Pending |
 | 4 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
 | 5 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Pending |
@@ -73,7 +74,7 @@ The order puts the failure already hit in real use first, then the observability
 This is the first checkpoint because the failure has already happened in real use.
 
 - **Ownership:** the ingestion poller alone. Nothing downstream changes.
-- **What changes:** confirm the poller is logged in, shrink the default box to 25 square degrees or less (1 credit per call), set the interval to fit the daily budget, read `X-Rate-Limit-Remaining` on every response, and on a `429` wait for `X-Rate-Limit-Retry-After-Seconds` instead of retrying on the next cycle. Correct the config comment about anonymous limits.
+- **What changes:** first confirm which configuration actually runs (the startup log reports whether the poller is logged in), then shrink the default box to 25 square degrees or less (1 credit per call), set the interval to fit the daily budget, read `X-Rate-Limit-Remaining` on every response, and on a `429` wait for `X-Rate-Limit-Retry-After-Seconds` instead of retrying on the next cycle. Correct the config comment about anonymous limits.
 - **Failure boundary to exercise:** run anonymously with a short interval to exhaust the 400 credit budget on purpose, then confirm the poller backs off for the time OpenSky asks and logs why.
 - **Manual inspection:** the poller's own logs for credit balance and back-off, and `rpk` to confirm messages stop arriving on `adsb.raw` while it waits and resume afterwards.
 - **Not in scope:** anything about signal loss. The poller backing off still leaves every aircraft silent, which is exactly what checkpoint 2 is for.
@@ -87,6 +88,16 @@ This is an architectural discovery under `CLAUDE.md`, not an implementation choi
 - The Alert Evaluator infers an outage itself when too many entities go silent at once, which needs no new write path but relies on a threshold.
 
 Whichever is chosen changes the signal-loss contract, so it needs an ADR and updates to `ARCHITECTURE.md` and the signal-loss use case before implementation.
+
+### Checkpoint 2b detail: fallback live source
+
+A second live provider that takes over only while the primary is down. It is not a second stream running alongside the primary.
+
+- **Why after checkpoint 2:** a fallback only works if Sentinel can tell the primary is down. Checkpoint 2 produces that signal. Without it, there is nothing reliable to trigger the switch, and the fallback failing too would still produce mass signal loss.
+- **One active source per aircraft at a time:** positions from two providers are not merged. ADR-007's position identity only matches identical timestamps, which two providers almost never report, so merging would store both copies and make Redis live state jump between sources. Each position records which source it came from.
+- **Coverage difference is the important failure:** the fallback does not see exactly the same aircraft as the primary. During a switch, aircraft only the primary sees still go silent, and aircraft only the fallback sees appear. How signal loss treats aircraft the fallback cannot see is part of this checkpoint's design, not an afterthought.
+- **Provider choice needs an ADR:** the candidates in ADR-020 (adsb.fi, adsb.lol) each come with terms that limit use to personal non-commercial purposes or carry ODbL share-alike obligations. The chosen provider and its terms are accepted in an ADR before any code is written.
+- **Ownership:** a second poller publishing raw positions to Kafka, and a new mapping in the Position Consumer. A shared provider adapter is extracted only if the second real provider shows what is actually shared.
 
 ## Decisions Needed
 
