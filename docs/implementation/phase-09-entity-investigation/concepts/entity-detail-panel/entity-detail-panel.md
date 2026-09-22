@@ -2,6 +2,8 @@
 
 Plain language first, then technical depth, then the code. Use this to understand, inspect, and defend FE-CP1 (the Overview tab of the Entity Detail widget).
 
+> **Superseded (2026-09-22):** the multi-instance Dockview design described below (multiple simultaneous entity panels, opened via `api.addPanel`) was replaced the same day by an explicit product decision: one single, always-visible Entity Detail widget, permanently occupying the layout slot `FlightInfoWidget` used to hold, updated in place on every new selection. See [`entity-detail-single-panel/`](../entity-detail-single-panel/) for the current design and why it changed. This file remains as the accurate record of FE-CP1's original architecture, the real gap it discovered (no multi-instance widget support existed yet), and the reasoning at the time — historically true, not currently true.
+
 ---
 
 ## What this checkpoint is, and deliberately isn't

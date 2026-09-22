@@ -1,66 +1,52 @@
 'use client'
 
 // First React context in this codebase. Justified now, not speculatively:
-// it's the mechanism that lets a deeply-nested component (AlertWidget) open
-// a new top-level Dockview panel without threading the outer DockviewApi
-// through every intermediate component -- and it has two real consumers
-// within this same feature: AlertWidget's entity_id click-through (this
-// checkpoint) and the Relationships tab's graph-pivot (a later checkpoint,
-// same "click an entity_id, open its detail panel" mechanism).
+// it's the mechanism that lets any component (AlertWidget, MapWidget,
+// RelationshipsTab) change what the single, always-visible Entity Detail
+// widget is showing, without threading a callback through every
+// intermediate component.
+//
+// Originally (Phase 09 FE-CP1) this opened a new Dockview panel per entity,
+// supporting multiple simultaneous investigation panels. Replaced with a
+// single shared "selected entity" slot per an explicit product decision: one
+// always-visible panel, updated in place, in the same fixed layout slot
+// FlightInfoWidget used to occupy -- not a side-by-side multi-panel
+// investigation view. The call sites (AlertWidget, MapWidget,
+// RelationshipsTab) needed no changes: they already only ever called
+// `openEntityDetail(entityId, options)`, never touched a panel/Dockview API
+// directly.
 
-import { createContext, useContext, useMemo, type ReactNode } from 'react'
-import type { DockviewApi } from 'dockview-react'
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react'
 
-interface OpenEntityDetailOptions {
-	// Source-event-time anchor for the History tab's default window (Phase 09
-	// FE-CP2) -- an alert's own detected_at when opened from an alert card, so
-	// the track that led up to it is what's shown by default. Only applied at
-	// panel creation; re-clicking an already-open panel just focuses it and
-	// does not retroactively change its window (see openEntityDetail below).
+export interface SelectedEntity {
+	entityId: string
+	// Source-event-time anchor for the History tab's default window -- an
+	// alert's own detected_at, or a graph edge's last_seen_ms. See
+	// EntityDetailWidget/HistoryTab.
 	anchorMs?: number
 }
 
 interface WorkspacePanelApi {
-	// Opens (or, if already open, focuses) an Entity Detail panel for this
-	// entity_id. Deterministic panel id keyed by entity_id is what makes a
-	// repeat click idempotent -- it can never spawn a duplicate panel for the
-	// same entity, only ever surface the one that already exists.
-	openEntityDetail: (entityId: string, options?: OpenEntityDetailOptions) => void
+	selectedEntity: SelectedEntity | null
+	// Selects (or re-selects) an entity for the single Entity Detail widget
+	// to display. Calling this for an entity that's already selected is a
+	// harmless no-op re-render, not an error.
+	openEntityDetail: (entityId: string, options?: { anchorMs?: number }) => void
 }
 
 const WorkspacePanelContext = createContext<WorkspacePanelApi | null>(null)
 
-function entityDetailPanelId(entityId: string): string {
-	return `entity-detail-${entityId}`
-}
+export function WorkspacePanelProvider({ children }: { children: ReactNode }) {
+	const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(null)
 
-export function WorkspacePanelProvider({
-	api,
-	children,
-}: {
-	api: DockviewApi | null
-	children: ReactNode
-}) {
 	const value = useMemo<WorkspacePanelApi>(
 		() => ({
-			openEntityDetail: (entityId: string, options?: OpenEntityDetailOptions) => {
-				if (!api) return
-				const id = entityDetailPanelId(entityId)
-				const existing = api.getPanel(id)
-				if (existing) {
-					existing.api.setActive()
-					return
-				}
-				api.addPanel({
-					id,
-					component: 'entity-detail-widget',
-					title: entityId,
-					params: { entityId, anchorMs: options?.anchorMs },
-					position: { direction: 'right' },
-				})
+			selectedEntity,
+			openEntityDetail: (entityId, options) => {
+				setSelectedEntity({ entityId, anchorMs: options?.anchorMs })
 			},
 		}),
-		[api],
+		[selectedEntity],
 	)
 
 	return <WorkspacePanelContext.Provider value={value}>{children}</WorkspacePanelContext.Provider>

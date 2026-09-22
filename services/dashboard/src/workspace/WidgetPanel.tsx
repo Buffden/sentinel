@@ -6,10 +6,10 @@ import ResizablePanel from '@/shell/panel-grid/ResizablePanel'
 import AddWidgetCard from '@/shell/panel-grid/AddWidgetCard'
 import AddWidgetModal from '@/shell/panel-grid/AddWidgetModal'
 import AlertWidget from '@/widgets/alert-widget/AlertWidget'
-import FlightInfoWidget from '@/widgets/flight-info-widget/FlightInfoWidget'
+import EntityDetailWidget from '@/widgets/entity-detail-widget/EntityDetailWidget'
 import RouteStatusWidget from '@/widgets/route-status-widget/RouteStatusWidget'
 
-const DEFAULT_ACTIVE = new Set(['flight-info', 'alerts', 'route-status'])
+const DEFAULT_ACTIVE = new Set(['entity-detail', 'alerts', 'route-status'])
 
 export default function WidgetPanel() {
 	const [activeWidgetIds, setActiveWidgetIds] = useState<Set<string>>(DEFAULT_ACTIVE)
@@ -31,20 +31,32 @@ export default function WidgetPanel() {
 	return (
 		<>
 			<PanelGrid>
-				{activeWidgetIds.has('flight-info') && (
-					<ResizablePanel defaultRowSpan={2} defaultColSpan={1} onClose={() => removeWidget('flight-info')}>
-						<FlightInfoWidget />
+				{activeWidgetIds.has('entity-detail') && (
+					<ResizablePanel
+						defaultRowSpan={2}
+						defaultColSpan={1}
+						onClose={() => removeWidget('entity-detail')}
+					>
+						<EntityDetailWidget />
 					</ResizablePanel>
 				)}
 
 				{activeWidgetIds.has('alerts') && (
-					<ResizablePanel defaultRowSpan={2} defaultColSpan={1} onClose={() => removeWidget('alerts')}>
+					<ResizablePanel
+						defaultRowSpan={2}
+						defaultColSpan={1}
+						onClose={() => removeWidget('alerts')}
+					>
 						<AlertWidget />
 					</ResizablePanel>
 				)}
 
 				{activeWidgetIds.has('route-status') && (
-					<ResizablePanel defaultRowSpan={2} defaultColSpan={1} onClose={() => removeWidget('route-status')}>
+					<ResizablePanel
+						defaultRowSpan={2}
+						defaultColSpan={1}
+						onClose={() => removeWidget('route-status')}
+					>
 						<RouteStatusWidget />
 					</ResizablePanel>
 				)}

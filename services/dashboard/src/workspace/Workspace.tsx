@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useRef } from 'react'
 import {
 	DockviewReact,
 	type DockviewApi,
@@ -8,7 +8,6 @@ import {
 	type IDockviewPanelProps,
 } from 'dockview-react'
 import MapWidget from '@/widgets/map-widget/MapWidget'
-import EntityDetailWidget from '@/widgets/entity-detail-widget/EntityDetailWidget'
 import { WorkspacePanelProvider } from '@/features/workspace/WorkspacePanelContext'
 import WidgetPanel from './WidgetPanel'
 
@@ -17,7 +16,6 @@ type DvFC = React.FunctionComponent<IDockviewPanelProps>
 const COMPONENTS: Record<string, DvFC> = {
 	'map-widget': MapWidget as unknown as DvFC,
 	'widget-panel': WidgetPanel as unknown as DvFC,
-	'entity-detail-widget': EntityDetailWidget as unknown as DvFC,
 }
 
 function hideHeaders(api: DockviewApi) {
@@ -34,10 +32,6 @@ interface WorkspaceProps {
 export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 	const apiRef = useRef<DockviewApi | null>(null)
 	const swappedRef = useRef(false)
-	// State (not just the ref above) so WorkspacePanelProvider's context value
-	// actually updates once Dockview becomes ready -- a ref alone wouldn't
-	// trigger the re-render context consumers need to stop seeing a null api.
-	const [api, setApi] = useState<DockviewApi | null>(null)
 
 	function handleToggleLayout() {
 		const api = apiRef.current
@@ -59,7 +53,6 @@ export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 
 	function handleReady({ api }: DockviewReadyEvent) {
 		apiRef.current = api
-		setApi(api)
 		const map = api.addPanel({
 			id: 'map',
 			component: 'map-widget',
@@ -84,7 +77,7 @@ export default function Workspace({ onDemoExpired }: WorkspaceProps) {
 			className="sentinel-workspace"
 			style={{ flex: 1, minHeight: 0, overflow: 'hidden', width: '100%', height: '100%' }}
 		>
-			<WorkspacePanelProvider api={api}>
+			<WorkspacePanelProvider>
 				<DockviewReact
 					className="dockview-theme-dark"
 					components={COMPONENTS}

@@ -6,6 +6,7 @@ import { formatUtcTime } from '@/shared/lib/formatTime'
 import { fetchEntityDetail, EntityDetailNotFoundError } from '@/entities/entity-detail/api'
 import type { EntityDetail } from '@/entities/entity-detail/model'
 import type { Alert } from '@/entities/alert/model'
+import { useWorkspacePanel } from '@/features/workspace/WorkspacePanelContext'
 import HistoryTab from './HistoryTab'
 import RelationshipsTab from './RelationshipsTab'
 
@@ -19,14 +20,6 @@ type LoadState =
 	| { kind: 'not_found' }
 	| { kind: 'error'; message: string }
 	| { kind: 'ready'; detail: EntityDetail }
-
-interface EntityDetailWidgetProps {
-	// Direct props when used standalone/in tests; params fallback when
-	// Dockview renders this as a panel -- same convention as MapWidgetProps.
-	entityId?: string
-	anchorMs?: number
-	params?: { entityId?: string; anchorMs?: number }
-}
 
 const TAB_LABELS: Record<Tab, string> = {
 	overview: 'OVERVIEW',
@@ -163,23 +156,19 @@ function AlertRow({ alert }: { alert: Alert }) {
 	)
 }
 
-export default function EntityDetailWidget({
-	entityId: entityIdProp,
-	anchorMs: anchorMsProp,
-	params,
-}: EntityDetailWidgetProps) {
-	const entityId = entityIdProp ?? params?.entityId
-	const anchorMs = anchorMsProp ?? params?.anchorMs
+// Owns the actual fetch + tab state for one fixed entityId. Mounted fresh
+// (via `key={entityId}` in EntityDetailWidget below) whenever the selected
+// entity changes, rather than resetting state synchronously inside an
+// effect -- same fix HistoryTab's HistoryPoints and RelationshipsTab's
+// RelationshipsGraphLoader already apply for the identical
+// react-hooks/set-state-in-effect lint rule, and it has the added benefit of
+// resetting `activeTab` back to Overview on every new selection for free.
+function EntityDetailBody({ entityId, anchorMs }: { entityId: string; anchorMs?: number }) {
 	const [activeTab, setActiveTab] = useState<Tab>('overview')
 	const [state, setState] = useState<LoadState>({ kind: 'loading' })
 
 	useEffect(() => {
-		if (!entityId) return
 		let cancelled = false
-		// No synchronous setState here: entityId is fixed for this widget
-		// instance's whole lifetime (a new entity gets its own new panel, per
-		// WorkspacePanelContext's deterministic per-entity panel id), so the
-		// initial 'loading' state above already covers this effect's one run.
 		fetchEntityDetail(entityId)
 			.then((detail) => {
 				if (!cancelled) setState({ kind: 'ready', detail })
@@ -200,20 +189,8 @@ export default function EntityDetailWidget({
 		}
 	}, [entityId])
 
-	if (!entityId) {
-		return null
-	}
-
 	return (
-		<div
-			style={{
-				height: '100%',
-				display: 'flex',
-				flexDirection: 'column',
-				background: 'var(--color-bg-panel)',
-				overflow: 'hidden',
-			}}
-		>
+		<>
 			<WidgetHeader title={entityId} />
 			<TabBar active={activeTab} onSelect={setActiveTab} />
 
@@ -383,6 +360,57 @@ export default function EntityDetailWidget({
 					</>
 				)}
 			</div>
+		</>
+	)
+}
+
+// The single, always-visible Entity Detail widget (replaces the old
+// FlightInfoWidget slot in the default layout, per an explicit product
+// decision -- see WorkspacePanelContext.tsx). Reads the currently selected
+// entity from shared context rather than Dockview params: clicking any
+// entity_id anywhere (AlertWidget, MapWidget, RelationshipsTab's graph
+// pivot) updates the same panel in place instead of opening a new one.
+export default function EntityDetailWidget() {
+	const workspacePanel = useWorkspacePanel()
+	const selected = workspacePanel?.selectedEntity ?? null
+
+	return (
+		<div
+			style={{
+				height: '100%',
+				display: 'flex',
+				flexDirection: 'column',
+				background: 'var(--color-bg-panel)',
+				overflow: 'hidden',
+			}}
+		>
+			{selected ? (
+				<EntityDetailBody
+					key={selected.entityId}
+					entityId={selected.entityId}
+					anchorMs={selected.anchorMs}
+				/>
+			) : (
+				<>
+					<WidgetHeader title="ENTITY DETAIL" />
+					<div
+						style={{
+							flex: 1,
+							display: 'flex',
+							alignItems: 'center',
+							justifyContent: 'center',
+							padding: 'var(--space-3)',
+							fontSize: 'var(--font-size-xs)',
+							color: 'var(--color-text-muted)',
+							fontFamily: 'var(--font-mono)',
+							fontStyle: 'italic',
+							textAlign: 'center',
+						}}
+					>
+						Click an entity on the map, an alert card, or a relationship graph to inspect it here.
+					</div>
+				</>
+			)}
 		</div>
 	)
 }

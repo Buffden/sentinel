@@ -81,8 +81,8 @@ function actionButtonStyle(color: string, disabled: boolean): CSSProperties {
 }
 
 // Renders one label/value row inside an expanded alert card. Mirrors the
-// Row pattern in FlightInfoWidget — not extracted to a shared component
-// since these two callers are the only consumers so far.
+// same Row pattern EntityDetailWidget uses — not extracted to a shared
+// component since these two callers are the only consumers so far.
 //
 // onClick (Phase 09 FE-CP1): when given, the value opens that entity_id's
 // Entity Detail panel instead of rendering as plain text — the entry point
