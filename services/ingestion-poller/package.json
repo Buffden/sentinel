@@ -5,8 +5,8 @@
 	"type": "module",
 	"scripts": {
 		"produce": "tsx src/produce.ts",
-		"poll": "tsx src/poller.ts",
-		"poll:adsbfi": "tsx src/adsbfiPoller.ts",
+		"poll": "tsx --env-file-if-exists=.env src/poller.ts",
+		"poll:adsbfi": "tsx --env-file-if-exists=.env src/adsbfiPoller.ts",
 		"test": "vitest run",
 		"test:coverage": "vitest run --coverage"
 	},

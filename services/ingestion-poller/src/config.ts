@@ -49,18 +49,40 @@ export const config = {
 	// Canonical Kafka topic — do not change without an ADR.
 	TOPIC: 'adsb.raw',
 
-	// How often to poll OpenSky. Anonymous rate limit is approximately one request per 10 s.
-	POLL_INTERVAL_MS: requirePositiveInt('POLL_INTERVAL_MS', process.env['POLL_INTERVAL_MS'], 10_000),
+	// How often to poll OpenSky. OpenSky limits access by a daily credit budget,
+	// not a request rate (ADR-020): 400 credits a day anonymous, 4,000 logged in.
+	// The 10 s (anonymous) and 5 s (logged in) figures OpenSky publishes are data
+	// resolution, not an allowed request rate. At 1 credit per call, 25 s is
+	// 3,456 calls a day, inside the logged-in budget.
+	POLL_INTERVAL_MS: requirePositiveInt('POLL_INTERVAL_MS', process.env['POLL_INTERVAL_MS'], 25_000),
 
 	// HTTP fetch timeout per poll cycle. Must leave headroom inside POLL_INTERVAL_MS.
 	FETCH_TIMEOUT_MS: requirePositiveInt('FETCH_TIMEOUT_MS', process.env['FETCH_TIMEOUT_MS'], 8_000),
 
 	// Bounding box for the OpenSky states/all request. Decimal degrees.
-	// Defaults to UK + Western Europe.
-	OPENSKY_LAMIN: requireFiniteNumber('OPENSKY_LAMIN', process.env['OPENSKY_LAMIN'], 49.0),
-	OPENSKY_LOMIN: requireFiniteNumber('OPENSKY_LOMIN', process.env['OPENSKY_LOMIN'], -8.0),
-	OPENSKY_LAMAX: requireFiniteNumber('OPENSKY_LAMAX', process.env['OPENSKY_LAMAX'], 61.0),
-	OPENSKY_LOMAX: requireFiniteNumber('OPENSKY_LOMAX', process.env['OPENSKY_LOMAX'], 10.0),
+	// Defaults to the SF Bay box adsb.fi also monitors, so a failover between
+	// the two keeps the same area. It is 1.56 square degrees: 1 credit per call.
+	OPENSKY_LAMIN: requireFiniteNumber('OPENSKY_LAMIN', process.env['OPENSKY_LAMIN'], 36.9),
+	OPENSKY_LOMIN: requireFiniteNumber('OPENSKY_LOMIN', process.env['OPENSKY_LOMIN'], -122.8),
+	OPENSKY_LAMAX: requireFiniteNumber('OPENSKY_LAMAX', process.env['OPENSKY_LAMAX'], 38.1),
+	OPENSKY_LOMAX: requireFiniteNumber('OPENSKY_LOMAX', process.env['OPENSKY_LOMAX'], -121.5),
+
+	// Backoff after a 429 whose X-Rate-Limit-Retry-After-Seconds is missing or
+	// unusable. A valid retry header always wins over this. Each retry waits a
+	// random time between the base and an exponential ceiling (base, 2x, 4x...),
+	// capped at the max. Fallback retries are never sooner than 60 s apart and
+	// never more than 15 min apart, so an exhausted budget is not probed in a
+	// fast loop. A valid retry header can legitimately pause for much longer.
+	OPENSKY_BACKOFF_BASE_MS: requirePositiveInt(
+		'OPENSKY_BACKOFF_BASE_MS',
+		process.env['OPENSKY_BACKOFF_BASE_MS'],
+		60_000,
+	),
+	OPENSKY_BACKOFF_MAX_MS: requirePositiveInt(
+		'OPENSKY_BACKOFF_MAX_MS',
+		process.env['OPENSKY_BACKOFF_MAX_MS'],
+		900_000,
+	),
 
 	// Maximum messages per producer.send() call.
 	// 0 = no cap (default) — preserves current behavior during this refactor.

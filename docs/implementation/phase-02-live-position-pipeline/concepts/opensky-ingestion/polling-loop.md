@@ -44,6 +44,8 @@ All four values are configurable via environment variables: `OPENSKY_LAMIN`, `OP
 
 The bounding box serves two purposes: it keeps response sizes manageable in development and it reduces credit consumption for anonymous OpenSky accounts.
 
+> **Superseded in Phase 10 CP2:** the default box is now SF Bay (36.9 to 38.1, -122.8 to -121.5), and the loop's delay after a `429` now comes from OpenSky's retry header rather than the fixed interval. See [OpenSky fallback hardening](../../../phase-10-production-hardening/concepts/opensky-fallback-hardening/opensky-fallback-hardening.md).
+
 ---
 
 ## Fetch timeout

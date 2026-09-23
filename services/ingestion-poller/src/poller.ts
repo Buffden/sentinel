@@ -18,17 +18,30 @@
 //   that when adsb.raw is scaled to multiple partitions, all events for the
 //   same aircraft land in the same partition and are consumed in arrival order.
 //
-// Rate limiting:
-//   Anonymous OpenSky accounts are limited to approximately one request per
-//   10 seconds. POLL_INTERVAL_MS defaults to 10 000. OPENSKY_LAMIN/LOMIN/
-//   LAMAX/LOMAX scope the bounding box to reduce response size and credit
-//   consumption. Defaults cover UK + Western Europe.
+// Rate limiting (ADR-020):
+//   OpenSky limits access by a daily credit budget, not a request rate: 400
+//   credits a day anonymous, 4,000 logged in. Each /states/all call costs 1 to
+//   4 credits by box area. The default SF Bay box costs 1 credit, and the 25 s
+//   default interval spends 3,456 credits a day. Startup logs this projection
+//   and warns when it exceeds the budget.
+//
+//   Successful responses carry X-Rate-Limit-Remaining. When the budget is
+//   spent OpenSky answers 429 with X-Rate-Limit-Retry-After-Seconds and no
+//   remaining balance (observed 2026-09-23: balance 0, then a 429 with a retry
+//   of 31,952 s, about 8.9 hours). The poller then makes no requests until the
+//   retry time passes. A 429 without a usable retry header falls back to
+//   bounded exponential backoff with jitter. The pause and the resume are each
+//   logged once.
+//
+//   While paused, no OpenSky positions are published, so every OpenSky
+//   aircraft falls silent. Telling that apart from aircraft going dark is
+//   provider health (Phase 10 CP3), not this poller's job.
 //
 // Authentication:
 //   OPENSKY_CLIENT_ID/OPENSKY_CLIENT_SECRET (optional) enable OAuth2
-//   client-credentials auth, which OpenSky grants a materially higher rate
-//   limit than anonymous access. Without them, requests are unauthenticated,
-//   same behavior as before this existed.
+//   client-credentials auth, which raises the daily budget from 400 to 4,000
+//   credits. Without them, requests are unauthenticated. `npm run poll` loads
+//   them from this service's .env when that file exists.
 
 import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
@@ -73,6 +86,254 @@ export interface AdsbRawEvent {
 	position_source: number; // 0=ADS-B, 1=ASTERIX, 2=MLAT, 3=FLARM
 	category: number | null; // ADS-B emitter category; index 17; only with extended=1
 	fetched_at_ms: number; // processing time of this poll cycle; NOT source event time
+}
+
+// ---- Credit budget (pure helpers, unit-tested) -------------------------------
+
+// OpenSky's daily /states budgets (ADR-020). An active feeder account gets
+// 8,000, but the poller cannot tell a feeder apart, so logged in means 4,000.
+export const OPENSKY_DAILY_CREDITS_ANONYMOUS = 400;
+export const OPENSKY_DAILY_CREDITS_AUTHENTICATED = 4_000;
+
+const MS_PER_DAY = 86_400_000;
+
+export interface Box {
+	lamin: number;
+	lomin: number;
+	lamax: number;
+	lomax: number;
+}
+
+export function boxAreaSquareDegrees(box: Box): number {
+	return Math.abs(box.lamax - box.lamin) * Math.abs(box.lomax - box.lomin);
+}
+
+// Credits one /states/all call costs for a box of this area (ADR-020 table).
+export function creditsPerCall(areaSquareDegrees: number): number {
+	if (areaSquareDegrees <= 25) return 1;
+	if (areaSquareDegrees <= 100) return 2;
+	if (areaSquareDegrees <= 400) return 3;
+	return 4;
+}
+
+export interface BudgetProjection {
+	area_square_degrees: number;
+	credits_per_call: number;
+	calls_per_day: number;
+	projected_daily_credits: number;
+	daily_budget: number;
+	within_budget: boolean;
+	// The shortest interval this box can sustain all day on this budget.
+	min_sustainable_interval_ms: number;
+}
+
+export function projectDailyBudget(
+	box: Box,
+	intervalMs: number,
+	authenticated: boolean,
+): BudgetProjection {
+	const area = boxAreaSquareDegrees(box);
+	const cost = creditsPerCall(area);
+	const callsPerDay = Math.ceil(MS_PER_DAY / intervalMs);
+	const budget = authenticated
+		? OPENSKY_DAILY_CREDITS_AUTHENTICATED
+		: OPENSKY_DAILY_CREDITS_ANONYMOUS;
+	const projected = callsPerDay * cost;
+	return {
+		area_square_degrees: Math.round(area * 100) / 100,
+		credits_per_call: cost,
+		calls_per_day: callsPerDay,
+		projected_daily_credits: projected,
+		daily_budget: budget,
+		within_budget: projected <= budget,
+		min_sustainable_interval_ms: Math.ceil((MS_PER_DAY * cost) / budget),
+	};
+}
+
+// ---- Rate-limit handling (pure helpers, unit-tested) --------------------------
+
+// Both OpenSky rate-limit headers are whole numbers. Anything else (missing,
+// empty, negative, fractional, text) is treated as absent rather than guessed.
+function parseWholeNumberHeader(value: string | null): number | null {
+	if (value === null) return null;
+	const trimmed = value.trim();
+	if (!/^\d+$/.test(trimmed)) return null;
+	const n = Number(trimmed);
+	return Number.isSafeInteger(n) ? n : null;
+}
+
+// X-Rate-Limit-Remaining: credits left. Sent on successful responses, absent
+// on a 429 (observed 2026-09-23), so null on a 429 is normal.
+export function parseCreditsRemaining(value: string | null): number | null {
+	return parseWholeNumberHeader(value);
+}
+
+// X-Rate-Limit-Retry-After-Seconds: seconds until the budget refills, sent
+// with a 429. Null means the fallback backoff applies.
+export function parseRetryAfterSeconds(value: string | null): number | null {
+	return parseWholeNumberHeader(value);
+}
+
+// Delay for the nth consecutive 429 without a usable retry header (n >= 1):
+// a random value between the base and min(max, base * 2^(n-1)).
+// With the defaults: n=1 60 s, n=2 60-120 s, n=3 60-240 s, n=4 60-480 s,
+// n>=5 60-900 s. The base is a floor, not full jitter from zero, because each
+// retry spends a request against a budget that is probably still empty.
+export function fallbackBackoffMs(
+	consecutiveFallbacks: number,
+	baseMs: number,
+	maxMs: number,
+	random: () => number = Math.random,
+): number {
+	const n = Math.max(1, consecutiveFallbacks);
+	const ceiling = Math.max(baseMs, Math.min(maxMs, baseMs * 2 ** (n - 1)));
+	return baseMs + Math.floor(random() * (ceiling - baseMs));
+}
+
+// setTimeout fires almost immediately for delays above 2^31 - 1 ms (about 24.8
+// days) instead of waiting. OpenSky's retry times are under a day, so this only
+// guards against a nonsensical header turning a pause into a request flood.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export type CycleOutcome =
+	| { kind: 'ok' }
+	| { kind: 'rate_limited'; retryAfterSeconds: number | null; retryAfterHeader: string | null }
+	| { kind: 'failed' };
+
+export interface RateLimitState {
+	// When the current pause began (processing time); null when not paused.
+	pausedSinceMs: number | null;
+	// 429s received since the pause began.
+	rateLimitedResponses: number;
+	// 429s without a usable retry header since the last success.
+	consecutiveFallbacks: number;
+}
+
+export const NOT_PAUSED: RateLimitState = {
+	pausedSinceMs: null,
+	rateLimitedResponses: 0,
+	consecutiveFallbacks: 0,
+};
+
+export interface PollPlanOptions {
+	intervalMs: number;
+	backoffBaseMs: number;
+	backoffMaxMs: number;
+}
+
+export interface PollPlan {
+	state: RateLimitState;
+	delayMs: number;
+	event: 'paused' | 'pause_extended' | 'resumed' | null;
+	// Where delayMs came from when rate limited.
+	delaySource: 'retry_header' | 'fallback_backoff' | null;
+	// Set on 'resumed': how long the pause lasted.
+	pausedForMs: number | null;
+}
+
+// Decides the delay before the next request from the cycle that just ended.
+// Only a successful response ends a pause and resets the fallback count: a
+// network error or 5xx while paused says nothing about the budget.
+export function planNextPoll(
+	state: RateLimitState,
+	outcome: CycleOutcome,
+	nowMs: number,
+	opts: PollPlanOptions,
+	random: () => number = Math.random,
+): PollPlan {
+	if (outcome.kind === 'ok') {
+		const wasPaused = state.pausedSinceMs !== null;
+		return {
+			state: NOT_PAUSED,
+			delayMs: opts.intervalMs,
+			event: wasPaused ? 'resumed' : null,
+			delaySource: null,
+			pausedForMs: wasPaused ? nowMs - (state.pausedSinceMs as number) : null,
+		};
+	}
+
+	if (outcome.kind === 'failed') {
+		return {
+			state,
+			delayMs: opts.intervalMs,
+			event: null,
+			delaySource: null,
+			pausedForMs: null,
+		};
+	}
+
+	const event = state.pausedSinceMs === null ? 'paused' : 'pause_extended';
+	const pausedSinceMs = state.pausedSinceMs ?? nowMs;
+	const rateLimitedResponses = state.rateLimitedResponses + 1;
+
+	if (outcome.retryAfterSeconds !== null) {
+		// The provider's retry time replaces the fallback backoff, but the wait
+		// is the longer of the retry time and the normal interval, so a retry
+		// of 0 still waits one interval. Capped only by the timer limit above.
+		const delayMs = Math.min(
+			MAX_TIMER_DELAY_MS,
+			Math.max(opts.intervalMs, outcome.retryAfterSeconds * 1000),
+		);
+		return {
+			state: { ...state, pausedSinceMs, rateLimitedResponses },
+			delayMs,
+			event,
+			delaySource: 'retry_header',
+			pausedForMs: null,
+		};
+	}
+
+	const consecutiveFallbacks = state.consecutiveFallbacks + 1;
+	return {
+		state: { pausedSinceMs, rateLimitedResponses, consecutiveFallbacks },
+		delayMs: fallbackBackoffMs(consecutiveFallbacks, opts.backoffBaseMs, opts.backoffMaxMs, random),
+		event,
+		delaySource: 'fallback_backoff',
+		pausedForMs: null,
+	};
+}
+
+export interface RateLimitLogLine {
+	level: 'info' | 'warn';
+	message: string;
+	fields: Record<string, unknown>;
+}
+
+// The log line for a pause, an extended pause or a resume; null otherwise.
+// resume_at is when the next request is due, so an operator reading an
+// 8-hour pause knows it is intentional and when it ends.
+export function rateLimitLogLine(
+	plan: PollPlan,
+	outcome: CycleOutcome,
+	nowMs: number,
+): RateLimitLogLine | null {
+	if (plan.event === 'resumed') {
+		return {
+			level: 'info',
+			message: 'opensky resumed after rate limit',
+			fields: { paused_for_ms: plan.pausedForMs },
+		};
+	}
+	if (plan.event === null || outcome.kind !== 'rate_limited') return null;
+
+	return {
+		level: 'warn',
+		message:
+			plan.event === 'paused'
+				? 'opensky rate limited, pausing requests'
+				: 'opensky still rate limited, pause extended',
+		fields: {
+			http_status: 429,
+			delay_source: plan.delaySource,
+			retry_after_header: outcome.retryAfterHeader,
+			delay_ms: plan.delayMs,
+			resume_at: new Date(nowMs + plan.delayMs).toISOString(),
+			rate_limited_responses: plan.state.rateLimitedResponses,
+			...(plan.delaySource === 'fallback_backoff'
+				? { consecutive_fallbacks: plan.state.consecutiveFallbacks }
+				: {}),
+		},
+	};
 }
 
 // ---- Kafka setup -----------------------------------------------------------
@@ -125,7 +386,7 @@ let cachedToken: CachedToken | null = null;
 // Returns a bearer token when OPENSKY_CLIENT_ID/SECRET are configured, null
 // otherwise (falls back to unauthenticated requests). Caches the token until
 // shortly before its own expiry so most poll cycles reuse it instead of
-// re-authenticating every 10s.
+// re-authenticating on every request.
 async function getAccessToken(): Promise<string | null> {
 	if (!config.OPENSKY_CLIENT_ID || !config.OPENSKY_CLIENT_SECRET) return null;
 
@@ -193,7 +454,11 @@ export function mapStateVector(state: unknown[], fetchedAtMs: number): AdsbRawEv
 	};
 }
 
-async function fetchStateVectors(): Promise<AdsbRawEvent[]> {
+type FetchResult =
+	| { kind: 'ok'; events: AdsbRawEvent[]; creditsRemaining: number | null }
+	| { kind: 'rate_limited'; retryAfterSeconds: number | null; retryAfterHeader: string | null };
+
+async function fetchStateVectors(): Promise<FetchResult> {
 	const fetchedAtMs = Date.now();
 
 	const token = await getAccessToken();
@@ -205,9 +470,22 @@ async function fetchStateVectors(): Promise<AdsbRawEvent[]> {
 		signal: AbortSignal.timeout(config.FETCH_TIMEOUT_MS),
 	});
 
+	// A 429 is not an ordinary failure: the budget is spent and retrying
+	// before the refill cannot succeed. It carries no remaining balance.
+	if (response.status === 429) {
+		const retryAfterHeader = response.headers.get('x-rate-limit-retry-after-seconds');
+		return {
+			kind: 'rate_limited',
+			retryAfterSeconds: parseRetryAfterSeconds(retryAfterHeader),
+			retryAfterHeader,
+		};
+	}
+
 	if (!response.ok) {
 		throw new Error(`OpenSky returned HTTP ${response.status}`);
 	}
+
+	const creditsRemaining = parseCreditsRemaining(response.headers.get('x-rate-limit-remaining'));
 
 	const body = (await response.json()) as {
 		time: number;
@@ -215,31 +493,41 @@ async function fetchStateVectors(): Promise<AdsbRawEvent[]> {
 	};
 
 	if (!Array.isArray(body.states) || body.states.length === 0) {
-		return [];
+		return { kind: 'ok', events: [], creditsRemaining };
 	}
 
-	return (body.states as unknown[][]).map((s) => mapStateVector(s, fetchedAtMs));
+	return {
+		kind: 'ok',
+		events: (body.states as unknown[][]).map((s) => mapStateVector(s, fetchedAtMs)),
+		creditsRemaining,
+	};
 }
 
 // ---- Poll cycle ------------------------------------------------------------
 
-async function pollOnce(): Promise<void> {
-	let events: AdsbRawEvent[];
+async function pollOnce(): Promise<CycleOutcome> {
+	let result: FetchResult;
 
 	try {
-		events = await fetchStateVectors();
+		result = await fetchStateVectors();
 	} catch (err) {
-		// Log and skip this cycle. A transient OpenSky outage or rate-limit
-		// response should not crash the poller — the next cycle will retry.
+		// Log and skip this cycle. A transient OpenSky outage should not crash
+		// the poller; retry after the normal interval.
 		log('warn', 'opensky fetch failed, skipping cycle', {
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return;
+		return { kind: 'failed' };
 	}
 
+	if (result.kind === 'rate_limited') return result;
+
+	const events = result.events;
+
 	if (events.length === 0) {
-		log('info', 'opensky returned no state vectors');
-		return;
+		log('info', 'opensky returned no state vectors', {
+			credits_remaining: result.creditsRemaining,
+		});
+		return { kind: 'ok' };
 	}
 
 	const messages = events.map((event) => ({
@@ -264,27 +552,45 @@ async function pollOnce(): Promise<void> {
 	//   docker exec sentinel-redpanda rpk topic consume adsb.raw --offset <N> --num 1
 	log('info', 'poll cycle complete', {
 		state_vectors: events.length,
+		// null when OpenSky sent no X-Rate-Limit-Remaining header.
+		credits_remaining: result.creditsRemaining,
 		topic: config.TOPIC,
 		first_offset: firstOffset,
 	});
+	return { kind: 'ok' };
 }
 
 // ---- Poll loop -------------------------------------------------------------
 
 let pollTimeout: ReturnType<typeof setTimeout> | null = null;
 let stopping = false;
+let rateLimitState: RateLimitState = NOT_PAUSED;
 
-function scheduleNextPoll(): void {
+function scheduleNextPoll(delayMs: number): void {
 	if (stopping) return;
 	pollTimeout = setTimeout(() => {
 		void pollOnce()
-			.catch((err: unknown) => {
+			.catch((err: unknown): CycleOutcome => {
+				// Kafka publish errors land here: a failed cycle, retried at the
+				// normal interval.
 				log('error', 'poll cycle error', {
 					error: err instanceof Error ? err.message : String(err),
 				});
+				return { kind: 'failed' };
 			})
-			.finally(() => scheduleNextPoll());
-	}, config.POLL_INTERVAL_MS);
+			.then((outcome) => {
+				const nowMs = Date.now();
+				const plan = planNextPoll(rateLimitState, outcome, nowMs, {
+					intervalMs: config.POLL_INTERVAL_MS,
+					backoffBaseMs: config.OPENSKY_BACKOFF_BASE_MS,
+					backoffMaxMs: config.OPENSKY_BACKOFF_MAX_MS,
+				});
+				const line = rateLimitLogLine(plan, outcome, nowMs);
+				if (line) log(line.level, line.message, line.fields);
+				rateLimitState = plan.state;
+				scheduleNextPoll(plan.delayMs);
+			});
+	}, delayMs);
 }
 
 // ---- Entry point -----------------------------------------------------------
@@ -294,24 +600,43 @@ async function run(): Promise<void> {
 	await producer.connect();
 	log('info', 'producer connected');
 
+	const authenticated = Boolean(config.OPENSKY_CLIENT_ID && config.OPENSKY_CLIENT_SECRET);
+	const budget = projectDailyBudget(
+		{
+			lamin: config.OPENSKY_LAMIN,
+			lomin: config.OPENSKY_LOMIN,
+			lamax: config.OPENSKY_LAMAX,
+			lomax: config.OPENSKY_LOMAX,
+		},
+		config.POLL_INTERVAL_MS,
+		authenticated,
+	);
+
 	log('info', 'poller starting', {
 		url: OPENSKY_URL,
 		poll_interval_ms: config.POLL_INTERVAL_MS,
 		fetch_timeout_ms: config.FETCH_TIMEOUT_MS,
 		batch_max_messages:
 			config.POLLER_BATCH_MAX_MESSAGES === 0 ? 'unlimited' : config.POLLER_BATCH_MAX_MESSAGES,
-		authenticated: Boolean(config.OPENSKY_CLIENT_ID && config.OPENSKY_CLIENT_SECRET),
+		authenticated,
+		backoff_base_ms: config.OPENSKY_BACKOFF_BASE_MS,
+		backoff_max_ms: config.OPENSKY_BACKOFF_MAX_MS,
+		...budget,
 	});
+
+	// Warn, not refuse: a short over-budget run (a test, a demo) is legitimate,
+	// and the 429 pause keeps even a long one from hammering OpenSky.
+	if (!budget.within_budget) {
+		log('warn', 'projected daily credits exceed the budget, expect a 429 pause', {
+			projected_daily_credits: budget.projected_daily_credits,
+			daily_budget: budget.daily_budget,
+			min_sustainable_interval_ms: budget.min_sustainable_interval_ms,
+		});
+	}
 
 	// Run the first poll immediately so you see output without waiting a full
-	// interval. Subsequent polls are spaced POLL_INTERVAL_MS apart.
-	await pollOnce().catch((err: unknown) => {
-		log('error', 'initial poll error', {
-			error: err instanceof Error ? err.message : String(err),
-		});
-	});
-
-	scheduleNextPoll();
+	// interval. Later delays come from planNextPoll.
+	scheduleNextPoll(0);
 }
 
 async function shutdown(signal: string): Promise<void> {
