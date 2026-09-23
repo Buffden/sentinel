@@ -6,6 +6,7 @@
 	"scripts": {
 		"produce": "tsx src/produce.ts",
 		"poll": "tsx src/poller.ts",
+		"poll:adsbfi": "tsx src/adsbfiPoller.ts",
 		"test": "vitest run",
 		"test:coverage": "vitest run --coverage"
 	},

@@ -31,6 +31,18 @@ function requireFiniteNumber(name: string, raw: string | undefined, def: number)
 	return n;
 }
 
+// adsb.fi's documented public limit is one request per second; the poll
+// interval may never be configured below it.
+const ADSBFI_MIN_REQUEST_INTERVAL_MS = 1_000;
+
+function requireAtLeast(name: string, raw: string | undefined, def: number, min: number): number {
+	const n = requirePositiveInt(name, raw, def);
+	if (n < min) {
+		throw new Error(`Config: ${name}=${n} must be at least ${min}`);
+	}
+	return n;
+}
+
 export const config = {
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 
@@ -64,4 +76,59 @@ export const config = {
 	// the poller falls back to the anonymous rate limit rather than failing.
 	OPENSKY_CLIENT_ID: process.env['OPENSKY_CLIENT_ID'] || undefined,
 	OPENSKY_CLIENT_SECRET: process.env['OPENSKY_CLIENT_SECRET'] || undefined,
+
+	// ---- adsb.fi regional primary (ADR-020, ADR-021) ----
+
+	// adsb.fi has no box query, only a circle up to 250 NM. The circle must
+	// contain the monitored box; aircraft outside the box are dropped after
+	// the fetch. Defaults: the SF Bay box measured in the provider experiment.
+	ADSBFI_CENTER_LAT: requireFiniteNumber(
+		'ADSBFI_CENTER_LAT',
+		process.env['ADSBFI_CENTER_LAT'],
+		37.5,
+	),
+	ADSBFI_CENTER_LON: requireFiniteNumber(
+		'ADSBFI_CENTER_LON',
+		process.env['ADSBFI_CENTER_LON'],
+		-122.15,
+	),
+	ADSBFI_RADIUS_NM: requireFiniteNumber('ADSBFI_RADIUS_NM', process.env['ADSBFI_RADIUS_NM'], 48),
+	ADSBFI_BOX_LAMIN: requireFiniteNumber('ADSBFI_BOX_LAMIN', process.env['ADSBFI_BOX_LAMIN'], 36.9),
+	ADSBFI_BOX_LOMIN: requireFiniteNumber(
+		'ADSBFI_BOX_LOMIN',
+		process.env['ADSBFI_BOX_LOMIN'],
+		-122.8,
+	),
+	ADSBFI_BOX_LAMAX: requireFiniteNumber('ADSBFI_BOX_LAMAX', process.env['ADSBFI_BOX_LAMAX'], 38.1),
+	ADSBFI_BOX_LOMAX: requireFiniteNumber(
+		'ADSBFI_BOX_LOMAX',
+		process.env['ADSBFI_BOX_LOMAX'],
+		-121.5,
+	),
+
+	// Normal cadence. adsb.fi positions changed about every 2 s per aircraft in
+	// the provider experiment, and its public limit is 1 request per second.
+	ADSBFI_POLL_INTERVAL_MS: requireAtLeast(
+		'ADSBFI_POLL_INTERVAL_MS',
+		process.env['ADSBFI_POLL_INTERVAL_MS'],
+		2_000,
+		ADSBFI_MIN_REQUEST_INTERVAL_MS,
+	),
+	// After a failed cycle (429, other HTTP error, network error): bounded
+	// exponential backoff with full jitter, never shorter than the poll interval.
+	ADSBFI_BACKOFF_BASE_MS: requirePositiveInt(
+		'ADSBFI_BACKOFF_BASE_MS',
+		process.env['ADSBFI_BACKOFF_BASE_MS'],
+		2_000,
+	),
+	ADSBFI_BACKOFF_MAX_MS: requirePositiveInt(
+		'ADSBFI_BACKOFF_MAX_MS',
+		process.env['ADSBFI_BACKOFF_MAX_MS'],
+		60_000,
+	),
+	ADSBFI_FETCH_TIMEOUT_MS: requirePositiveInt(
+		'ADSBFI_FETCH_TIMEOUT_MS',
+		process.env['ADSBFI_FETCH_TIMEOUT_MS'],
+		8_000,
+	),
 } as const;

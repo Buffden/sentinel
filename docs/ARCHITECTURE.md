@@ -28,11 +28,13 @@ This document defines Sentinel's service boundaries, component contracts, persis
 
 | Direction | Contract |
 | --- | --- |
-| Reads | OpenSky Network REST API, AISHub |
+| Reads | ADS-B providers (adsb.fi as the regional primary, OpenSky as the fallback, per ADR-020), AISHub |
 | Publishes | `adsb.raw`, `ais.raw` |
 | Writes stores | None |
 
-The poller may unwrap a provider response envelope and split it into per-entity records. Field coercion, canonical naming, validation, persistence, and DLQ handling belong to the Position Consumer.
+Each provider has its own poller, and only one ADS-B provider is authoritative at a time. Which one runs is an operator choice until automatic provider failover exists.
+
+The poller may unwrap a provider response envelope, split it into per-entity records, and drop records outside the monitored area or outside the canonical identity model. It wraps each `adsb.raw` record as `{ provider, payload }` (ADR-021) and keys it by lowercase ICAO24, so one aircraft's records share a partition whichever provider sent them. It may add documented context the record needs once split from its response, such as a response time. Field coercion, canonical naming, validation, persistence, and DLQ handling belong to the Position Consumer.
 
 ---
 
@@ -57,6 +59,7 @@ The poller may unwrap a provider response envelope and split it into per-entity 
 - Redis live state is updated only when the incoming source timestamp is not older than the stored `last_seen_ms`.
 - Compute `history_geo_cell` at `HISTORY_H3_RESOLUTION` for historical queries and `live_geo_cell` at `LIVE_H3_RESOLUTION` for the Redis proximity index.
 - When an entity changes live H3 cells: read the previous `live_geo_cell`, `ZREM` the entity from the old sorted set, then `ZADD` it to the current set with score=`last_seen_ms`.
+- Classify each `adsb.raw` record by provider before normalizing it, and normalize with that provider's mapping only (ADR-021). There is no default provider: a record that cannot be identified is archived with a null provider and sent to the DLQ.
 - Malformed/unparseable records go to the source-specific DLQ. Valid source records with no position are skipped with observability, not treated as parse failures.
 - Historical backfill suppresses ephemeral live side effects and uses a separate consumer group/mode.
 - The Position Consumer does not evaluate anomalies and does not write Neo4j.
@@ -187,7 +190,7 @@ The dashboard is a registry-driven dockable workspace. It communicates only with
 
 | Topic | Producer | Consumer | Purpose |
 | --- | --- | --- | --- |
-| `adsb.raw` | Ingestion Poller | Position Consumer | Raw ADS-B records |
+| `adsb.raw` | Ingestion Poller | Position Consumer | Raw ADS-B records from any ADS-B provider, in a `{ provider, payload }` envelope |
 | `ais.raw` | Ingestion Poller | Position Consumer | Raw AIS records |
 | `adsb.dlq` | Position Consumer | Manual inspection | Rejected ADS-B records |
 | `ais.dlq` | Position Consumer | Manual inspection | Rejected AIS records |

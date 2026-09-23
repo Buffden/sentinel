@@ -1,7 +1,8 @@
 // OpenSky ingestion poller.
 //
 // Polls the OpenSky Network REST API on a fixed interval and publishes one
-// adsb.raw Kafka message per state vector, keyed by icao24.
+// adsb.raw Kafka message per state vector, keyed by icao24, wrapped in the
+// { provider: 'opensky', payload } envelope (ADR-021).
 //
 // Responsibility boundary (ARCHITECTURE.md):
 //   The poller may unwrap the provider response envelope and split it into
@@ -32,6 +33,7 @@
 import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import { config } from './config.js';
+import { adsbRawEnvelope } from './envelope.js';
 
 // extended=1 instructs OpenSky to include the category field (index 17 in the
 // state vector). Without it, entity_subtype and provider_category are always
@@ -242,7 +244,7 @@ async function pollOnce(): Promise<void> {
 
 	const messages = events.map((event) => ({
 		key: event.icao24,
-		value: JSON.stringify(event),
+		value: adsbRawEnvelope('opensky', event),
 	}));
 
 	// When POLLER_BATCH_MAX_MESSAGES is 0 (no cap), batchSize covers the full array

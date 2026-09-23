@@ -34,7 +34,7 @@ Schema below reflects target state after migration 007 (applied at CP5).
 | `lon` | DOUBLE PRECISION | No | Decimal degrees |
 | `altitude_m` | REAL | Yes | Preferred altitude (geo ?? baro); metres; null for vessels. Renamed from `altitude` in migration 007. |
 | `source` | TEXT | No | `adsb`, `ais`, `satellite`, or `synthetic` |
-| `provider` | TEXT | Yes | `opensky`, `aishub`, etc. |
+| `provider` | TEXT | Yes | `opensky`, `adsbfi`, `aishub`, etc. |
 | `baro_altitude_m` | REAL | Yes | Barometric altitude; metres |
 | `geo_altitude_m` | REAL | Yes | GNSS altitude; metres |
 | `speed_mps` | REAL | Yes | Ground speed; m/s |
@@ -73,19 +73,21 @@ Plain PostgreSQL table (not a hypertable) on the TimescaleDB instance. Applied a
 | `id` | BIGSERIAL PK | No | Surrogate key |
 | `entity_id` | TEXT | Yes | ICAO hex, MMSI, or synthetic entity ID |
 | `source` | TEXT | No | `adsb`, `ais`, etc. |
-| `provider` | TEXT | Yes | `opensky`, `aishub`, etc. |
+| `provider` | TEXT | Yes | `opensky`, `adsbfi`, `aishub`, etc. |
 | `source_topic` | TEXT | No | Kafka topic the record arrived on |
 | `source_partition` | INTEGER | No | Kafka partition number |
 | `source_offset` | BIGINT | No | Kafka offset within the partition |
 | `received_at` | TIMESTAMPTZ | No | Processing time of this write |
 | `source_event_time` | TIMESTAMPTZ | Yes | `to_timestamp(timestamp_ms / 1000.0)` |
-| `payload` | JSONB | No | Provider JSON object for valid records; JSONB string scalar for parse_error records |
+| `payload` | JSONB | No | The provider's original record (envelope stripped) for identified records; the record as received when the provider could not be identified; JSONB string scalar for parse_error records |
 
 Unique constraint: `(source_topic, source_partition, source_offset)`. Offsets are only unique within a partition, so the partition column is mandatory for correct idempotency. Replaying a message produces the same `(topic, partition, offset)` triple and is rejected by `ON CONFLICT DO NOTHING`.
 
 Index: `(entity_id, received_at DESC)` for per-entity raw payload lookup.
 
 `received_at` is processing time (audit). `source_event_time` is provider event time.
+
+`provider` and `payload` follow the `adsb.raw` classification (ADR-021). For an enveloped record with a known provider, `provider` is the envelope's value and `payload` is the envelope's `payload` alone. For a legacy bare OpenSky record, `provider` is `opensky` and `payload` is the record as received. For a record whose provider cannot be identified (`unknown_provider`, `invalid_envelope`, `unidentified_provider`), `provider` is null and `payload` is the record as received. `provider` is set from classification, before normalization, so it is present even when normalization later rejects the record.
 
 `raw_events` has no FK or guaranteed correlation key to `position_history`. `entity_id` + `source_event_time` may support best-effort investigation but are not guaranteed unique: `parse_error` and `no_position` records carry a null `source_event_time`, and two records for the same entity at the same event second are possible. The authoritative Kafka identity is `(source_topic, source_partition, source_offset)`.
 
@@ -576,9 +578,28 @@ Redis pub/sub and WebSocket delivery are at-least-once from the client's perspec
 
 ## Kafka Event Schemas
 
-### `adsb.raw` / `ais.raw`
+### `adsb.raw`
 
-Provider-fidelity records. Position Consumer owns parsing/normalization.
+Provider-fidelity records in a transport envelope (ADR-021). Position Consumer owns classification, parsing and normalization.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `provider` | string | `opensky` \| `adsbfi`; no other value is accepted |
+| `payload` | object | The provider's per-aircraft record plus documented response/operational context required after splitting a provider response. OpenSky adds `fetched_at_ms`; adsb.fi preserves the response-level `now` as `response_now_ms` and may add `fetched_at_ms`. |
+
+Kafka key: for ICAO-addressed aircraft, the lowercase ICAO24 address, regardless of provider, so one aircraft's records share a partition across providers. adsb.fi non-ICAO track addresses (starting with `~`) are skipped by the poller with a logged count and never published.
+
+Classification before normalization:
+
+- **Enveloped:** `provider` is known and `payload` is an object. Normalized with that provider's mapping.
+- **Legacy OpenSky (replay compatibility only):** no `provider` or `payload` key, `icao24` a non-empty string, `fetched_at_ms` a number, and the keys `lat`, `lon` and `time_position` present. Handed to the existing OpenSky normalizer, which alone decides `no_position` and field-type errors. No producer emits this shape any more.
+- **Rejected to `adsb.dlq`:** `unknown_provider` (envelope with an unrecognized `provider`), `invalid_envelope` (`provider` or `payload` present but malformed), `unidentified_provider` (valid JSON matching neither shape), `parse_error` (not valid JSON).
+
+A record is never normalized as OpenSky by default.
+
+### `ais.raw`
+
+Provider-fidelity records. Position Consumer owns parsing/normalization. Not yet produced; the `adsb.raw` envelope does not apply to it until a decision extends it.
 
 ### `position.normalized`
 
@@ -595,7 +616,7 @@ Canonical fields only. No raw provider payload. Published by Position Consumer (
 | `course_deg` | number \| null | |
 | `heading_deg` | number \| null | vessels only |
 | `source` | string | `adsb` \| `ais` \| `satellite` \| `synthetic` |
-| `provider` | string \| null | `opensky` \| `aishub` \| etc. |
+| `provider` | string \| null | `opensky` \| `adsbfi` \| `aishub` \| etc. |
 | `altitude_m` | number \| null | preferred altitude; null for vessels |
 | `baro_altitude_m` | number \| null | |
 | `geo_altitude_m` | number \| null | |
@@ -663,6 +684,8 @@ Payload evidence:
 ### `adsb.dlq` / `ais.dlq`
 
 Fields: `raw_payload`, `rejection_reason`, `source_topic`, `source_offset`, `consumer_id`, operational `timestamp_ms`.
+
+`raw_payload` preserves the exact rejected Kafka value, envelope included, for diagnosis and for reconstruction or republication after correction. `adsb.dlq` rejection reasons include `unknown_provider`, `invalid_envelope` and `unidentified_provider` (ADR-021) alongside the existing parse and normalization reasons.
 
 ---
 
