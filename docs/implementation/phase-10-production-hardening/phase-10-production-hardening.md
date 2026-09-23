@@ -21,8 +21,8 @@ This section records what earlier phases actually left in place, checked directl
 
 **Not in place yet**
 
-- **The ingestion poller runs out of OpenSky credits.** Its default bounding box (latitude 49 to 61, longitude -8 to 10) is 216 square degrees, which costs 3 credits per call, and it polls every 10 seconds. That is about 26,000 credits a day against a budget of 400 (anonymous) or 4,000 (logged in). The poller treats a `429` like any other failure: it logs a warning and tries again on the next cycle, ignoring OpenSky's rate-limit headers. A config comment also describes the limit incorrectly. The full analysis is in ADR-020 (Proposed).
-- **A provider outage looks like every aircraft going dark.** The Alert Evaluator declares signal loss after 5 minutes without a position. Nothing tells it that the provider, not the aircraft, stopped reporting. An exhausted OpenSky budget should therefore produce a signal-loss alert for every tracked aircraft. This is expected from reading the code but has not been observed on purpose yet.
+- **The ingestion poller runs out of OpenSky credits.** It polls every 10 seconds by default, which is 8,640 calls a day. OpenSky's daily budget is 400 credits anonymous or 4,000 logged in, and each call costs 1 to 4 credits depending on the size of the bounding box. The code's default box (latitude 49 to 61, longitude -8 to 10) is 216 square degrees, 3 credits per call, so about 26,000 credits a day. The local, uncommitted `.env` sets a small San Francisco Bay Area box (1 credit per call) and OpenSky login credentials, which still needs 8,640 credits a day against 4,000. Nothing in the poller's start script loads `.env` automatically, so which of these two configurations actually runs depends on how the poller is started, and has to be confirmed first. The poller treats a `429` like any other failure: it logs a warning and tries again on the next cycle, ignoring OpenSky's rate-limit headers. A config comment also describes the limit incorrectly. The full analysis is in ADR-020.
+- **A provider outage looks like every aircraft going dark.** The Alert Evaluator declares signal loss after a fixed silence (5 minutes by default; the local `.env` sets 15). Nothing tells it that the provider, not the aircraft, stopped reporting. An exhausted OpenSky budget should therefore produce a signal-loss alert for every tracked aircraft. This is expected from reading the code but has not been observed on purpose yet.
 - **Logs are not consistent across services.** The poller and Position Consumer include timestamp, level, service and message. The API writes JSON but without a timestamp or service name, and uses a different field name for the message. The Alert Evaluator passes an object and a string to the console directly, so some of its lines are not JSON at all.
 - **Health checks do not check anything.** The API's `/healthz` always answers "ok", even if Postgres, Redis, Neo4j or its Kafka consumer is down. The other application services have no health endpoint.
 - **There is no view of Kafka consumer lag** other than running `rpk` by hand.
@@ -52,47 +52,67 @@ Use a load generator to measure ingestion throughput, consumer lag under burst, 
 
 Tune implementation choices only from observed evidence.
 
-## Proposed Checkpoint Sequence
+## Checkpoint Sequence
 
-Every checkpoint below is **Pending**. This is a proposed order, not a set of decisions. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
+A measured provider comparison (Pre-CP1) changed this phase's order. ADR-020 now makes adsb.fi the primary regional live source and OpenSky the fallback, with exactly one authoritative live provider at a time, explicit failover, and no merging of positions from both. The order follows from that: build the new primary, make the fallback production-safe, then connect them through provider health, and only then move on to system-wide observability, the failure lab and load.
 
-The order puts the failure already hit in real use first, then the observability that later lab experiments need in order to be diagnosed at all, then the lab itself, then load.
+Every checkpoint after Pre-CP1 is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
 
 | # | Checkpoint | Smallest observable result | Status |
 | --- | --- | --- | --- |
-| 1 | OpenSky credit budget | The poller logs its remaining credit balance each cycle, stays inside the daily budget over a full day, and when deliberately pushed past it, waits the time OpenSky asks for instead of retrying every cycle | Pending |
-| 2 | Provider outage versus aircraft dark | First, stop the poller for more than 5 minutes and observe what the Alert Evaluator does. Then decide how Sentinel should tell the two cases apart | Pending, needs a design decision |
-| 3 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Pending |
-| 4 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
-| 5 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Pending |
-| 6 onward | Failure lab runs | One checkpoint per failure listed above, each with its own debrief showing observed behavior | Pending |
+| Pre-CP1 | Provider experiment and ADR-020 decision | A 15 minute side-by-side OpenSky and adsb.fi measurement over SF Bay, a deliberate `429` on both, and ADR-020 decided from the evidence. See [concepts/provider-experiment/README.md](concepts/provider-experiment/README.md) | Done |
+| CP1 | adsb.fi regional primary ingestion | adsb.fi positions flow end to end and land in the canonical model with provider `adsbfi`. A deliberate burst above one request a second produces `429`s, and the poller recovers through bounded backoff with jitter | Pending |
+| CP2 | Harden OpenSky as the fallback | The OpenSky poller runs at a budget-safe interval over a 1-credit box, logs its credit balance each cycle, and honours the retry time. A deliberately exhausted budget produces one clear pause and one clear resume | Pending |
+| CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Pending, needs design and an ADR |
+| Investigation | Proximity pairs dominated by ground traffic | Measure how many proximity candidates in the real pipeline involve aircraft that are not clearly airborne. Any filter is a separate decision | Pending, investigation only |
+| CP4 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Pending |
+| CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
+| CP6 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Pending |
+| CP7 onward | Failure lab runs | One checkpoint per failure listed above, each with its own debrief showing observed behavior | Pending |
 | Later | Load generator and capacity runs | Depends on the load generator decision below | Pending |
 
-### Checkpoint 1 detail: OpenSky credit budget
+### CP1 detail: adsb.fi regional primary ingestion
 
-This is the first checkpoint because the failure has already happened in real use.
+- **Ownership:** a new adsb.fi poller that publishes raw positions to Kafka, and a new raw mapping in the Position Consumer that produces canonical positions with provider `adsbfi`. While CP1 is in progress the OpenSky poller does not run alongside it, because only one provider is authoritative at a time.
+- **Open at the walkthrough, not before:** whether raw adsb.fi messages can travel on the existing `adsb.raw` topic or need a new one. The canonical `provider` field existing does not show that the current raw Kafka contract can carry adsb.fi unchanged. A new or changed canonical topic needs its own ADR.
+- **Requirements from ADR-020:** query a circle and filter to the monitored area (adsb.fi has no box query); send a descriptive user agent; after a `429`, back off with bounded exponential backoff and jitter, since adsb.fi gives no retry time.
+- **Failure boundary to exercise:** deliberately exceed one request a second and confirm the poller backs off and recovers without flooding the logs.
+- **Not in scope:** failover to OpenSky (CP3), and any change to the correlation worker.
 
-- **Ownership:** the ingestion poller alone. Nothing downstream changes.
-- **What changes:** confirm the poller is logged in, shrink the default box to 25 square degrees or less (1 credit per call), set the interval to fit the daily budget, read `X-Rate-Limit-Remaining` on every response, and on a `429` wait for `X-Rate-Limit-Retry-After-Seconds` instead of retrying on the next cycle. Correct the config comment about anonymous limits.
-- **Failure boundary to exercise:** run anonymously with a short interval to exhaust the 400 credit budget on purpose, then confirm the poller backs off for the time OpenSky asks and logs why.
-- **Manual inspection:** the poller's own logs for credit balance and back-off, and `rpk` to confirm messages stop arriving on `adsb.raw` while it waits and resume afterwards.
-- **Not in scope:** anything about signal loss. The poller backing off still leaves every aircraft silent, which is exactly what checkpoint 2 is for.
+### CP2 detail: harden OpenSky as the fallback
 
-### Checkpoint 2 detail: provider outage versus aircraft dark
+OpenSky is hardened before it becomes the automated fallback, so CP3 tests failover into a production-safe poller rather than one that still burns its budget at a 10 second interval.
 
-This is an architectural discovery under `CLAUDE.md`, not an implementation choice. The checkpoint starts with evidence (observing the mass signal-loss case on purpose) and a design discussion. It does not start with code. Candidate directions to compare at that point, none chosen:
+- **Ownership:** the existing OpenSky poller alone.
+- **What changes:** confirm which configuration actually runs (the startup log reports whether the poller is logged in), make the default box 25 square degrees or less (1 credit per call), set a budget-safe interval (25 seconds was chosen earlier: 3,456 of 4,000 daily credits), read `X-Rate-Limit-Remaining` on every response, and on a `429` wait for `X-Rate-Limit-Retry-After-Seconds` instead of retrying every cycle. Correct the config comment about anonymous limits, and make the poller's start script load its `.env`.
+- **Requirements from ADR-020:** handle a `429` that carries a retry time but no balance, and a refusal that arrives before the balance reaches zero. Pauses can last hours, so the pause and resume must each be logged once, clearly.
+- **Failure boundary to exercise:** exhaust the anonymous 400 credit budget on purpose and confirm the poller pauses for the time OpenSky asks, logs why, and resumes cleanly.
+- **Not in scope:** signal loss and failover, both CP3.
 
-- The poller reports its own health somewhere the Alert Evaluator can read, which gives the poller a new write path it does not have today.
-- The Position Consumer tracks when it last received any position from each source, since it already writes Redis state.
+### CP3 detail: provider health, failover and failback
+
+This is an architectural discovery under `CLAUDE.md`, not an implementation choice. It starts with evidence (cutting the primary off on purpose and watching what the Alert Evaluator does) and a design discussion, not with code. Candidate directions for detecting provider health, none chosen:
+
+- Each poller reports its own health somewhere the Alert Evaluator can read, which gives pollers a new write path they do not have today.
+- The Position Consumer tracks when it last received any position from each provider, since it already writes Redis state.
 - The Alert Evaluator infers an outage itself when too many entities go silent at once, which needs no new write path but relies on a threshold.
 
-Whichever is chosen changes the signal-loss contract, so it needs an ADR and updates to `ARCHITECTURE.md` and the signal-loss use case before implementation.
+The ADR for this checkpoint must decide:
+
+- **Failover:** what makes Sentinel switch from adsb.fi to OpenSky.
+- **Failback, with hysteresis:** what makes it switch back, and how long adsb.fi must stay healthy first, so an unstable recovery cannot make Sentinel bounce between the two.
+- **Signal loss during a switch:** the two providers do not see identical aircraft, so a switch changes which aircraft are visible. How signal loss treats aircraft the new provider cannot see is part of the design.
+
+It changes the signal-loss contract, so it also needs updates to `ARCHITECTURE.md` and the signal-loss use case before implementation.
+
+### Investigation: proximity pairs dominated by ground traffic
+
+The provider experiment found that most close proximity pairs involved airport surface traffic (see its README). The correlation worker has no on-ground filter. This item measures the effect in the real pipeline and brings the evidence back for a separate decision. It does not change the correlation worker, and it is not part of the provider decision.
 
 ## Decisions Needed
 
-- **ADR-020:** accept the parts that apply now (OpenSky stays the only live source and gets tuned; provider health is treated as its own problem) before checkpoint 1 is implemented. The FlightAware route question stays with Phase 04.
-- **Checkpoint 1 settings:** which region the smaller box covers, and what poll interval to use. These are implementation choices, made with the developer at that checkpoint.
-- **Health endpoints for workers:** the Alert Evaluator, Correlation Worker and Position Consumer have no HTTP server. Options include adding a small health port to each, or relying on logs and container health checks. This is an implementation choice for checkpoint 4.
+- **CP1 settings:** the adsb.fi circle's centre and radius, and its poll interval under one request a second. Implementation choices, made with the developer at that checkpoint, along with the raw topic question above.
+- **Health endpoints for workers:** the Alert Evaluator, Correlation Worker and Position Consumer have no HTTP server. Options include adding a small health port to each, or relying on logs and container health checks. This is an implementation choice for CP5.
 - **Load generator:** build a minimal one inside this phase for load experiments, or first build the Phase 04 synthetic generator and reuse it. The load experiments cannot start until this is decided.
 - **Running the application services in Docker Compose:** several failure experiments (killing and restarting a service, running two API instances) are easier to reproduce if the services run as containers. Whether to do that here is open.
 - **AWS deployment:** the fixed stack names Docker Compose to AWS as the deployment target, but no phase plan currently covers the deployment itself. Decide whether it belongs in this phase or stays out of scope.
