@@ -1,0 +1,115 @@
+
+=== opensky: HTTP
+requests=180 over 895s, statuses={200: 180}
+latency ms: n=180 min=559.00 p50=580.00 p90=611.30 p99=663.89 max=1470.00
+rate-limit related headers seen: ['X-Rate-Limit-Remaining']
+x-rate-limit-remaining: first=3999 last=3820 spent=179
+
+=== adsbfi: HTTP
+requests=900 over 899s, statuses={200: 900}
+latency ms: n=900 min=227.00 p50=374.50 p90=426.10 p99=495.03 max=935.00
+rate-limit related headers seen: []
+
+=== opensky: coverage and freshness (inside the box)
+snapshots=180 aircraft per snapshot: n=180 min=86.00 p50=90.00 p90=94.10 p99=98.21 max=99.00
+unique aircraft over the run: 132  on-ground share of observations: 45.7%
+position age at provider response time (s): n=16330 min=0.00 p50=1.00 p90=44.00 p99=302.00 max=875.00
+position age at our receipt, local clock (s): n=16330 min=1.03 p50=7.13 p90=50.06 p99=308.05 max=877.04
+null-position rate over whole response: 0/16330 = 0.00%
+
+=== adsbfi: coverage and freshness (inside the box)
+snapshots=900 aircraft per snapshot: n=900 min=104.00 p50=110.00 p90=117.00 p99=120.00 max=121.00
+unique aircraft over the run: 173  on-ground share of observations: 46.8%
+position age at provider response time (s): n=99794 min=0.00 p50=0.43 p90=4.73 p99=46.58 max=60.45
+position age at our receipt, local clock (s): n=99794 min=0.70 p50=2.10 p90=6.25 p99=48.01 max=62.31
+null-position rate over whole 48 NM circle (position-less aircraft cannot be placed in the box): 0/109550 = 0.00%
+
+=== fields
+opensky (fixed 18-field array; share non-null):
+  icao24=100%, callsign=100%, origin_country=100%, time_position=100%, last_contact=100%, longitude=100%, latitude=100%, baro_altitude=54%, on_ground=100%, velocity=100%, true_track=100%, vertical_rate=54%, sensors=0%, geo_altitude=54%, squawk=53%, spi=100%, position_source=100%, category=100%
+adsbfi (48 distinct keys; share present):
+  hex=100%, type=100%, lat=100%, lon=100%, nic=100%, rc=100%, seen_pos=100%, sil_type=100%, mlat=100%, tisb=100%, messages=100%, seen=100%, rssi=100%, dst=100%, dir=100%, gs=99%, alt_baro=99%, r=97%, category=97%, flight=96%, nac_v=93%, t=93%, ownOp=92%, emergency=91%, squawk=91%, nac_p=91%, sil=91%, year=89%, version=85%, sda=84%, desc=81%, alert=64%, spi=64%, track=62%, alt_geom=53%, baro_rate=52%, nic_baro=45%, gva=45%, true_heading=38%, geom_rate=34%, nav_qnh=26%, nav_altitude_mcp=21%, nav_heading=17%, dbFlags=11%, nav_modes=7%, mag_heading=0%, nav_altitude_fms=0%, calc_track=0%
+adsbfi position source types: {'adsb_icao': 83316, 'adsr_icao': 13438, 'adsb_other': 1622, 'tisb_trackfile': 1002, 'tisb_icao': 338, 'tisb_other': 78}
+adsbfi non-ICAO (~) addresses: 2702/99794
+
+=== identity overlap over the run (same box)
+both=125 opensky_only=7 adsbfi_only=48
+
+=== per-aircraft interval between distinct new positions (s)
+adsbfi @1s (as polled): events=37573 all gaps n=37399 min=0.00 p50=2.04 p90=4.91 p99=10.00 max=532.06
+    median gap per aircraft: n=165 min=1.89 p50=2.02 p90=5.01 p99=34.60 max=60.73
+adsbfi @5s (subsampled): events=17860 all gaps n=17688 min=0.33 p50=5.04 p90=6.36 p99=15.11 max=532.06
+    median gap per aircraft: n=163 min=3.82 p50=5.00 p90=5.43 p99=35.41 max=60.73
+adsbfi @25s (subsampled): events=3868 all gaps n=3697 min=1.00 p50=24.99 p90=26.49 p99=56.09 max=546.88
+    median gap per aircraft: n=158 min=20.18 p50=24.92 p90=25.17 p99=69.41 max=94.49
+opensky @5s (as polled): events=10850 all gaps n=9976 min=1.00 p50=6.00 p90=12.00 p99=30.00 max=880.00
+    median gap per aircraft: n=124 min=5.00 p50=5.00 p90=10.00 p99=29.43 max=35.00
+opensky @25s (subsampled): events=2888 all gaps n=2757 min=1.00 p50=25.00 p90=34.00 p99=106.64 max=898.00
+    median gap per aircraft: n=120 min=23.00 p50=26.00 p90=27.05 p99=39.81 max=60.50
+
+=== proximity: simulated worker vs ground truth
+ground truth = adsb.fi ~1 s tracks, linearly interpolated on a 1 s grid (gaps <= 10 s only).
+OpenSky streams are scored against adsb.fi-derived truth, so they mix sampling effects with provider differences;
+the adsb.fi subsampled streams isolate the sampling-rate effect alone.
+fair set: ICAO addresses seen by both providers = 125
+truth pairs <= 300 m involving a non-ICAO (~) track: 29
+
+-- [all adsb.fi aircraft (as the worker would see them)] threshold 300 m, all pairs incl. ground
+adsbfi @1s (as polled)       truth= 327 detected= 369 tp= 327 fp=  42 fn=   0
+adsbfi @5s (subsampled)      truth= 327 detected= 362 tp= 321 fp=  41 fn=   6
+adsbfi @25s (subsampled)     truth= 327 detected= 308 tp= 276 fp=  32 fn=  51
+opensky @5s (as polled)      truth= 327 detected= 161 tp= 143 fp=  18 fn= 184
+opensky @25s (subsampled)    truth= 327 detected= 140 tp= 122 fp=  18 fn= 205
+
+-- [all adsb.fi aircraft (as the worker would see them)] threshold 300 m, airborne pairs only
+adsbfi @1s (as polled)       truth=   6 detected=   7 tp=   6 fp=   1 fn=   0
+adsbfi @5s (subsampled)      truth=   6 detected=   8 tp=   5 fp=   3 fn=   1
+adsbfi @25s (subsampled)     truth=   6 detected=   5 tp=   4 fp=   1 fn=   2
+opensky @5s (as polled)      truth=   6 detected=   2 tp=   2 fp=   0 fn=   4
+opensky @25s (subsampled)    truth=   6 detected=   1 tp=   1 fp=   0 fn=   5
+
+-- [all adsb.fi aircraft (as the worker would see them)] threshold 1000 m, all pairs incl. ground
+adsbfi @1s (as polled)       truth= 892 detected= 988 tp= 892 fp=  96 fn=   0
+adsbfi @5s (subsampled)      truth= 892 detected= 973 tp= 889 fp=  84 fn=   3
+adsbfi @25s (subsampled)     truth= 892 detected= 932 tp= 855 fp=  77 fn=  37
+opensky @5s (as polled)      truth= 892 detected= 406 tp= 384 fp=  22 fn= 508
+opensky @25s (subsampled)    truth= 892 detected= 390 tp= 370 fp=  20 fn= 522
+
+-- [all adsb.fi aircraft (as the worker would see them)] threshold 1000 m, airborne pairs only
+adsbfi @1s (as polled)       truth=  14 detected=  15 tp=  14 fp=   1 fn=   0
+adsbfi @5s (subsampled)      truth=  14 detected=  16 tp=  14 fp=   2 fn=   0
+adsbfi @25s (subsampled)     truth=  14 detected=  15 tp=  10 fp=   5 fn=   4
+opensky @5s (as polled)      truth=  14 detected=   8 tp=   6 fp=   2 fn=   8
+opensky @25s (subsampled)    truth=  14 detected=  10 tp=   5 fp=   5 fn=   9
+
+-- [fair: ICAO aircraft seen by both providers] threshold 300 m, all pairs incl. ground
+adsbfi @1s (as polled)       truth= 167 detected= 180 tp= 167 fp=  13 fn=   0
+adsbfi @5s (subsampled)      truth= 167 detected= 176 tp= 164 fp=  12 fn=   3
+adsbfi @25s (subsampled)     truth= 167 detected= 142 tp= 133 fp=   9 fn=  34
+opensky @5s (as polled)      truth= 167 detected= 158 tp= 143 fp=  15 fn=  24
+opensky @25s (subsampled)    truth= 167 detected= 137 tp= 122 fp=  15 fn=  45
+
+-- [fair: ICAO aircraft seen by both providers] threshold 300 m, airborne pairs only
+adsbfi @1s (as polled)       truth=   2 detected=   2 tp=   2 fp=   0 fn=   0
+adsbfi @5s (subsampled)      truth=   2 detected=   2 tp=   1 fp=   1 fn=   1
+adsbfi @25s (subsampled)     truth=   2 detected=   1 tp=   1 fp=   0 fn=   1
+opensky @5s (as polled)      truth=   2 detected=   2 tp=   2 fp=   0 fn=   0
+opensky @25s (subsampled)    truth=   2 detected=   1 tp=   1 fp=   0 fn=   1
+
+-- [fair: ICAO aircraft seen by both providers] threshold 1000 m, all pairs incl. ground
+adsbfi @1s (as polled)       truth= 424 detected= 436 tp= 424 fp=  12 fn=   0
+adsbfi @5s (subsampled)      truth= 424 detected= 434 tp= 421 fp=  13 fn=   3
+adsbfi @25s (subsampled)     truth= 424 detected= 404 tp= 394 fp=  10 fn=  30
+opensky @5s (as polled)      truth= 424 detected= 402 tp= 384 fp=  18 fn=  40
+opensky @25s (subsampled)    truth= 424 detected= 386 tp= 370 fp=  16 fn=  54
+
+-- [fair: ICAO aircraft seen by both providers] threshold 1000 m, airborne pairs only
+adsbfi @1s (as polled)       truth=   7 detected=   7 tp=   7 fp=   0 fn=   0
+adsbfi @5s (subsampled)      truth=   7 detected=   7 tp=   7 fp=   0 fn=   0
+adsbfi @25s (subsampled)     truth=   7 detected=   4 tp=   3 fp=   1 fn=   4
+opensky @5s (as polled)      truth=   7 detected=   8 tp=   6 fp=   2 fn=   1
+opensky @25s (subsampled)    truth=   7 detected=  10 tp=   5 fp=   5 fn=   2
+
+fair-set airborne pairs with true min separation <= 300 m: 2
+  ('a1118c', 'acbaf8') min=115 m
+  ('a2b196', 'a99a63') min=146 m

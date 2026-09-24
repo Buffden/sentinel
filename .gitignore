@@ -61,6 +61,7 @@ logs/
 *.csv
 *.parquet
 *.json.gz
+*.ndjson.gz
 seed-data/raw/
 
 # Kafka / Redpanda local data volumes

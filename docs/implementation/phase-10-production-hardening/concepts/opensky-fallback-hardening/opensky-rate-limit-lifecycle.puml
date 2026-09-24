@@ -1,0 +1,30 @@
+@startuml opensky-rate-limit-lifecycle
+title OpenSky poller: rate-limit lifecycle (planNextPoll)
+
+hide empty description
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam stateArrowColor #333333
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+state POLLING : next request after the interval
+state PAUSED : one timer, no requests while waiting
+
+[*] --> POLLING : startup, first request immediately
+
+POLLING --> POLLING : 200 (logs credits_remaining)\nor network error / 5xx / Kafka failure
+POLLING --> PAUSED : 429\nlog "pausing requests" once
+
+PAUSED --> PAUSED : 429 again\nlog "pause extended"
+PAUSED --> PAUSED : network error / 5xx / Kafka failure\nno log, nothing reset
+PAUSED --> POLLING : 200\nlog "resumed" once\nreset fallback count
+
+note bottom of PAUSED
+  How long to wait after a 429
+  valid retry header: the longer of the header and the interval
+  no usable header: 60 s floor, doubling ceiling, 15 min cap, jitter
+  only a 200 resets the fallback count
+end note
+
+@enduml
