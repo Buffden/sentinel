@@ -58,14 +58,20 @@ Tune implementation choices only from observed evidence.
 
 A measured provider comparison (Pre-CP1) changed this phase's order. ADR-020 now makes adsb.fi the primary regional live source and OpenSky the fallback, with exactly one authoritative live provider at a time, explicit failover, and no merging of positions from both. The order follows from that: build the new primary, make the fallback production-safe, then connect them through provider health, and only then move on to system-wide observability, the failure lab and load.
 
-Every checkpoint after CP2 is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
+CP3a and CP3b are **Done**. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
 
 | # | Checkpoint | Smallest observable result | Status |
 | --- | --- | --- | --- |
 | Pre-CP1 | Provider experiment and ADR-020 decision | A 15 minute side-by-side OpenSky and adsb.fi measurement over SF Bay, a deliberate `429` on both, and ADR-020 decided from the evidence. See [concepts/provider-experiment/README.md](concepts/provider-experiment/README.md) | Done |
 | CP1 | adsb.fi regional primary ingestion | adsb.fi positions flow end to end through the ADR-021 envelope on `adsb.raw` and land in the canonical model with provider `adsbfi`, verified in TimescaleDB and Redis. Real `429`s from adsb.fi make the poller back off with jitter, never faster than its 2 second interval, and it recovers to normal polling. See [concepts/adsbfi-primary-ingestion/](concepts/adsbfi-primary-ingestion/) | Done |
 | CP2 | Harden OpenSky as the fallback | The OpenSky poller runs at a budget-safe interval over a 1-credit box, logs its credit balance each cycle, and honours the retry time. A deliberately exhausted budget produces one clear pause and one clear resume. Implementation and live validation are done. The real `429` pause was validated live, using OpenSky's real retry time of about 8 hours. The resume was validated by unit tests only and was not observed live, because that retry window was too long to wait through. The missing-header fallback was also validated by unit tests only. See [concepts/opensky-fallback-hardening/](concepts/opensky-fallback-hardening/) | Done |
-| CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Experiment done and ADR-022 accepted. Implementation not started |
+| CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Experiment done and ADR-022 accepted. Implementation split into CP3a to CP3f below |
+| CP3a | Coordinator lease and heartbeat | One coordinator process runs the adsb.fi adapter only while it holds `{live-provider}:lease`, and `heartbeat_ms` advances every 5 s. A second coordinator stays idle while the lease is held, and takes over once the first is killed and its lease expires. See [concepts/coordinator-lease/](concepts/coordinator-lease/) | Done |
+| CP3b | adsb.fi authority and coverage timeline | The `{live-provider}:authority` hash and `{live-provider}:coverage` sorted set open, extend and close adsb.fi coverage segments with the ADR-022 reasons, and `timeline_version` changes only when a segment opens, closes or authority is committed. See [concepts/authority-coverage-timeline/](concepts/authority-coverage-timeline/) | Done |
+| CP3c | Evaluator observed silence | The Alert Evaluator counts only the owning provider's coverage toward the signal-loss threshold. Repeating the outage experiment raises no mass `SIGNAL_LOSS` wave, and an evaluator restart after downtime raises no restart burst | Pending |
+| CP3d | Provider health state machines | The `{live-provider}:health:*` hashes move through `HEALTHY`, `DEGRADED`, `UNAVAILABLE` and `RECOVERING` at the ADR-022 thresholds, driven by real request outcomes | Pending |
+| CP3e | Failover to OpenSky | Cutting adsb.fi off makes OpenSky authoritative only after a successful OpenSky active cycle, and the switch is logged. A failed publish during the switch leaves authority at `none` | Pending |
+| CP3f | Failback hysteresis and restart restoration | adsb.fi takes authority back only when `HEALTHY` and OpenSky has been authoritative for at least 5 min, an unstable recovery does not bounce authority, and a coordinator restart restores state per ADR-022 section 7 | Pending |
 | Investigation | Proximity pairs dominated by ground traffic | Measure how many proximity candidates in the real pipeline involve aircraft that are not clearly airborne. Any filter is a separate decision | Pending, investigation only |
 | CP4 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Pending |
 | CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
@@ -116,7 +122,20 @@ It changes the signal-loss contract, so `ARCHITECTURE.md`, `DATA_MODEL.md` and t
 - a Redis coverage timeline;
 - signal loss measured as silence observed by the aircraft's owning provider.
 
-Of the candidate directions above, the first was chosen, in the form of one coordinator rather than separate pollers. The Position Consumer and mass-silence options were rejected. Implementation has not started.
+Of the candidate directions above, the first was chosen, in the form of one coordinator rather than separate pollers. The Position Consumer and mass-silence options were rejected. Implementation is under way: CP3a and CP3b are done, and CP3c to CP3f are pending.
+
+### CP3 sub-checkpoints
+
+ADR-022 is implemented in six sub-checkpoints. CP3a and CP3b are Done; CP3c to CP3f are Pending. Each one keeps strictly to its own scope and does not build anything that belongs to a later one.
+
+The evaluator change (CP3c) comes before any provider switching. Coverage plus observed silence fixes the mass-alert wave from the outage experiment using adsb.fi alone. That proves the signal-loss fix end to end before health and switching add complexity.
+
+- **CP3a, lease and heartbeat.** Scope is a single coordinator process, its `{live-provider}:lease`, and the `heartbeat_ms` renewal. A second coordinator taking over after the lease expires is expected. The lease only guards against running two instances at once. It is not fencing: as ADR-022 section 8 states, a coordinator paused past its lease can still complete Kafka sends. Not in scope: health state machines, the coverage timeline, failover, and any evaluator change.
+- **CP3b, adsb.fi authority and coverage timeline.** Scope is the `authority` hash and the `coverage` sorted set for adsb.fi only: opening, extending and closing segments, and the lease-checked atomic write scripts. Not in scope: health-driven switching and OpenSky authority.
+- **CP3c, evaluator observed silence.** Scope is the Alert Evaluator reading the coverage timeline once per scan and measuring silence as the owning provider's coverage. The evidence is a repeat of the outage experiment. Not in scope: provider switching, which does not exist yet.
+- **CP3d, provider health state machines.** Scope is the per-provider health states, transitions, check rates and the `health:*` hashes. Not in scope: acting on health to change authority.
+- **CP3e, failover to OpenSky.** Scope is loss of authority, selection rounds, and committing OpenSky authority after a successful active cycle. Not in scope: failback and restart restoration.
+- **CP3f, failback hysteresis and restart restoration.** Scope is voluntary failback with the 5 min minimum, the handover sequence, and restoring authority and health on restart per ADR-022 section 7.
 
 ### Investigation: proximity pairs dominated by ground traffic
 

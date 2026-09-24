@@ -321,6 +321,21 @@ jobs:
     defaults:
       run:
         working-directory: services/ingestion-poller
+    # The coordinator lease tests run the real compare-and-renew and
+    # compare-and-delete Lua scripts, so they need a real Redis.
+    # See coordinatorLease.integration.test.ts.
+    services:
+      redis:
+        image: redis:7.2.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v5
 

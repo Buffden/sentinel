@@ -74,6 +74,9 @@ export interface Box {
 
 export interface SplitResult {
 	messages: { key: string; value: string }[];
+	// The response's top-level `now`, already validated as epoch milliseconds.
+	// The ingestion coordinator uses it to confirm the feed is advancing.
+	responseNowMs: number;
 	total: number;
 	skippedNonIcao: number;
 	skippedNoPosition: number;
@@ -91,6 +94,7 @@ export function splitAdsbfiResponse(body: unknown, box: Box, fetchedAtMs: number
 
 	const result: SplitResult = {
 		messages: [],
+		responseNowMs,
 		total: aircraft.length,
 		skippedNonIcao: 0,
 		skippedNoPosition: 0,
@@ -160,6 +164,12 @@ const producer = kafka.producer({
 
 // ---- Logging ---------------------------------------------------------------
 
+export type Log = (
+	level: 'info' | 'warn' | 'error',
+	message: string,
+	extra?: Record<string, unknown>,
+) => void;
+
 function log(
 	level: 'info' | 'warn' | 'error',
 	message: string,
@@ -186,8 +196,11 @@ const BOX: Box = {
 	lomax: config.ADSBFI_BOX_LOMAX,
 };
 
-// Returns true when the cycle succeeded, false when it should count as a failure.
-async function pollOnce(): Promise<boolean> {
+// Fetch and split one adsb.fi response, without publishing. Returns null when
+// the request or response failed (already logged). Split out from publishing
+// so the ingestion coordinator can check it still holds its lease between the
+// two steps.
+export async function fetchAdsbfiCycle(logFn: Log): Promise<SplitResult | null> {
 	const fetchedAtMs = Date.now();
 	let response: Response;
 	try {
@@ -196,38 +209,33 @@ async function pollOnce(): Promise<boolean> {
 			signal: AbortSignal.timeout(config.ADSBFI_FETCH_TIMEOUT_MS),
 		});
 	} catch (err) {
-		log('warn', 'adsb.fi request failed', {
+		logFn('warn', 'adsb.fi request failed', {
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return false;
+		return null;
 	}
 
 	if (response.status === 429) {
-		log('warn', 'adsb.fi rate limited (429, no retry time given)');
-		return false;
+		logFn('warn', 'adsb.fi rate limited (429, no retry time given)');
+		return null;
 	}
 	if (!response.ok) {
-		log('warn', 'adsb.fi returned an error status', { http_status: response.status });
-		return false;
+		logFn('warn', 'adsb.fi returned an error status', { http_status: response.status });
+		return null;
 	}
 
-	let split: SplitResult;
 	try {
-		split = splitAdsbfiResponse(await response.json(), BOX, fetchedAtMs);
+		return splitAdsbfiResponse(await response.json(), BOX, fetchedAtMs);
 	} catch (err) {
-		log('error', 'adsb.fi response rejected', {
+		logFn('error', 'adsb.fi response rejected', {
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return false;
+		return null;
 	}
+}
 
-	let firstOffset = 'none';
-	if (split.messages.length > 0) {
-		const results = await producer.send({ topic: TOPIC, messages: split.messages });
-		firstOffset = results[0]?.baseOffset ?? 'unknown';
-	}
-
-	log('info', 'poll cycle complete', {
+export function pollCycleSummary(split: SplitResult, firstOffset: string): Record<string, unknown> {
+	return {
 		aircraft_in_response: split.total,
 		published: split.messages.length,
 		skipped_non_icao: split.skippedNonIcao,
@@ -235,7 +243,21 @@ async function pollOnce(): Promise<boolean> {
 		skipped_outside_box: split.skippedOutsideBox,
 		topic: TOPIC,
 		first_offset: firstOffset,
-	});
+	};
+}
+
+// Returns true when the cycle succeeded, false when it should count as a failure.
+async function pollOnce(): Promise<boolean> {
+	const split = await fetchAdsbfiCycle(log);
+	if (split === null) return false;
+
+	let firstOffset = 'none';
+	if (split.messages.length > 0) {
+		const results = await producer.send({ topic: TOPIC, messages: split.messages });
+		firstOffset = results[0]?.baseOffset ?? 'unknown';
+	}
+
+	log('info', 'poll cycle complete', pollCycleSummary(split, firstOffset));
 	return true;
 }
 

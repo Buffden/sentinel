@@ -1,6 +1,6 @@
 # ADR-022: Live Provider Health, Failover and Observed Silence
 
-**Status:** Accepted (2026-09-23). Not yet implemented (Phase 10 CP3).
+**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat) and CP3b (adsb.fi authority and coverage timeline) implemented; CP3c-CP3f pending.
 **Date:** 2026-09-23
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-020 (aviation data provider strategy), ADR-021 (`adsb.raw` provider envelope)
 
@@ -108,6 +108,14 @@ Authority is `adsbfi`, `opensky` or `none`. It changes only when a successful ac
 - the first successful cycle opens a segment;
 - each later successful cycle extends it.
 
+**adsb.fi freshness.** An adsb.fi cycle is credited only after its `now` is seen to advance. Each lease acquisition starts a coordinator-local tracker of the highest `now` seen and the time it last advanced, kept in memory, not in Redis:
+- the first valid response after acquiring the lease seeds the tracker and is not credited;
+- a response whose `now` is strictly greater than the highest seen confirms freshness and is credited normally;
+- a response whose `now` has not advanced may be published, but is not credited;
+- once `now` has not advanced for 10 s, the cycle fails (the frozen-feed check in section 3).
+
+Repeated `now` values never extend coverage, so a frozen-feed close ends at the last cycle whose `now` advanced.
+
 **Closing a segment.** A segment closes at its last successful cycle, with a reason:
 
 | Reason | When |
@@ -116,7 +124,7 @@ Authority is `adsbfi`, `opensky` or `none`. It changes only when a successful ac
 | `handover_attempt` | OpenSky is stopped for a failback attempt |
 | `handover` | A failback has committed |
 | `coordinator_shutdown` | Clean shutdown |
-| `coordinator_down` | Found on the next startup |
+| `coordinator_down` | Found open by the next coordinator to acquire the lease: a restart, another coordinator, or the same process reacquiring |
 
 **What never counts as coverage:**
 - any period containing a known failure;
@@ -161,11 +169,11 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | Key | Contents | Read by |
 | --- | --- | --- |
 | `{live-provider}:lease` | The coordinator's token. TTL 15 s, renewed every 5 s, the Alert Evaluator's lease convention | Coordinator |
-| `{live-provider}:authority` (hash) | `provider`, `epoch` (never reset), `authority_since_ms`, `coverage_open_since_ms` (empty when closed), `last_active_success_ms`, `heartbeat_ms`, `timeline_version` | Evaluator, operators |
+| `{live-provider}:authority` (hash) | `provider`, `epoch` (1 at the first authority commit, incremented on each later commit, never reset, unchanged by a restart or lease takeover), `authority_since_ms`, `coverage_open_since_ms` (empty when closed), `last_active_success_ms`, `heartbeat_ms`, `timeline_version` | Evaluator, operators |
 | `{live-provider}:coverage` (sorted set) | Closed segments: provider, start, end and reason, scored by end | Evaluator |
 | `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes) | `state`, `state_since_ms`, `last_success_ms`, `last_failure_ms`, `consecutive_failures`, `last_error`, `success_streak_since_ms`. OpenSky also has `paused_until_ms`, `credits_remaining` and `last_probe_ms` | Operators. **Not used for silence** |
 
-- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. Opening or closing a coverage segment and committing authority increment `timeline_version`. Extending the open segment's `last_active_success_ms` does not.
+- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: each atomic update that opens or closes a coverage segment or commits authority increments it once, so the bootstrap update that both commits authority and opens coverage is one revision. Extending the open segment's `last_active_success_ms` does not increment it.
 - **Reads.** At the start of each scan the evaluator reads `authority` and the retained `coverage` in one transaction. It evaluates every aircraft against that snapshot and logs `timeline_version`. A provider's segments are its closed members plus, if that provider is the authority and `coverage_open_since_ms` is set, the open span from `coverage_open_since_ms` to `last_active_success_ms`.
 - **Retention.** A `coverage` member is kept until its end is older than live-state TTL + the largest configured signal-loss threshold + one scan interval (today 86,400 + 900 + 30 s). The 900 s is the evaluator's `.env` value. The code default is 300 s, and the outage experiment ran at 300 s because the evaluator did not load `.env`. The coordinator holds this as its own setting. Consistency with the other services' settings is documented, not enforced.
 - **Heartbeat.** The lease renewal script writes `heartbeat_ms` every 5 s, independent of polling, backoff or pauses. It means only that the coordinator is alive and holds the lease. It is stale after 60 s.
@@ -176,8 +184,8 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
   4. stop renewal;
   5. release the lease.
 - **Lost lease.** A coordinator that loses its lease stops polling, publishing and writing immediately.
-- **Startup, with no records at all** (a true first deployment): authority starts `none`. The first successful adsb.fi active cycle bootstraps adsb.fi to `HEALTHY` and commits it.
-- **Startup, with records** (a restart): close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. Restore health as follows:
+- **Startup, with no initialized authority record** (a true first deployment): a record is initialized only when both `provider` and `epoch` exist, so a hash holding only `heartbeat_ms` counts as none. Authority starts `none`. The first successful adsb.fi active cycle bootstraps adsb.fi to `HEALTHY` and commits it.
+- **Lease acquisition, with an initialized record** (a restart, another coordinator taking over, or the same process reacquiring): before polling, close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. Restore health as follows:
 
 | Stored | Restored as |
 | --- | --- |
