@@ -20,9 +20,10 @@ export const AUTHORITY_KEY = '{live-provider}:authority';
 // always means "the holder of this exact token renewed". It is stamped with
 // Redis TIME so every writer and reader shares one clock.
 //
-// It writes only heartbeat_ms to the authority hash. Until the coverage
-// timeline exists, a hash without provider and epoch is pre-authority
-// bootstrap state, not a restored authority record.
+// It writes only heartbeat_ms to the authority hash; every other authority
+// field belongs to the coverage timeline scripts (coverageTimeline.ts). A hash
+// holding only heartbeat_ms is pre-authority bootstrap state, not an
+// initialized authority record.
 export const RENEW_SCRIPT = `
 	if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 		return 0

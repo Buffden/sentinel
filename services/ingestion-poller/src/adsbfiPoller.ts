@@ -74,6 +74,9 @@ export interface Box {
 
 export interface SplitResult {
 	messages: { key: string; value: string }[];
+	// The response's top-level `now`, already validated as epoch milliseconds.
+	// The ingestion coordinator uses it to confirm the feed is advancing.
+	responseNowMs: number;
 	total: number;
 	skippedNonIcao: number;
 	skippedNoPosition: number;
@@ -91,6 +94,7 @@ export function splitAdsbfiResponse(body: unknown, box: Box, fetchedAtMs: number
 
 	const result: SplitResult = {
 		messages: [],
+		responseNowMs,
 		total: aircraft.length,
 		skippedNonIcao: 0,
 		skippedNoPosition: 0,

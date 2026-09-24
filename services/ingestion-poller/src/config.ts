@@ -218,4 +218,25 @@ export const config = {
 		process.env['COORDINATOR_FOLLOWER_RETRY_MS'],
 		5_000,
 	),
+
+	// ---- Coverage timeline (ADR-022 sections 5 and 7) ----
+
+	// An adsb.fi cycle fails once the response `now` has not advanced for this
+	// long (the frozen-feed check). Measured on the coordinator's clock since
+	// `now` last advanced.
+	ADSBFI_FROZEN_FEED_MS: requirePositiveInt(
+		'ADSBFI_FROZEN_FEED_MS',
+		process.env['ADSBFI_FROZEN_FEED_MS'],
+		10_000,
+	),
+	// A closed coverage segment is kept until its end is older than this:
+	// live-state TTL (86,400 s) + the largest configured signal-loss threshold
+	// (900 s, the evaluator's .env) + one scan interval (30 s). The coordinator
+	// holds its own copy; consistency with those services is documented, not
+	// enforced.
+	COVERAGE_RETENTION_MS: requirePositiveInt(
+		'COVERAGE_RETENTION_MS',
+		process.env['COVERAGE_RETENTION_MS'],
+		(86_400 + 900 + 30) * 1_000,
+	),
 } as const;
