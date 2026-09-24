@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-08-08
+**See also:** ADR-022 (Accepted) restructures the ingestion poller into one coordinator that runs both live providers and owns provider health and failover. The Node.js decision here is unchanged.
 
 ---
 

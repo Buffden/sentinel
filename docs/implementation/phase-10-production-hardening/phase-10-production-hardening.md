@@ -65,7 +65,7 @@ Every checkpoint after CP2 is **Pending**. Each one follows the full implementat
 | Pre-CP1 | Provider experiment and ADR-020 decision | A 15 minute side-by-side OpenSky and adsb.fi measurement over SF Bay, a deliberate `429` on both, and ADR-020 decided from the evidence. See [concepts/provider-experiment/README.md](concepts/provider-experiment/README.md) | Done |
 | CP1 | adsb.fi regional primary ingestion | adsb.fi positions flow end to end through the ADR-021 envelope on `adsb.raw` and land in the canonical model with provider `adsbfi`, verified in TimescaleDB and Redis. Real `429`s from adsb.fi make the poller back off with jitter, never faster than its 2 second interval, and it recovers to normal polling. See [concepts/adsbfi-primary-ingestion/](concepts/adsbfi-primary-ingestion/) | Done |
 | CP2 | Harden OpenSky as the fallback | The OpenSky poller runs at a budget-safe interval over a 1-credit box, logs its credit balance each cycle, and honours the retry time. A deliberately exhausted budget produces one clear pause and one clear resume. Implementation and live validation are done. The real `429` pause was validated live, using OpenSky's real retry time of about 8 hours. The resume was validated by unit tests only and was not observed live, because that retry window was too long to wait through. The missing-header fallback was also validated by unit tests only. See [concepts/opensky-fallback-hardening/](concepts/opensky-fallback-hardening/) | Done |
-| CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Pending, needs design and an ADR |
+| CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Experiment done and ADR-022 accepted. Implementation not started |
 | Investigation | Proximity pairs dominated by ground traffic | Measure how many proximity candidates in the real pipeline involve aircraft that are not clearly airborne. Any filter is a separate decision | Pending, investigation only |
 | CP4 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Pending |
 | CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
@@ -106,7 +106,17 @@ The ADR for this checkpoint must decide:
 - **Failback, with hysteresis:** what makes it switch back, and how long adsb.fi must stay healthy first, so an unstable recovery cannot make Sentinel bounce between the two.
 - **Signal loss during a switch:** the two providers do not see identical aircraft, so a switch changes which aircraft are visible. How signal loss treats aircraft the new provider cannot see is part of the design.
 
-It changes the signal-loss contract, so it also needs updates to `ARCHITECTURE.md` and the signal-loss use case before implementation.
+It changes the signal-loss contract, so `ARCHITECTURE.md`, `DATA_MODEL.md` and the signal-loss use case change with the implementation.
+
+**Status (2026-09-23).** The outage experiment is done ([concepts/provider-outage-experiment/](concepts/provider-outage-experiment/README.md)): cutting adsb.fi off made all 78 airborne aircraft raise `SIGNAL_LOSS` in one scan. ADR-022 is accepted. It covers:
+
+- one ingestion coordinator that owns provider health and authority;
+- failover only after a successful OpenSky cycle;
+- failback only with adsb.fi `HEALTHY` plus 5 min on OpenSky;
+- a Redis coverage timeline;
+- signal loss measured as silence observed by the aircraft's owning provider.
+
+Of the candidate directions above, the first was chosen, in the form of one coordinator rather than separate pollers. The Position Consumer and mass-silence options were rejected. Implementation has not started.
 
 ### Investigation: proximity pairs dominated by ground traffic
 
