@@ -85,7 +85,8 @@ import { Kafka, Partitioners } from 'kafkajs';
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { latLngToCell } from 'h3-js';
-import { normalizeAdsbRaw, type NormalizedPosition } from './normalize.js';
+import { normalizeByProvider, type NormalizedPosition } from './normalize.js';
+import { classifyAdsbRaw } from './classify.js';
 import { config } from './config.js';
 
 const { Pool } = pg;
@@ -582,6 +583,50 @@ async function publishToDlq(event: DlqEvent): Promise<void> {
 	});
 }
 
+// Archive-then-DLQ path shared by classification and normalization rejections.
+// raw_payload is the exact Kafka value (envelope included) for diagnosis and
+// for reconstruction or republication after correction.
+async function routeToDlq(
+	topic: string,
+	partition: number,
+	offset: string,
+	rawValue: string,
+	rejectionReason: string,
+): Promise<void> {
+	const dlqEvent: DlqEvent = {
+		raw_payload: rawValue,
+		rejection_reason: rejectionReason,
+		source_topic: topic,
+		source_partition: partition,
+		source_offset: offset,
+		consumer_id: CONSUMER_ID,
+		timestamp_ms: Date.now(),
+	};
+
+	try {
+		await publishToDlq(dlqEvent);
+		log('warn', 'record routed to dlq', {
+			rejection_reason: dlqEvent.rejection_reason,
+			source_topic: topic,
+			source_partition: partition,
+			source_offset: offset,
+			dlq_topic: config.DLQ_TOPIC,
+		});
+	} catch (err) {
+		// DLQ publish failed. Log and rethrow — the offset must NOT be
+		// committed. Kafka will redeliver the message on restart.
+		// The raw_events insert is idempotent on replay.
+		log('error', 'dlq publish failed; not committing offset — Kafka will redeliver', {
+			rejection_reason: dlqEvent.rejection_reason,
+			source_topic: topic,
+			source_partition: partition,
+			source_offset: offset,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		throw err;
+	}
+}
+
 // ---- Message handler -------------------------------------------------------
 
 async function handleMessage(
@@ -594,81 +639,60 @@ async function handleMessage(
 	// 'adsb.raw' → 'adsb', 'ais.raw' → 'ais'.
 	const source = topic.split('.')[0] ?? 'unknown';
 
-	const result = normalizeAdsbRaw(rawValue);
+	// Step 0: decide which provider sent this record, before any provider
+	// mapping runs (ADR-021). Records that cannot be identified are archived
+	// with provider null and sent to the DLQ; there is no default provider.
+	const classification = classifyAdsbRaw(rawValue);
+
+	if (!classification.ok) {
+		// parse_error: rawValue is not valid JSON. JSON.stringify wraps it in
+		// quotes, producing a JSONB string scalar — satisfies the NOT NULL
+		// JSONB column without inventing a wrapper object.
+		// Other rejections are valid JSON — store the record as received.
+		const payload = classification.kind === 'parse_error' ? JSON.stringify(rawValue) : rawValue;
+		await writeRawEvent(payload, null, source, null, topic, partition, offset, null);
+		await routeToDlq(
+			topic,
+			partition,
+			offset,
+			rawValue,
+			`${classification.kind}: ${classification.detail}`,
+		);
+		return;
+	}
+
+	const { provider } = classification;
+	// raw_events.payload holds only what the provider sent, never the envelope.
+	const providerPayload = JSON.stringify(classification.payload);
+
+	const result = normalizeByProvider(provider, classification.payload);
 
 	if (!result.ok) {
 		if (result.kind === 'no_position') {
 			// Valid source record; entity has no current GPS fix.
 			// Archive the raw record, then skip. Not a DLQ candidate.
 			await writeRawEvent(
-				rawValue, // valid JSON — store directly as JSONB object
+				providerPayload,
 				result.entity_id,
 				source,
-				null, // provider not determinable without full normalization
+				provider, // known from classification even without a position
 				topic,
 				partition,
 				offset,
-				null, // source_event_time unknown: time_position was null
+				null, // source_event_time unknown: no position time
 			);
 			log('warn', 'skipping record with no position', {
 				entity_id: result.entity_id,
+				provider,
 				offset,
 			});
 			return;
 		}
 
-		// parse_error or missing_entity_id — record is unprocessable.
-		// Archive the raw record first, then publish to DLQ.
-		//
-		// parse_error: rawValue is not valid JSON. JSON.stringify wraps it in
-		// quotes, producing a JSONB string scalar — satisfies the NOT NULL
-		// JSONB column without inventing a wrapper object.
-		// missing_entity_id: rawValue is valid JSON — store it directly.
-		const payload = result.kind === 'parse_error' ? JSON.stringify(rawValue) : rawValue;
-		await writeRawEvent(
-			payload,
-			null, // entity_id unknown for both error kinds
-			source,
-			null,
-			topic,
-			partition,
-			offset,
-			null,
-		);
-
-		const dlqEvent: DlqEvent = {
-			raw_payload: rawValue,
-			rejection_reason: `${result.kind}: ${result.detail}`,
-			source_topic: topic,
-			source_partition: partition,
-			source_offset: offset,
-			consumer_id: CONSUMER_ID,
-			timestamp_ms: Date.now(),
-		};
-
-		try {
-			await publishToDlq(dlqEvent);
-			log('warn', 'record routed to dlq', {
-				rejection_reason: dlqEvent.rejection_reason,
-				source_topic: topic,
-				source_partition: partition,
-				source_offset: offset,
-				dlq_topic: config.DLQ_TOPIC,
-			});
-		} catch (err) {
-			// DLQ publish failed. Log and rethrow — the offset must NOT be
-			// committed. Kafka will redeliver the message on restart.
-			// The raw_events insert is idempotent on replay.
-			log('error', 'dlq publish failed; not committing offset — Kafka will redeliver', {
-				rejection_reason: dlqEvent.rejection_reason,
-				source_topic: topic,
-				source_partition: partition,
-				source_offset: offset,
-				error: err instanceof Error ? err.message : String(err),
-			});
-			throw err;
-		}
-
+		// parse_error or missing_entity_id from the provider mapping: the
+		// provider is known, but the record is unprocessable.
+		await writeRawEvent(providerPayload, null, source, provider, topic, partition, offset, null);
+		await routeToDlq(topic, partition, offset, rawValue, `${result.kind}: ${result.detail}`);
 		return;
 	}
 
@@ -679,7 +703,7 @@ async function handleMessage(
 
 	// Step 1: archive the raw record.
 	await writeRawEvent(
-		rawValue, // valid JSON — store directly as JSONB object
+		providerPayload,
 		position.entity_id,
 		source,
 		position.provider,

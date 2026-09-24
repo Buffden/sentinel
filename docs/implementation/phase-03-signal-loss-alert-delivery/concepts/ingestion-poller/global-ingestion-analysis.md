@@ -3,7 +3,7 @@
 What happens if the bbox filter is removed from the ingestion poller and the full
 world flight dataset is ingested.
 
-Current default bbox: UK + Western Europe (lat 49–61°N, lon 8°W–10°E).
+Default bbox at the time of this analysis: UK + Western Europe (lat 49–61°N, lon 8°W–10°E). Since Phase 10 CP2 the default is the SF Bay box (lat 36.9 to 38.1, lon -122.8 to -121.5).
 Configured via `OPENSKY_LAMIN`, `OPENSKY_LOMIN`, `OPENSKY_LAMAX`, `OPENSKY_LOMAX`.
 
 ---

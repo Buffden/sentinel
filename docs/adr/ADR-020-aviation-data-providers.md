@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-09-23). Adopting FlightAware for filed routes still needs its own decision against ADR-015 when Phase 04 resumes.
 **Date:** 2026-09-22, revised 2026-09-23 with a measured provider comparison
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-015 (v1 reference route model)
+**Implementation status:** Phase 10 CP1 implemented the adsb.fi primary ingestion path, and CP2 implemented the OpenSky fallback hardening described here. Provider health and failover (decision item 3) and FlightAware routes (item 4) are not implemented. ADR-022 (Accepted) decides decision item 3: provider health, failover and failback, and how signal loss treats a provider outage.
 
 ---
 
@@ -10,7 +11,7 @@
 
 The ingestion poller (ADR-013) pulls live aircraft positions from the OpenSky Network REST API and has been hitting OpenSky's rate limits. This raised the question of whether to switch to a paid provider or add more providers, and whether a different source could also supply the real filed routes that Phase 04 route deviation has been waiting on since it stopped at CP1.
 
-This ADR records the research done on 2026-09-22, a measured comparison of OpenSky and adsb.fi run on 2026-09-23, and the provider strategy decided from that evidence. Nothing in it is implemented yet. The experiment's method, results and reproduction steps are in `docs/implementation/phase-10-production-hardening/concepts/provider-experiment/README.md`.
+This ADR records the research done on 2026-09-22, a measured comparison of OpenSky and adsb.fi run on 2026-09-23, and the provider strategy decided from that evidence. Nothing in it was implemented when it was decided. The experiment's method, results and reproduction steps are in `docs/implementation/phase-10-production-hardening/concepts/provider-experiment/README.md`.
 
 ### Why the poller runs out of credits today
 

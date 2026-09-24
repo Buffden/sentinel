@@ -12,7 +12,9 @@ Optional bounding box parameters narrow the response to a geographic area:
 ?lamin=49&lomin=-8&lamax=61&lomax=10
 ```
 
-The Sentinel poller defaults to UK + Western Europe. Reducing the area lowers both response size and credit consumption for anonymous accounts.
+The Sentinel poller defaulted to UK + Western Europe in Phase 02. Reducing the area lowers both response size and credit consumption for anonymous accounts.
+
+> **Superseded in Phase 10 CP2:** the default box is now SF Bay (36.9 to 38.1, -122.8 to -121.5), 1 credit per call. See [OpenSky fallback hardening](../../../phase-10-production-hardening/concepts/opensky-fallback-hardening/opensky-fallback-hardening.md).
 
 ---
 
@@ -84,3 +86,5 @@ The Position Consumer performs this mapping. The ingestion poller forwards both 
 Anonymous accounts are subject to a credit budget per day. Polling every 10 seconds over a bounded geographic area stays within that budget for development use. The `POLL_INTERVAL_MS` environment variable controls the interval; the default is 10 000 ms.
 
 OpenSky returns HTTP 429 when the rate limit is exceeded. The poller treats any non-2xx response as a transient fetch failure: it logs a warning and skips the cycle without crashing.
+
+> **Superseded in Phase 10 CP2:** this section describes the Phase 02 poller. The 10 second default at 3 credits per call spent far more than the daily budget allowed. The default is now 25 seconds over a 1-credit box. A `429` now pauses the poller for OpenSky's `X-Rate-Limit-Retry-After-Seconds` instead of retrying every cycle. See [OpenSky fallback hardening](../../../phase-10-production-hardening/concepts/opensky-fallback-hardening/opensky-fallback-hardening.md).

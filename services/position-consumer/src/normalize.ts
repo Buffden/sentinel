@@ -48,40 +48,40 @@ export type NavigationStatus =
 //   for aircraft.
 export interface NormalizedPosition {
 	// --- Universal movement core ---
-	entity_id: string;         // icao24 for ADS-B; MMSI for AIS
+	entity_id: string; // icao24 for ADS-B; MMSI for AIS
 	entity_type: 'aircraft' | 'vessel' | 'satellite' | 'ground_vehicle' | 'unknown';
-	timestamp_ms: number;      // source event time; NEVER processing time
+	timestamp_ms: number; // source event time; NEVER processing time
 	lat: number;
 	lon: number;
-	speed_mps: number | null;  // velocity (ADS-B) or SOG * 0.514444 (AIS knots→m/s)
+	speed_mps: number | null; // velocity (ADS-B) or SOG * 0.514444 (AIS knots→m/s)
 	course_deg: number | null; // true_track (ADS-B) or COG (AIS)
 	heading_deg: number | null; // HEADING (AIS only; ADS-B does not separate from course)
 	source: 'adsb' | 'ais' | 'satellite' | 'synthetic';
-	provider: string | null;   // 'opensky' | 'aishub' | etc.
+	provider: string | null; // 'opensky' | 'aishub' | etc.
 
 	// --- Altitude (all null for vessels) ---
 	// altitude_m: preferred composite (geo_altitude ?? baro_altitude)
 	altitude_m: number | null;
 	baro_altitude_m: number | null; // barometric; raw from provider
-	geo_altitude_m: number | null;  // GNSS; raw from provider
+	geo_altitude_m: number | null; // GNSS; raw from provider
 
 	// --- Movement quality ---
 	vertical_rate_mps: number | null; // m/s; positive = climbing; null for vessels
-	on_ground: boolean | null;        // surface indicator; null for vessels
+	on_ground: boolean | null; // surface indicator; null for vessels
 
 	// --- ADS-B specific (null for AIS/other) ---
-	last_contact_ms: number | null;   // last_contact * 1000; critical for signal-loss
-	squawk: string | null;            // 4-digit transponder code (7500/7600/7700)
-	spi: boolean | null;              // special position identification
-	position_source: number | null;   // 0=ADS-B 1=ASTERIX 2=MLAT 3=FLARM
+	last_contact_ms: number | null; // last_contact * 1000; critical for signal-loss
+	squawk: string | null; // 4-digit transponder code (7500/7600/7700)
+	spi: boolean | null; // special position identification
+	position_source: number | null; // 0=ADS-B 1=ASTERIX 2=MLAT 3=FLARM
 
 	// --- AIS specific (null for ADS-B) ---
 	navigation_status: NavigationStatus | null; // normalized from NAVSTAT integer
-	rate_of_turn: number | null;      // ROT; unusual manoeuvre detection
+	rate_of_turn: number | null; // ROT; unusual manoeuvre detection
 	position_accuracy: boolean | null; // PAC; high/low accuracy flag
-	destination: string | null;       // DEST; route/deviation rules
-	eta: string | null;               // ETA; route/deviation rules
-	draught_m: number | null;         // vessel draught in metres
+	destination: string | null; // DEST; route/deviation rules
+	eta: string | null; // ETA; route/deviation rules
+	draught_m: number | null; // vessel draught in metres
 
 	// --- Entity classification ---
 	callsign: string | null;
@@ -163,8 +163,13 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 		return { ok: false, kind: 'parse_error', detail: 'payload is not a JSON object' };
 	}
 
-	const r = parsed as Record<string, unknown>;
+	return normalizeOpenSkyRecord(parsed as Record<string, unknown>);
+}
 
+// OpenSky mapping on an already-parsed record. Reached either from a legacy
+// bare record or from an envelope's payload (ADR-021); the rules are the same
+// in both cases, which is what keeps legacy replay behaviour unchanged.
+export function normalizeOpenSkyRecord(r: Record<string, unknown>): NormalizeResult {
 	// Step 2: Entity identity.
 	// icao24 is the stable entity identifier. Without it, persistence and the
 	// Redis live key cannot be written. DLQ in CP4.
@@ -226,7 +231,8 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 	// callsign: trim provider whitespace padding before storing in the canonical
 	// record. OpenSky pads callsigns to a fixed width with trailing spaces.
 	// The raw value is preserved verbatim in raw_events.payload.
-	const callsign = typeof r['callsign'] === 'string' && r['callsign'].trim() !== '' ? r['callsign'].trim() : null;
+	const callsign =
+		typeof r['callsign'] === 'string' && r['callsign'].trim() !== '' ? r['callsign'].trim() : null;
 
 	// Step 7: Entity classification.
 	// category is only present when the poller adds extended=1 to the OpenSky URL.
@@ -278,4 +284,163 @@ export function normalizeAdsbRaw(rawValue: string): NormalizeResult {
 			provider_category,
 		},
 	};
+}
+
+// ---- adsb.fi (ADR-020 regional primary, ADR-021 envelope) ------------------
+//
+// adsb.fi serves the ADS-B Exchange v2 format. A payload is one aircraft object
+// split out of a response, plus the response-level context the poller keeps:
+//   response_now_ms  the response's top-level `now`, epoch milliseconds
+//   fetched_at_ms    processing time of the poll (never used for event time)
+// seen_pos and seen are seconds BEFORE `now`, so event times can only be
+// derived deterministically from response_now_ms, never from Date.now().
+
+const KNOTS_TO_MPS = 0.514444;
+const FEET_PER_MINUTE_TO_MPS = 0.00508;
+const FEET_TO_METRES = 0.3048;
+
+// The single place that turns adsb.fi's relative "seconds before now" into an
+// absolute source event time. Rounded to whole milliseconds so the result is
+// stable across replays and safe as part of (entity_id, observed_at).
+export function adsbfiEventTimeMs(responseNowMs: number, secondsBeforeNow: number): number {
+	return Math.round(responseNowMs - secondsBeforeNow * 1000);
+}
+
+// ADS-B emitter category as adsb.fi reports it ("A1".."C7"). Mirrors the
+// OpenSky integer mapping above: same classes, different encoding.
+function adsbfiCategoryToSubtype(category: string | null): string | null {
+	if (category == null) return null;
+	if (category === 'A7') return 'rotorcraft';
+	if (category === 'B2') return 'lighter_than_air';
+	if (category === 'B6') return 'uav';
+	if (/^A[1-6]$/.test(category)) return 'fixed_wing';
+	return 'unknown';
+}
+
+// adsb.fi `type` names where the position came from; the canonical field
+// uses OpenSky's codes (0=ADS-B 1=ASTERIX 2=MLAT 3=FLARM). Sources with no
+// equivalent code (TIS-B, mode_s, other) stay null rather than guessed.
+function adsbfiTypeToPositionSource(type: unknown): number | null {
+	if (typeof type !== 'string') return null;
+	if (type.startsWith('adsb_') || type.startsWith('adsr_')) return 0;
+	if (type === 'mlat') return 2;
+	return null;
+}
+
+// adsb.fi reports alt_baro and alt_geom in FEET, and alt_baro is the string
+// "ground" (not a number) when the aircraft is on the ground. Canonical fields
+// are metres, with altitude_m preferring geo over baro like the OpenSky mapping.
+// A "ground" report still keeps a usable alt_geom as altitude_m.
+export function mapAdsbfiAltitudeAndGround(r: Record<string, unknown>): {
+	baro_altitude_m: number | null;
+	geo_altitude_m: number | null;
+	altitude_m: number | null;
+	on_ground: boolean | null;
+} {
+	const altBaro = r['alt_baro'];
+	const altGeom = r['alt_geom'];
+
+	const baro_altitude_m = typeof altBaro === 'number' ? altBaro * FEET_TO_METRES : null;
+	const geo_altitude_m = typeof altGeom === 'number' ? altGeom * FEET_TO_METRES : null;
+	const altitude_m = geo_altitude_m ?? baro_altitude_m;
+
+	// A numeric alt_baro means readsb did not flag the aircraft as grounded, so
+	// it maps to false. Anything else (absent, unexpected) stays unknown.
+	const on_ground = altBaro === 'ground' ? true : typeof altBaro === 'number' ? false : null;
+
+	return { baro_altitude_m, geo_altitude_m, altitude_m, on_ground };
+}
+
+export function normalizeAdsbfiRecord(r: Record<string, unknown>): NormalizeResult {
+	const hex = r['hex'];
+	if (typeof hex !== 'string' || hex === '') {
+		return { ok: false, kind: 'missing_entity_id', detail: 'hex field missing or empty' };
+	}
+	// The poller skips non-ICAO tracks (ADR-021). Rejecting here as well keeps
+	// a hand-published or future-producer record from entering the ICAO-based
+	// canonical identity model.
+	if (hex.startsWith('~')) {
+		return {
+			ok: false,
+			kind: 'missing_entity_id',
+			detail: `non-ICAO address "${hex}" is not supported`,
+		};
+	}
+	const entity_id = hex.toLowerCase();
+
+	if (r['lat'] == null || r['lon'] == null) {
+		return { ok: false, kind: 'no_position', entity_id };
+	}
+	if (typeof r['lat'] !== 'number' || typeof r['lon'] !== 'number') {
+		return { ok: false, kind: 'parse_error', detail: 'lat or lon present but wrong type' };
+	}
+	const responseNowMs = r['response_now_ms'];
+	const seenPos = r['seen_pos'];
+	if (typeof responseNowMs !== 'number' || typeof seenPos !== 'number') {
+		return {
+			ok: false,
+			kind: 'parse_error',
+			detail: 'response_now_ms or seen_pos missing; position time cannot be derived',
+		};
+	}
+
+	const seen = r['seen'];
+	const category = typeof r['category'] === 'string' ? r['category'] : null;
+	const flight = r['flight'];
+	const verticalRateFpm =
+		typeof r['baro_rate'] === 'number'
+			? r['baro_rate']
+			: typeof r['geom_rate'] === 'number'
+				? r['geom_rate']
+				: null;
+
+	return {
+		ok: true,
+		position: {
+			entity_id,
+			entity_type: 'aircraft',
+			timestamp_ms: adsbfiEventTimeMs(responseNowMs, seenPos),
+			lat: r['lat'],
+			lon: r['lon'],
+			speed_mps: typeof r['gs'] === 'number' ? r['gs'] * KNOTS_TO_MPS : null,
+			course_deg: typeof r['track'] === 'number' ? r['track'] : null,
+			heading_deg: null, // ADS-B course, as in the OpenSky mapping
+			source: 'adsb',
+			provider: 'adsbfi',
+
+			...mapAdsbfiAltitudeAndGround(r),
+
+			vertical_rate_mps: verticalRateFpm !== null ? verticalRateFpm * FEET_PER_MINUTE_TO_MPS : null,
+
+			last_contact_ms: typeof seen === 'number' ? adsbfiEventTimeMs(responseNowMs, seen) : null,
+			squawk: typeof r['squawk'] === 'string' && r['squawk'] !== '' ? r['squawk'] : null,
+			spi: typeof r['spi'] === 'number' ? r['spi'] === 1 : null,
+			position_source: adsbfiTypeToPositionSource(r['type']),
+
+			navigation_status: null,
+			rate_of_turn: null,
+			position_accuracy: null,
+			destination: null,
+			eta: null,
+			draught_m: null,
+
+			callsign: typeof flight === 'string' && flight.trim() !== '' ? flight.trim() : null,
+			entity_subtype: adsbfiCategoryToSubtype(category),
+			provider_category: category,
+		},
+	};
+}
+
+// ---- Provider dispatch (ADR-021) --------------------------------------------
+
+export function normalizeByProvider(
+	provider: 'opensky' | 'adsbfi',
+	payload: Record<string, unknown>,
+): NormalizeResult {
+	switch (provider) {
+		case 'opensky':
+			return normalizeOpenSkyRecord(payload);
+		case 'adsbfi':
+			return normalizeAdsbfiRecord(payload);
+	}
 }
