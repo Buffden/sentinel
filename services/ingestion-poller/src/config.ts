@@ -43,6 +43,52 @@ function requireAtLeast(name: string, raw: string | undefined, def: number, min:
 	return n;
 }
 
+const COORDINATOR_LEASE_TTL_MS = requirePositiveInt(
+	'COORDINATOR_LEASE_TTL_MS',
+	process.env['COORDINATOR_LEASE_TTL_MS'],
+	15_000,
+);
+const COORDINATOR_RENEWAL_INTERVAL_MS = requirePositiveInt(
+	'COORDINATOR_RENEWAL_INTERVAL_MS',
+	process.env['COORDINATOR_RENEWAL_INTERVAL_MS'],
+	5_000,
+);
+const COORDINATOR_REDIS_COMMAND_TIMEOUT_MS = requirePositiveInt(
+	'COORDINATOR_REDIS_COMMAND_TIMEOUT_MS',
+	process.env['COORDINATOR_REDIS_COMMAND_TIMEOUT_MS'],
+	2_000,
+);
+
+// Safety invariant: a coordinator that cannot reach Redis must give up the
+// lease locally before the key can expire and a successor can acquire it.
+//
+// The TTL clock restarts when Redis runs a renewal, which can be as soon as
+// the command is sent, but the coordinator only learns of the success when the
+// reply arrives, up to one command timeout later. The next renewal is
+// scheduled one interval after that reply, and may itself wait a full command
+// timeout before failing. So the worst case from the TTL restarting to the
+// coordinator noticing the loss is interval + 2 x timeout, and that must stay
+// strictly below the TTL.
+export function validateLeaseTiming(
+	leaseTtlMs: number,
+	renewalIntervalMs: number,
+	redisCommandTimeoutMs: number,
+): void {
+	if (renewalIntervalMs + 2 * redisCommandTimeoutMs >= leaseTtlMs) {
+		throw new Error(
+			`Config: COORDINATOR_RENEWAL_INTERVAL_MS (${renewalIntervalMs}) + ` +
+				`2 x COORDINATOR_REDIS_COMMAND_TIMEOUT_MS (${redisCommandTimeoutMs}) must be less than ` +
+				`COORDINATOR_LEASE_TTL_MS (${leaseTtlMs})`,
+		);
+	}
+}
+
+validateLeaseTiming(
+	COORDINATOR_LEASE_TTL_MS,
+	COORDINATOR_RENEWAL_INTERVAL_MS,
+	COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
+);
+
 export const config = {
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 
@@ -152,5 +198,45 @@ export const config = {
 		'ADSBFI_FETCH_TIMEOUT_MS',
 		process.env['ADSBFI_FETCH_TIMEOUT_MS'],
 		8_000,
+	),
+
+	// ---- Ingestion coordinator (ADR-022) ----
+
+	REDIS_URL: process.env['REDIS_URL'] ?? 'redis://localhost:6379',
+
+	// Lease timings from ADR-022, the same convention as the Alert Evaluator.
+	// The lease guards against two coordinators running at once. It is not
+	// fencing: Kafka never checks it.
+	COORDINATOR_LEASE_TTL_MS,
+	COORDINATOR_RENEWAL_INTERVAL_MS,
+	// How long a Redis command may take before it counts as an error. A
+	// renewal that times out is treated as a lost lease (fail closed).
+	COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
+	// How often a follower retries acquiring the lease.
+	COORDINATOR_FOLLOWER_RETRY_MS: requirePositiveInt(
+		'COORDINATOR_FOLLOWER_RETRY_MS',
+		process.env['COORDINATOR_FOLLOWER_RETRY_MS'],
+		5_000,
+	),
+
+	// ---- Coverage timeline (ADR-022 sections 5 and 7) ----
+
+	// An adsb.fi cycle fails once the response `now` has not advanced for this
+	// long (the frozen-feed check). Measured on the coordinator's clock since
+	// `now` last advanced.
+	ADSBFI_FROZEN_FEED_MS: requirePositiveInt(
+		'ADSBFI_FROZEN_FEED_MS',
+		process.env['ADSBFI_FROZEN_FEED_MS'],
+		10_000,
+	),
+	// A closed coverage segment is kept until its end is older than this:
+	// live-state TTL (86,400 s) + the largest configured signal-loss threshold
+	// (900 s, the evaluator's .env) + one scan interval (30 s). The coordinator
+	// holds its own copy; consistency with those services is documented, not
+	// enforced.
+	COVERAGE_RETENTION_MS: requirePositiveInt(
+		'COVERAGE_RETENTION_MS',
+		process.env['COVERAGE_RETENTION_MS'],
+		(86_400 + 900 + 30) * 1_000,
 	),
 } as const;

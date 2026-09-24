@@ -545,6 +545,50 @@ Value=`instance_id`.
 
 Acquire: `SET NX PX`. Renewal/release must compare current ownership before `PEXPIRE` / `DEL`.
 
+### `{live-provider}:lease` (string)
+
+Writer/reader: ingestion coordinator (ADR-022). Value: a fresh random token for every acquisition, never a stable instance name, so a restarted process cannot renew the lease of its previous life.
+
+- Acquire: `SET NX PX` with a 15 s TTL. Followers retry every 5 s.
+- Renewal: every 5 s, by one Lua script that checks the token, resets the TTL and writes `heartbeat_ms` to `{live-provider}:authority`, all atomically.
+- Release: compare-and-delete on clean shutdown, after the in-flight cycle has published.
+- A renewal that returns 0, errors or times out (2 s command timeout) counts as a lost lease: the coordinator stops polling and publishing and does not delete the key. The coordinator refuses to start unless renewal interval + 2 x command timeout < TTL.
+- A command that timed out at the client can still run in Redis later, so a stale renewal or follower `SET NX` can hold the key for up to one more TTL. This delays takeover. It does not let two coordinators publish.
+- A duplicate-instance guard, not fencing: Kafka never checks the token (ADR-022 section 8).
+
+The `{live-provider}` hash tag keeps the coordinator's keys in one Redis Cluster slot, so one script can touch more than one of them.
+
+### `{live-provider}:authority` (hash)
+
+Writer: ingestion coordinator (ADR-022). `heartbeat_ms` is written by the lease renewal script; every other field only by the coverage timeline scripts below. Readers: none yet.
+
+| Field | Meaning |
+| --- | --- |
+| `provider` | Authoritative provider. Only `adsbfi` is written today |
+| `epoch` | Authority term: 1 at the first commit, incremented on each later commit, never reset, unchanged by a restart or lease takeover |
+| `authority_since_ms` | When the current authority was committed |
+| `coverage_open_since_ms` | Start of the open coverage segment; empty string when closed |
+| `last_active_success_ms` | Coordinator time at which the latest credited cycle's publish finished |
+| `heartbeat_ms` | Epoch ms from Redis `TIME`, every 5 s while a coordinator holds the lease. Liveness only, not provider health; stale after 60 s per ADR-022 |
+| `timeline_version` | Timeline revision: incremented once per atomic update that opens or closes a segment or commits authority. Extending the open segment does not change it |
+
+- **Initialized** only when both `provider` and `epoch` exist. A hash holding only `heartbeat_ms` is pre-authority bootstrap state and follows first-deployment initialization.
+- No TTL: it outlives every coordinator.
+- **Credit script** (after a fresh cycle's publish): on a pre-authority hash, commits `adsbfi` and opens coverage as one revision; with coverage closed, opens a segment; with it open, extends `last_active_success_ms`. It writes nothing when the time is not after `last_active_success_ms`, and refuses with an error when another provider holds authority.
+- **Close script:** closes the open segment at `last_active_success_ms` into `{live-provider}:coverage`, clears `coverage_open_since_ms`, increments `timeline_version` and prunes. With nothing open it writes nothing.
+- Both scripts check the lease token first and write nothing on a mismatch. A refused, failed or timed-out timeline write makes the coordinator give up the lease.
+- An adsb.fi cycle is credited only after its response `now` is seen to advance. The tracker for that is kept in memory per lease acquisition, never in Redis.
+
+### `{live-provider}:coverage` (sorted set)
+
+Writer: ingestion coordinator, through the close script. Readers: none yet.
+
+- Member: `<provider>|<start_ms>|<end_ms>|<reason>`, for example `adsbfi|1790285724037|1790285735418|failure`. Deterministic, so the same segment is stored once.
+- Score: `end_ms`.
+- Reasons written today: `failure` (a failed active cycle), `coordinator_shutdown` (clean shutdown), `coordinator_down` (found open by the next coordinator to acquire the lease, before it polls).
+- Retention: a member is pruned once its end is older than `COVERAGE_RETENTION_MS`, default 87,330 s (live-state TTL 86,400 s + largest signal-loss threshold 900 s + one scan interval 30 s). Pruning runs only inside a close that closes a segment.
+- The open segment is not a member: it is `coverage_open_since_ms` to `last_active_success_ms` in the authority hash.
+
 ### `position-updates` — pub/sub
 
 Publisher: Position Consumer. Subscribers: API instances.
