@@ -30,9 +30,14 @@ This document defines Sentinel's service boundaries, component contracts, persis
 | --- | --- |
 | Reads | ADS-B providers (adsb.fi as the regional primary, OpenSky as the fallback, per ADR-020), AISHub |
 | Publishes | `adsb.raw`, `ais.raw` |
-| Writes stores | None |
+| Writes Redis | `{live-provider}:lease`, `{live-provider}:authority` (ingestion coordinator only) |
+| Coordination | Redis lease `{live-provider}:lease` (ingestion coordinator only) |
 
-Each provider has its own poller, and only one ADS-B provider is authoritative at a time. Which one runs is an operator choice until automatic provider failover exists.
+Only one ADS-B provider is authoritative at a time. The service has three ADS-B entry points: the standalone OpenSky poller, the standalone adsb.fi poller, and the ingestion coordinator (ADR-022). Which one runs is an operator choice until automatic provider failover exists.
+
+The ingestion coordinator runs the adsb.fi adapter, and only while it holds the Redis lease `{live-provider}:lease`. It renews the lease every 5 s, and each renewal also writes `heartbeat_ms` to `{live-provider}:authority`. A second coordinator waits as a follower and takes over once the leader's lease expires. This is Phase 10 CP3a only: the coordinator has no provider health, no authority record, no coverage timeline, no OpenSky adapter and no failover yet.
+
+The lease is a duplicate-instance guard, not fencing. Kafka never checks it, so a coordinator paused past its lease can still complete a send after a successor has taken over (ADR-022 section 8). The standalone pollers do not take the lease, so none of them may run alongside a coordinator.
 
 The poller may unwrap a provider response envelope, split it into per-entity records, and drop records outside the monitored area or outside the canonical identity model. It wraps each `adsb.raw` record as `{ provider, payload }` (ADR-021) and keys it by lowercase ICAO24, so one aircraft's records share a partition whichever provider sent them. It may add documented context the record needs once split from its response, such as a response time. Field coercion, canonical naming, validation, persistence, and DLQ handling belong to the Position Consumer.
 
@@ -237,6 +242,8 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 | `recent-loss:{entity_id}` | Position Consumer | Alert Evaluator | Bounded post-resume correlation state |
 | `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Sustained deviation episode state |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | Ownership-safe lease |
+| `{live-provider}:lease` | Ingestion coordinator | Ingestion coordinator | Duplicate-instance guard for the coordinator, not fencing |
+| `{live-provider}:authority` | Ingestion coordinator | None yet | Currently only `heartbeat_ms`: the coordinator is alive and holds the lease |
 | `position-updates` | Position Consumer | API instances | Live position pub/sub |
 | `alert-events` | API | API instances | Alert lifecycle fan-out |
 
@@ -298,6 +305,7 @@ API → Neo4j only for operator investigation/evidence reads.
 | Alert durable persistence | Idempotent / exactly-once effect by deterministic `alert_id` |
 | WebSocket lifecycle delivery | At-least-once; client deduplication required |
 | Alert Evaluator leadership | Single active evaluator under normal lease ownership; durable idempotency remains the correctness backstop |
+| Ingestion coordinator leadership | Single polling coordinator under normal lease ownership. Not fencing: a coordinator paused past its lease can still complete an in-flight Kafka send |
 
 ---
 

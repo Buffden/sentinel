@@ -545,6 +545,27 @@ Value=`instance_id`.
 
 Acquire: `SET NX PX`. Renewal/release must compare current ownership before `PEXPIRE` / `DEL`.
 
+### `{live-provider}:lease` (string)
+
+Writer/reader: ingestion coordinator (ADR-022). Value: a fresh random token for every acquisition, never a stable instance name, so a restarted process cannot renew the lease of its previous life.
+
+- Acquire: `SET NX PX` with a 15 s TTL. Followers retry every 5 s.
+- Renewal: every 5 s, by one Lua script that checks the token, resets the TTL and writes `heartbeat_ms` to `{live-provider}:authority`, all atomically.
+- Release: compare-and-delete on clean shutdown, after the in-flight cycle has published.
+- A renewal that returns 0, errors or times out (2 s command timeout) counts as a lost lease: the coordinator stops polling and publishing and does not delete the key. The coordinator refuses to start unless renewal interval + 2 x command timeout < TTL.
+- A command that timed out at the client can still run in Redis later, so a stale renewal or follower `SET NX` can hold the key for up to one more TTL. This delays takeover. It does not let two coordinators publish.
+- A duplicate-instance guard, not fencing: Kafka never checks the token (ADR-022 section 8).
+
+The `{live-provider}` hash tag keeps the coordinator's keys in one Redis Cluster slot, so one script can touch more than one of them.
+
+### `{live-provider}:authority` (hash)
+
+Writer: ingestion coordinator, inside the lease renewal script. Readers: none yet.
+
+Current fields (Phase 10 CP3a): `heartbeat_ms` only, in epoch milliseconds from Redis `TIME`, advancing every 5 s while a coordinator holds the lease. It means only that a coordinator is alive and holds the lease, not that any provider is healthy. ADR-022 treats it as stale after 60 s. No TTL: it outlives the coordinator.
+
+A hash containing only `heartbeat_ms` is pre-authority bootstrap state. It is not a fully initialized authority record, and later checkpoints must not treat it as one when restoring state on restart. The remaining ADR-022 section 7 fields are not implemented yet.
+
 ### `position-updates` — pub/sub
 
 Publisher: Position Consumer. Subscribers: API instances.
