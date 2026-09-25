@@ -181,6 +181,33 @@ describe('applyEvidence: unknown health and first deployment', () => {
 	});
 });
 
+describe('applyEvidence: after stale health (CP3e)', () => {
+	it('a success after staleness enters RECOVERING with a fresh streak, even from HEALTHY', () => {
+		for (const state of ['HEALTHY', 'DEGRADED', 'RECOVERING', 'UNAVAILABLE'] as const) {
+			const next = applyEvidence(
+				health({ state, successStreakSinceMs: state === 'RECOVERING' ? T - 500_000 : null }),
+				ok(T + 1_000),
+				TIMING,
+				{ stale: true },
+			);
+			expect(next).toMatchObject({
+				state: 'RECOVERING',
+				stateSinceMs: T + 1_000,
+				successStreakSinceMs: T + 1_000,
+			});
+		}
+	});
+
+	it('a failure after staleness follows the stored state normally', () => {
+		expect(
+			applyEvidence(health({ state: 'HEALTHY' }), fail(T + 1), TIMING, { stale: true }).state,
+		).toBe('DEGRADED');
+		expect(
+			applyEvidence(health({ state: 'UNAVAILABLE' }), fail(T + 1), TIMING, { stale: true }).state,
+		).toBe('UNAVAILABLE');
+	});
+});
+
 describe('applyEvidence: OpenSky pause, credits and probes', () => {
 	const paused = (atMs: number, pausedUntilMs: number): HealthEvidence => ({
 		kind: 'paused',

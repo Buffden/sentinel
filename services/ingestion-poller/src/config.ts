@@ -285,4 +285,36 @@ export const config = {
 		process.env['OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS'],
 		900_000,
 	),
+
+	// ---- Failover (ADR-022 section 4) ----
+
+	// OpenSky's active cycle while it is authoritative: 3,456 credits a day on
+	// the 1-credit SF Bay box, inside the 4,000 authenticated budget. Each
+	// active request is also OpenSky's health evidence.
+	OPENSKY_ACTIVE_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_ACTIVE_INTERVAL_MS',
+		process.env['OPENSKY_ACTIVE_INTERVAL_MS'],
+		25_000,
+	),
+	// adsb.fi's request rate when it is not authoritative (standby, or a
+	// candidate while authority is none), with the CP1 backoff while failing.
+	ADSBFI_STANDBY_INTERVAL_MS: requireAtLeast(
+		'ADSBFI_STANDBY_INTERVAL_MS',
+		process.env['ADSBFI_STANDBY_INTERVAL_MS'],
+		10_000,
+		ADSBFI_MIN_REQUEST_INTERVAL_MS,
+	),
+	// Retry of a whole selection round after a delivery failure while
+	// authority is none (a publish that failed, or a commit refused for its
+	// time): from this, doubling, up to the max.
+	SELECTION_RETRY_BASE_MS: requirePositiveInt(
+		'SELECTION_RETRY_BASE_MS',
+		process.env['SELECTION_RETRY_BASE_MS'],
+		60_000,
+	),
+	SELECTION_RETRY_MAX_MS: requirePositiveInt(
+		'SELECTION_RETRY_MAX_MS',
+		process.env['SELECTION_RETRY_MAX_MS'],
+		900_000,
+	),
 } as const;

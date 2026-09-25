@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AdsbfiFetchFailure, SplitResult } from './adsbfiPoller.js';
 import { Coordinator, type CoordinatorDeps } from './coordinator.js';
-import type { CloseResult, CoverageCloseReason, CreditResult } from './coverageTimeline.js';
-import type { OpenskyCheckResult } from './poller.js';
+import type {
+	CloseResult,
+	CommitResult,
+	CoverageCloseReason,
+	CreditResult,
+	RelinquishResult,
+} from './coverageTimeline.js';
+import type { OpenskyFetchResult } from './poller.js';
 import type { Provider, ProviderHealth } from './providerHealth.js';
 import type {
 	AcquisitionSnapshot,
@@ -52,15 +58,41 @@ class FakeLease {
 // coordinator asks for, and returns whatever the test sets.
 class FakeTimeline {
 	credits: number[] = [];
+	creditProviders: string[] = [];
 	closes: CoverageCloseReason[] = [];
+	commits: { provider: string; atMs: number }[] = [];
+	relinquishes: string[] = [];
 	creditResult: CreditResult | Error = { status: 'extended', timelineVersion: 1 };
 	closeResult: CloseResult | Error = { status: 'already_closed' };
+	// Queued results for the next commits; afterwards every commit succeeds.
+	commitResults: (CommitResult | Error)[] = [];
+	relinquishResult: RelinquishResult | Error = {
+		status: 'relinquished',
+		timelineVersion: 9,
+		member: null,
+	};
+	epoch = 1;
 
-	async credit(_token: string, activeSuccessMs: number): Promise<CreditResult> {
-		events.push('credit');
+	async credit(_token: string, provider: string, activeSuccessMs: number): Promise<CreditResult> {
+		events.push(`credit:${provider}`);
 		this.credits.push(activeSuccessMs);
+		this.creditProviders.push(provider);
 		if (this.creditResult instanceof Error) throw this.creditResult;
 		return this.creditResult;
+	}
+	async commit(_token: string, provider: string, atMs: number): Promise<CommitResult> {
+		events.push(`commit:${provider}`);
+		const queued = this.commitResults.shift();
+		if (queued instanceof Error) throw queued;
+		if (queued !== undefined) return queued;
+		this.commits.push({ provider, atMs });
+		return { status: 'committed', epoch: ++this.epoch, timelineVersion: 10 + this.epoch };
+	}
+	async relinquish(_token: string, expected: string): Promise<RelinquishResult> {
+		events.push(`relinquish:${expected}`);
+		this.relinquishes.push(expected);
+		if (this.relinquishResult instanceof Error) throw this.relinquishResult;
+		return this.relinquishResult;
 	}
 	async close(_token: string, reason: CoverageCloseReason): Promise<CloseResult> {
 		events.push(`close:${reason}`);
@@ -74,6 +106,27 @@ class FakeTimeline {
 // providerHealthStore.integration.test.ts. This stand-in keeps what was
 // "stored", records every write, and fails when told to.
 const UNKNOWN: StoredHealth = { health: null, problem: null, present: false };
+
+// A provider that was HEALTHY when the previous holder stopped: restored as
+// DEGRADED with a fresh 60 s, the usual state of a working authority.
+function storedHealthy(): StoredHealth {
+	return {
+		health: {
+			state: 'HEALTHY',
+			stateSinceMs: 1,
+			lastSuccessMs: 1,
+			lastFailureMs: null,
+			consecutiveFailures: 0,
+			lastError: null,
+			successStreakSinceMs: null,
+			pausedUntilMs: null,
+			creditsRemaining: null,
+			lastProbeMs: null,
+		},
+		problem: null,
+		present: true,
+	};
+}
 
 class FakeHealthStore {
 	snapshot: AcquisitionSnapshot = {
@@ -105,7 +158,19 @@ class FakeHealthStore {
 	}
 }
 
+// An OpenSky response that validated, with its mapped messages.
+function osOk(credits: number | null, aircraft = 0): OpenskyFetchResult {
+	return {
+		kind: 'ok',
+		messages: Array.from({ length: aircraft }, (_, i) => ({ key: `os${i}`, value: '{}' })),
+		responseTime: 1790371086,
+		creditsRemaining: credits,
+	};
+}
+
 const DEGRADED_MS = 60_000;
+const STANDBY_MS = 10_000;
+const OPENSKY_ACTIVE_MS = 25_000;
 const RECOVERY_MS = 120_000;
 const RENEWAL_MS = 5_000;
 const FOLLOWER_RETRY_MS = 5_000;
@@ -131,7 +196,10 @@ let lease: FakeLease;
 let timeline: FakeTimeline;
 let healthStore: FakeHealthStore;
 let events: string[];
+// Every log line with its fields, for assertions on plans and epochs.
+let logs: { message: string; extra: Record<string, unknown> }[];
 let fetchCycle: ReturnType<typeof vi.fn<() => Promise<SplitResult | AdsbfiFetchFailure>>>;
+let fetchOpenskyMock: ReturnType<typeof vi.fn<() => Promise<OpenskyFetchResult>>>;
 let publish: ReturnType<typeof vi.fn<CoordinatorDeps['publish']>>;
 let coordinator: Coordinator;
 
@@ -141,10 +209,15 @@ beforeEach(() => {
 	timeline = new FakeTimeline();
 	healthStore = new FakeHealthStore();
 	events = [];
+	logs = [];
 	providerNow = 1790283486000;
 	fetchCycle = vi.fn(async () => {
 		events.push('fetch');
 		return split();
+	});
+	fetchOpenskyMock = vi.fn(async () => {
+		events.push('opensky:fetch');
+		return osOk(null);
 	});
 	publish = vi.fn(async () => {
 		events.push('publish');
@@ -166,7 +239,8 @@ function build(overrides: Partial<CoordinatorDeps> = {}): Coordinator {
 		timeline,
 		health: healthStore,
 		fetchCycle,
-		checkOpensky: async () => ({ kind: 'ok', creditsRemaining: null }),
+		fetchOpensky: fetchOpenskyMock,
+		openskyAuthenticated: true,
 		healthTiming: { degradedTimeoutMs: DEGRADED_MS, recoveryWindowMs: RECOVERY_MS },
 		openskyCadence: {
 			healthyMs: 900_000,
@@ -176,13 +250,20 @@ function build(overrides: Partial<CoordinatorDeps> = {}): Coordinator {
 			backoffMaxMs: 900_000,
 		},
 		publish,
-		log: (_level, message) => events.push(message),
+		log: (_level, message, extra) => {
+			events.push(message);
+			logs.push({ message, extra: extra ?? {} });
+		},
 		renewalIntervalMs: RENEWAL_MS,
 		followerRetryMs: FOLLOWER_RETRY_MS,
 		pollIntervalMs: POLL_MS,
 		backoffBaseMs: POLL_MS,
 		backoffMaxMs: 60_000,
 		frozenFeedMs: FROZEN_MS,
+		adsbfiStandbyIntervalMs: STANDBY_MS,
+		openskyActiveIntervalMs: OPENSKY_ACTIVE_MS,
+		selectionRetryBaseMs: 60_000,
+		selectionRetryMaxMs: 900_000,
 		...overrides,
 	});
 }
@@ -350,6 +431,13 @@ describe('Coordinator', () => {
 });
 
 describe('Coordinator coverage timeline', () => {
+	// A working adsb.fi authority. With unknown health its first failure
+	// would mean UNAVAILABLE and relinquish authority (CP3e), which these
+	// coverage tests are not about.
+	beforeEach(() => {
+		healthStore.snapshot.stored.adsbfi = storedHealthy();
+	});
+
 	// Cycles run at t = 0, 2, 4 ... s after acquisition (POLL_MS apart).
 	async function runCycles(n: number): Promise<void> {
 		await vi.advanceTimersByTimeAsync(10 + (n - 1) * POLL_MS);
@@ -392,7 +480,7 @@ describe('Coordinator coverage timeline', () => {
 		coordinator.start();
 		await runCycles(2);
 		expect(timeline.credits).toEqual([publishedAt]);
-		expect(events.lastIndexOf('publish')).toBeLessThan(events.indexOf('credit'));
+		expect(events.lastIndexOf('publish')).toBeLessThan(events.indexOf('credit:adsbfi'));
 	});
 
 	it('credits a fresh cycle with zero messages without publishing', async () => {
@@ -434,7 +522,9 @@ describe('Coordinator coverage timeline', () => {
 		// is ever credited, so the closed segment's end cannot move.
 		await vi.advanceTimersByTimeAsync(120_000);
 		expect(timeline.closes.filter((r) => r === 'failure').length).toBeGreaterThan(1);
-		expect(timeline.credits).toEqual([]);
+		// Never credited for adsb.fi. (After 60 s frozen it is UNAVAILABLE and
+		// relinquishes; OpenSky then takes authority, which is CP3e failover.)
+		expect(timeline.creditProviders.filter((p) => p === 'adsbfi')).toEqual([]);
 		expect(publish).toHaveBeenCalledTimes(5);
 	});
 
@@ -453,7 +543,8 @@ describe('Coordinator coverage timeline', () => {
 			return { error: 'timeout' };
 		});
 		coordinator.start();
-		await vi.advanceTimersByTimeAsync(60_000);
+		// Stops before the 60 s deadline, after which authority would move.
+		await vi.advanceTimersByTimeAsync(50_000);
 		const failures = timeline.closes.filter((r) => r === 'failure').length;
 		expect(failures).toBe(fetchCycle.mock.calls.length);
 		expect(failures).toBeGreaterThan(1);
@@ -601,13 +692,13 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
 	});
 
-	it('true first deployment: HEALTHY on the first valid response, even if the publish then fails', async () => {
+	it('true first deployment: HEALTHY on the first valid response, and no authority from CREDIT', async () => {
 		healthStore.snapshot = {
 			authorityInitialized: false,
 			authorityProvider: null,
 			stored: { adsbfi: UNKNOWN, opensky: UNKNOWN },
 		};
-		publish.mockRejectedValueOnce(new Error('broker unavailable'));
+		fetchOpenskyMock.mockImplementation(async () => ({ kind: 'failed', error: 'http_503' }));
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(10);
 		expect(healthStore.last('adsbfi')).toMatchObject({
@@ -615,9 +706,12 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 			consecutiveFailures: 0,
 			lastFailureMs: null,
 		});
-		// Authority was not bootstrapped: the cycle failed at publish.
+		// The first response only seeds freshness: no publish, no commit, and
+		// CREDIT is never asked to bootstrap authority.
+		expect(publish).not.toHaveBeenCalled();
 		expect(timeline.credits).toEqual([]);
-		expect(timeline.closes).toContain('failure');
+		expect(timeline.commits).toEqual([]);
+		expect(coordinator.authority).toBe('none');
 	});
 
 	it('a Kafka failure after a provider success adds no health failure', async () => {
@@ -635,6 +729,7 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 	});
 
 	it('seeded and unconfirmed responses are health successes; a frozen feed is a failure', async () => {
+		healthStore.snapshot.stored.adsbfi = stored({ state: 'HEALTHY' });
 		fetchCycle.mockImplementation(async () => {
 			events.push('fetch');
 			return split(1, 1790283486000); // `now` never advances
@@ -740,35 +835,35 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
 	});
 
-	it('an UNAVAILABLE adsb.fi stays authoritative: it keeps polling, publishing and crediting', async () => {
+	it('a stored authority restored UNAVAILABLE is relinquished before any adsb.fi active cycle', async () => {
 		healthStore.snapshot.stored.adsbfi = stored({ state: 'UNAVAILABLE' });
+		fetchOpenskyMock.mockImplementation(async () => ({ kind: 'failed', error: 'http_503' }));
 		coordinator.start();
-		await vi.advanceTimersByTimeAsync(10 + POLL_MS * 3);
-		expect(publish).toHaveBeenCalledTimes(4);
-		expect(timeline.credits.length).toBe(3); // the first cycle only seeds freshness
-		expect(timeline.closes).toEqual(['coordinator_down']);
-		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
+		await vi.advanceTimersByTimeAsync(10);
+		expect(timeline.relinquishes).toEqual(['adsbfi']);
+		expect(events.indexOf('relinquish:adsbfi')).toBeLessThan(events.indexOf('fetch'));
+		// Its emergency attempt only seeds freshness; nothing is published.
+		expect(publish).not.toHaveBeenCalled();
+		expect(timeline.creditProviders).toEqual([]);
+		expect(coordinator.authority).toBe('none');
 	});
 
 	it.each([
 		['a refused health write', 'lease_mismatch' as const],
 		['a health write that times out', new Error('Command timed out')],
 	])('%s fails closed: no more requests or checks', async (_label, writeResult) => {
-		const checkOpensky = vi.fn(async (): Promise<OpenskyCheckResult> => ({
-			kind: 'ok',
-			creditsRemaining: 399,
-		}));
-		coordinator = build({ checkOpensky });
+		const fetchOpensky = vi.fn(async (): Promise<OpenskyFetchResult> => osOk(399));
+		coordinator = build({ fetchOpensky });
 		lease.acquireResult = false; // stays a follower after losing the lease
 		healthStore.writeResult = writeResult;
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(10);
 		expect(coordinator.isLeader).toBe(false);
 		const fetches = fetchCycle.mock.calls.length;
-		const checks = checkOpensky.mock.calls.length;
+		const checks = fetchOpensky.mock.calls.length;
 		await vi.advanceTimersByTimeAsync(10 * 60_000);
 		expect(fetchCycle).toHaveBeenCalledTimes(fetches);
-		expect(checkOpensky).toHaveBeenCalledTimes(checks);
+		expect(fetchOpensky).toHaveBeenCalledTimes(checks);
 		expect(publish).not.toHaveBeenCalled();
 	});
 
@@ -782,22 +877,22 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 	});
 
 	describe('OpenSky standby checks', () => {
-		let checkOpensky: ReturnType<typeof vi.fn<() => Promise<OpenskyCheckResult>>>;
+		let fetchOpensky: ReturnType<typeof vi.fn<() => Promise<OpenskyFetchResult>>>;
 		const openskyWrites = () => healthStore.writes.filter((w) => w.provider === 'opensky');
 
 		beforeEach(() => {
 			fetchCycle.mockImplementation(hang); // keep adsb.fi out of the way
-			checkOpensky = vi.fn(async (): Promise<OpenskyCheckResult> => {
+			fetchOpensky = vi.fn(async (): Promise<OpenskyFetchResult> => {
 				events.push('opensky:check');
-				return { kind: 'ok', creditsRemaining: 399 };
+				return osOk(399);
 			});
-			coordinator = build({ checkOpensky });
+			coordinator = build({ fetchOpensky });
 		});
 
 		it('never publish, credit or close coverage', async () => {
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(20 * 60_000);
-			expect(checkOpensky.mock.calls.length).toBeGreaterThan(3);
+			expect(fetchOpensky.mock.calls.length).toBeGreaterThan(3);
 			expect(publish).not.toHaveBeenCalled();
 			expect(timeline.credits).toEqual([]);
 			expect(timeline.closes).toEqual(['coordinator_down']);
@@ -806,7 +901,7 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		it('unknown checks at once, recovers at 25 s, then drops to 15 min once HEALTHY', async () => {
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(10);
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 			expect(healthStore.last('opensky')).toMatchObject({
 				state: 'RECOVERING',
 				creditsRemaining: 399,
@@ -817,27 +912,27 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 			expect(healthStore.last('opensky')?.state).toBe('RECOVERING');
 			await vi.advanceTimersByTimeAsync(25_000);
 			expect(healthStore.last('opensky')?.state).toBe('HEALTHY');
-			const atHealthy = checkOpensky.mock.calls.length;
+			const atHealthy = fetchOpensky.mock.calls.length;
 			expect(atHealthy).toBe(6);
 			// HEALTHY was reached by the check at 125 s, now 20 s ago: the next
 			// check is 15 min after that one.
 			await vi.advanceTimersByTimeAsync(900_000 - 20_000 - 1_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(atHealthy);
+			expect(fetchOpensky).toHaveBeenCalledTimes(atHealthy);
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(atHealthy + 1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(atHealthy + 1);
 		});
 
 		it('a 429 with a retry time pauses: no check until paused_until_ms, then one at once', async () => {
-			checkOpensky.mockResolvedValueOnce({ kind: 'rate_limited', retryAfterSeconds: 3_600 });
+			fetchOpensky.mockResolvedValueOnce({ kind: 'rate_limited', retryAfterSeconds: 3_600 });
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(10);
 			const paused = healthStore.last('opensky')!;
 			expect(paused).toMatchObject({ state: 'UNAVAILABLE', lastError: 'rate_limited' });
 			expect(paused.pausedUntilMs).toBe(paused.lastProbeMs! + 3_600_000);
 			await vi.advanceTimersByTimeAsync(3_600_000 - 100);
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 			await vi.advanceTimersByTimeAsync(200);
-			expect(checkOpensky).toHaveBeenCalledTimes(2);
+			expect(fetchOpensky).toHaveBeenCalledTimes(2);
 			expect(healthStore.last('opensky')).toMatchObject({
 				state: 'RECOVERING',
 				pausedUntilMs: null,
@@ -847,30 +942,30 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		it('a 429 without a retry time is an ordinary failure, rechecked in 30 s while DEGRADED', async () => {
 			// A 25 s recovery window gets OpenSky to HEALTHY on its second check.
 			coordinator = build({
-				checkOpensky,
+				fetchOpensky,
 				healthTiming: { degradedTimeoutMs: DEGRADED_MS, recoveryWindowMs: 25_000 },
 			});
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(10 + 25_000);
 			expect(healthStore.last('opensky')?.state).toBe('HEALTHY');
-			checkOpensky.mockResolvedValueOnce({ kind: 'rate_limited', retryAfterSeconds: null });
+			fetchOpensky.mockResolvedValueOnce({ kind: 'rate_limited', retryAfterSeconds: null });
 			await vi.advanceTimersByTimeAsync(900_000); // the next HEALTHY check fails
 			expect(healthStore.last('opensky')).toMatchObject({
 				state: 'DEGRADED',
 				lastError: 'rate_limited',
 				pausedUntilMs: null,
 			});
-			const failedAt = checkOpensky.mock.calls.length;
+			const failedAt = fetchOpensky.mock.calls.length;
 			await vi.advanceTimersByTimeAsync(29_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(failedAt);
+			expect(fetchOpensky).toHaveBeenCalledTimes(failedAt);
 			await vi.advanceTimersByTimeAsync(1_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(failedAt + 1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(failedAt + 1);
 			// The 30 s recheck lands inside the 60 s window: straight back to HEALTHY.
 			expect(healthStore.last('opensky')?.state).toBe('HEALTHY');
 		});
 
 		it('a token failure is a health failure with its own class, and stamps last_probe_ms', async () => {
-			checkOpensky.mockResolvedValueOnce({
+			fetchOpensky.mockResolvedValueOnce({
 				kind: 'failed',
 				error: 'auth: OpenSky token request failed: HTTP 401',
 			});
@@ -885,8 +980,8 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		});
 
 		it('keeps the last known credits when a response has no usable header', async () => {
-			checkOpensky.mockResolvedValueOnce({ kind: 'ok', creditsRemaining: 250 });
-			checkOpensky.mockResolvedValueOnce({ kind: 'ok', creditsRemaining: null });
+			fetchOpensky.mockResolvedValueOnce(osOk(250));
+			fetchOpensky.mockResolvedValueOnce(osOk(null));
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(10 + 25_000);
 			expect(openskyWrites().map((w) => w.health.creditsRemaining)).toEqual([250, 250]);
@@ -897,10 +992,10 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 			healthStore.snapshot.stored.opensky = stored({ state: 'UNAVAILABLE', pausedUntilMs });
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(3_600_000 - 1_000);
-			expect(checkOpensky).not.toHaveBeenCalled();
+			expect(fetchOpensky).not.toHaveBeenCalled();
 			expect(openskyWrites()).toEqual([]); // unchanged by restore: nothing to write
 			await vi.advanceTimersByTimeAsync(2_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 		});
 
 		it('clears an expired pause in the restore write and checks at once', async () => {
@@ -914,16 +1009,16 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 				state: 'UNAVAILABLE',
 				pausedUntilMs: null,
 			});
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 		});
 
 		it('restarts an unpaused UNAVAILABLE backoff at 60 s after acquisition', async () => {
 			healthStore.snapshot.stored.opensky = stored({ state: 'UNAVAILABLE' });
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(60_000 - 100);
-			expect(checkOpensky).not.toHaveBeenCalled();
+			expect(fetchOpensky).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(200);
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 		});
 
 		it('restores RECOVERING as UNAVAILABLE, losing the streak', async () => {
@@ -942,8 +1037,8 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		it('stops checking on shutdown, after the in-flight check finishes', async () => {
 			fetchCycle.mockImplementation(async () => split()); // shutdown waits for an adsb.fi cycle too
 			let finishCheck!: () => void;
-			checkOpensky.mockImplementationOnce(
-				() => new Promise((r) => (finishCheck = () => r({ kind: 'ok', creditsRemaining: 1 }))),
+			fetchOpensky.mockImplementationOnce(
+				() => new Promise((r) => (finishCheck = () => r(osOk(1)))),
 			);
 			coordinator.start();
 			await vi.advanceTimersByTimeAsync(10);
@@ -954,7 +1049,431 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 			await done;
 			expect(lease.releases).toBe(1);
 			await vi.advanceTimersByTimeAsync(30 * 60_000);
-			expect(checkOpensky).toHaveBeenCalledTimes(1);
+			expect(fetchOpensky).toHaveBeenCalledTimes(1);
 		});
+	});
+});
+
+describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
+	const hang = () => new Promise<never>(() => {});
+	// Health stored by the previous holder, recent enough not to be stale.
+	const recent = (
+		state: ProviderHealth['state'],
+		o: Partial<ProviderHealth> = {},
+	): StoredHealth => ({
+		health: {
+			state,
+			stateSinceMs: Date.now() - 1_000,
+			lastSuccessMs: Date.now() - 500,
+			lastFailureMs: null,
+			consecutiveFailures: 0,
+			lastError: null,
+			successStreakSinceMs: state === 'RECOVERING' ? Date.now() - 1_000 : null,
+			pausedUntilMs: null,
+			creditsRemaining: null,
+			lastProbeMs: Date.now() - 500,
+			...o,
+		},
+		problem: null,
+		present: true,
+	});
+	const authorityIs = (provider: string) => {
+		healthStore.snapshot.authorityInitialized = true;
+		healthStore.snapshot.authorityProvider = provider;
+	};
+	const plans = () =>
+		logs.filter((l) => l.message === 'selection round').map((l) => l.extra['plan'] as string[]);
+	const committed = () =>
+		logs.filter((l) => l.message === 'authority committed').map((l) => l.extra);
+	const opensky = (result: () => OpenskyFetchResult) =>
+		fetchOpenskyMock.mockImplementation(async () => {
+			events.push('opensky:fetch');
+			return result();
+		});
+	const adsbfiFails = () =>
+		fetchCycle.mockImplementation(async () => {
+			events.push('fetch');
+			return { error: 'timeout' };
+		});
+
+	it('a DEGRADED authority keeps authority until its 60 s deadline', async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(59_000);
+		expect(timeline.relinquishes).toEqual([]);
+		expect(coordinator.authority).toBe('adsbfi');
+	});
+
+	it('an UNAVAILABLE authority is relinquished to none and its active cycles stop', async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(61_000);
+		expect(timeline.relinquishes).toEqual(['adsbfi']);
+		expect(coordinator.authority).toBe('none');
+		expect(plans()[0]).toEqual(['adsbfi:tier2:one_shot', 'opensky:tier2:one_shot']);
+		// No longer every 2 s: adsb.fi is now asked at its standby rate.
+		const before = fetchCycle.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(20_000);
+		expect(fetchCycle.mock.calls.length - before).toBeLessThanOrEqual(2);
+		expect(publish).not.toHaveBeenCalled();
+	});
+
+	it('a stored none enters selection; a new acquisition seeds freshness, so the first response cannot commit', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		// Stored HEALTHY restores as DEGRADED (downtime proves nothing): tier 2.
+		expect(plans()[0]).toEqual(['adsbfi:tier2', 'opensky:tier2:one_shot']);
+		expect(events).toContain('adsb.fi candidate not delivered: freshness not confirmed');
+		expect(timeline.commits).toEqual([]);
+		// The next request, at the standby rate, is fresh and commits.
+		await vi.advanceTimersByTimeAsync(STANDBY_MS);
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
+		expect(coordinator.authority).toBe('adsbfi');
+		expect(publish).toHaveBeenCalledTimes(1);
+	});
+
+	it('an OpenSky candidate records health, then publishes, then commits: epoch +1 once', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 3));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		const health = events.indexOf('health:opensky:HEALTHY');
+		const pub = events.indexOf('publish');
+		const commit = events.indexOf('commit:opensky');
+		expect(health).toBeGreaterThanOrEqual(0);
+		expect(health).toBeLessThan(pub);
+		expect(pub).toBeLessThan(commit);
+		expect(committed()).toEqual([expect.objectContaining({ provider: 'opensky', epoch: 2 })]);
+		expect(coordinator.authority).toBe('opensky');
+	});
+
+	it('a valid zero-aircraft OpenSky response commits without a publish call', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 0));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(publish).not.toHaveBeenCalled();
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['opensky']);
+	});
+
+	it('a Kafka failure keeps health success and authority none, and retries without re-arming one-shots', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 2));
+		publish.mockRejectedValue(new Error('broker unavailable'));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(coordinator.authority).toBe('none');
+		expect(timeline.commits).toEqual([]);
+		expect(healthStore.last('opensky')).toMatchObject({
+			state: 'HEALTHY',
+			consecutiveFailures: 0,
+			lastFailureMs: null,
+		});
+		expect(logs.find((l) => l.message === 'selection retry scheduled')?.extra).toMatchObject({
+			reason: 'publish_failed',
+			retry_in_ms: 60_000,
+		});
+		// The retry round: adsb.fi's emergency one-shot is not offered again.
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(plans()).toEqual([['adsbfi:tier2:one_shot', 'opensky:tier2'], ['opensky:tier1']]);
+		// Still failing: the next retry doubles.
+		expect(
+			logs
+				.filter((l) => l.message === 'selection retry scheduled')
+				.map((l) => l.extra['retry_in_ms']),
+		).toEqual([60_000, 120_000]);
+	});
+
+	it('after its one-shot, a provider is still a candidate at its own rate', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		fetchCycle.mockImplementationOnce(async () => ({ error: 'timeout' })); // the one-shot fails
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(timeline.commits).toEqual([]);
+		// Its next requests at the standby rate: one seeds, the next commits.
+		await vi.advanceTimersByTimeAsync(2 * STANDBY_MS + 1_000);
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
+		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
+	});
+
+	it('a commit refused for its time keeps authority none, adds no health failure, and a later retry commits', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 1));
+		timeline.commitResults = [{ status: 'stale_clock' }];
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(coordinator.authority).toBe('none');
+		expect(events).toContain('authority commit refused: time is not after the last success');
+		expect(logs.find((l) => l.message === 'selection retry scheduled')?.extra['reason']).toBe(
+			'stale_clock',
+		);
+		expect(healthStore.last('opensky')?.lastFailureMs).toBeNull();
+		expect(coordinator.isLeader).toBe(true);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['opensky']);
+		expect(coordinator.authority).toBe('opensky');
+	});
+
+	it('a commit whose result is unknown fails closed', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 1));
+		timeline.commitResults = [new Error('Command timed out')];
+		lease.acquireResult = false;
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(coordinator.isLeader).toBe(false);
+	});
+
+	it('a paused OpenSky is not selected, and not asked, until its pause ends', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		healthStore.snapshot.stored.opensky = recent('UNAVAILABLE', {
+			pausedUntilMs: Date.now() + 3_600_000,
+			lastError: 'rate_limited',
+		});
+		adsbfiFails();
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(3_600_000 - 1_000);
+		expect(plans()[0]).toEqual(['adsbfi:tier2:one_shot']);
+		expect(fetchOpenskyMock).not.toHaveBeenCalled();
+	});
+
+	it('a stale HEALTHY provider is a tier-2 one-shot, and its success is RECOVERING', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY', {
+			lastSuccessMs: Date.now() - 3_600_000,
+			lastProbeMs: null,
+		});
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		// Both restore as DEGRADED; adsb.fi's staleness makes it a one-shot.
+		expect(plans()[0]).toEqual(['adsbfi:tier2:one_shot', 'opensky:tier2']);
+		expect(healthStore.last('adsbfi')).toMatchObject({ state: 'RECOVERING' });
+		expect(healthStore.last('adsbfi')?.successStreakSinceMs).toBe(
+			healthStore.last('adsbfi')?.lastSuccessMs,
+		);
+	});
+
+	it('OpenSky authoritative: one request per active cycle, adsb.fi standby never publishes, and no failback', async () => {
+		authorityIs('opensky');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 2));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		// Active cycles every 25 s after the last one finished: no separate
+		// OpenSky check ever runs alongside them.
+		const calls = fetchOpenskyMock.mock.calls.length;
+		expect(calls).toBeGreaterThanOrEqual(24);
+		expect(calls).toBeLessThanOrEqual(25);
+		// adsb.fi was asked at its standby rate, is HEALTHY, and never took over.
+		expect(fetchCycle.mock.calls.length).toBeGreaterThanOrEqual(55);
+		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
+		expect(timeline.commits).toEqual([]);
+		expect(timeline.relinquishes).toEqual([]);
+		expect(new Set(timeline.creditProviders)).toEqual(new Set(['opensky']));
+		for (const [messages] of publish.mock.calls) {
+			expect(messages.every((m) => m.key.startsWith('os'))).toBe(true);
+		}
+	});
+
+	it('an OpenSky health success never commits while adsb.fi holds authority', async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 2));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(20 * 60_000);
+		expect(fetchOpenskyMock.mock.calls.length).toBeGreaterThan(1);
+		expect(timeline.commits).toEqual([]);
+		expect(new Set(timeline.creditProviders)).toEqual(new Set(['adsbfi']));
+	});
+
+	it('an OpenSky 429 while authoritative pauses it and relinquishes at once; a warm adsb.fi then commits', async () => {
+		authorityIs('opensky');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		opensky(() => osOk(398, 2));
+		coordinator.start();
+		// adsb.fi standby checks at 0, 10, 20 s warm the freshness tracker.
+		await vi.advanceTimersByTimeAsync(24_000);
+		opensky(() => ({ kind: 'rate_limited', retryAfterSeconds: 3_600 }));
+		await vi.advanceTimersByTimeAsync(2_000); // the 25 s active cycle gets the 429
+		expect(timeline.relinquishes).toEqual(['opensky']);
+		expect(healthStore.last('opensky')?.pausedUntilMs).not.toBeNull();
+		// The round's first adsb.fi request is already fresh: it commits at once.
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
+		const openskyCalls = fetchOpenskyMock.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		expect(fetchOpenskyMock.mock.calls.length).toBe(openskyCalls); // paused
+	});
+
+	it('OpenSky failing past its deadline: none, then a HEALTHY adsb.fi commits (recovery, not failback)', async () => {
+		authorityIs('opensky');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(30_000);
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		await vi.advanceTimersByTimeAsync(100_000);
+		expect(timeline.relinquishes).toEqual(['opensky']);
+		expect(plans()[0]?.[0]).toBe('adsbfi:tier1');
+		expect(committed().map((c) => [c['provider'], c['epoch']])).toEqual([['adsbfi', 2]]);
+		expect(coordinator.authority).toBe('adsbfi');
+	});
+
+	it('candidates never publish at once: a second candidate waits for the first', async () => {
+		authorityIs('none');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		// OpenSky fails its round attempt, then answers from its own cadence.
+		fetchOpenskyMock
+			.mockImplementationOnce(async () => ({ kind: 'failed', error: 'http_503' }))
+			.mockImplementation(async () => osOk(398, 1));
+		let inFlight = 0;
+		let maxInFlight = 0;
+		let release!: () => void;
+		publish.mockImplementation(async () => {
+			inFlight++;
+			maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise<void>((r) => (release = r));
+			inFlight--;
+			return '0';
+		});
+		coordinator.start();
+		// adsb.fi seeds, then its fresh request at 10 s publishes and hangs;
+		// OpenSky's next request (30 s, DEGRADED) must wait behind it.
+		await vi.advanceTimersByTimeAsync(40_000);
+		expect(inFlight).toBe(1);
+		expect(fetchOpenskyMock).toHaveBeenCalledTimes(1);
+		release();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(maxInFlight).toBe(1);
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
+	});
+
+	it("a relinquished provider's send already in flight settles before a candidate publishes", async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		opensky(() => osOk(398, 1));
+		const order: string[] = [];
+		let releaseOld!: () => void;
+		publish.mockImplementation(async (messages) => {
+			const who = messages[0]!.key.startsWith('os') ? 'opensky' : 'adsbfi';
+			order.push(`${who}:start`);
+			if (who === 'adsbfi') await new Promise<void>((r) => (releaseOld = r));
+			order.push(`${who}:end`);
+			return '0';
+		});
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10); // adsb.fi's first cycle is publishing
+		expect(order).toEqual(['adsbfi:start']);
+		adsbfiFails(); // so the round's candidate is OpenSky
+		// Artificially relinquish while that send is in flight.
+		const c = coordinator as unknown as {
+			relinquish(p: string, t: string, term: number): Promise<void>;
+		};
+		await c.relinquish('adsbfi', lease.token!, 1);
+		// The round's adsb.fi attempt waits behind adsb.fi's own stuck cycle,
+		// but OpenSky's own next request (30 s, DEGRADED) does not: it becomes
+		// a candidate, fetches and records health, and then must wait for the
+		// old send before publishing.
+		await vi.advanceTimersByTimeAsync(31_000);
+		expect(fetchOpenskyMock).toHaveBeenCalled();
+		expect(order).toEqual(['adsbfi:start']);
+		releaseOld();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(order).toEqual(['adsbfi:start', 'adsbfi:end', 'opensky:start', 'opensky:end']);
+		expect(timeline.commits.map((c2) => c2.provider)).toEqual(['opensky']);
+		// The old cycle's credit after authority moved is benign.
+		expect(coordinator.isLeader).toBe(true);
+	});
+
+	it('an active cycle that has not reached its publish drops out after a relinquish', async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => ({ kind: 'failed', error: 'http_503' }));
+		let resolveFetch!: (v: SplitResult) => void;
+		fetchCycle.mockImplementationOnce(
+			() => new Promise<SplitResult>((resolve) => (resolveFetch = resolve)),
+		);
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		const c = coordinator as unknown as {
+			relinquish(p: string, t: string, term: number): Promise<void>;
+		};
+		await c.relinquish('adsbfi', lease.token!, 1);
+		resolveFetch(split(2));
+		await vi.advanceTimersByTimeAsync(10);
+		expect(events).toContain('adsb.fi cycle dropped: authority changed before publishing');
+		// The dropped cycle's two positions were never published. (A later
+		// candidate may publish its own delivery.)
+		expect(publish.mock.calls.some(([m]) => m.length === 2)).toBe(false);
+	});
+
+	it('CREDIT reporting another authority while this provider is believed authoritative fails closed', async () => {
+		authorityIs('adsbfi');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		timeline.creditResult = { status: 'authority_changed', authority: 'opensky' };
+		lease.acquireResult = false;
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10 + POLL_MS); // seed, then a fresh cycle credits
+		expect(coordinator.isLeader).toBe(false);
+	});
+
+	it('warns when OpenSky becomes authoritative without credentials', async () => {
+		coordinator = build({ openskyAuthenticated: false });
+		authorityIs('none');
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		adsbfiFails();
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(events).toContain(
+			'opensky authoritative without credentials: the anonymous budget will run out',
+		);
+	});
+
+	it('a timeline that never had an authority is none in memory: OpenSky may make the first commit', async () => {
+		healthStore.snapshot = {
+			authorityInitialized: false,
+			authorityProvider: null,
+			stored: { adsbfi: UNKNOWN, opensky: UNKNOWN },
+		};
+		adsbfiFails();
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(timeline.relinquishes).toEqual([]); // nothing is written for virgin none
+		expect(timeline.commits.map((c) => c.provider)).toEqual(['opensky']);
+		// OpenSky's health follows the unknown rule: RECOVERING, not HEALTHY.
+		expect(healthStore.last('opensky')?.state).toBe('RECOVERING');
 	});
 });

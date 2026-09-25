@@ -203,7 +203,8 @@ describe('Coordinator against real Redis', () => {
 				}),
 				write: async () => 'written' as const,
 			},
-			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			fetchOpensky: async () => ({ kind: 'failed' as const, error: 'http_503' }),
+			openskyAuthenticated: true,
 			healthTiming: { degradedTimeoutMs: 60_000, recoveryWindowMs: 120_000 },
 			openskyCadence: {
 				healthyMs: 900_000,
@@ -219,6 +220,8 @@ describe('Coordinator against real Redis', () => {
 			timeline: {
 				credit: async () => ({ status: 'extended', timelineVersion: 1 }),
 				close: async () => ({ status: 'already_closed' }),
+				commit: async () => ({ status: 'committed', epoch: 1, timelineVersion: 1 }),
+				relinquish: async () => ({ status: 'relinquished', timelineVersion: 1, member: null }),
 			},
 			fetchCycle: async (): Promise<SplitResult> => ({
 				messages: [{ key: 'abc123', value: '{}' }],
@@ -239,6 +242,10 @@ describe('Coordinator against real Redis', () => {
 			backoffBaseMs: 50,
 			backoffMaxMs: 50,
 			frozenFeedMs: 10_000,
+			adsbfiStandbyIntervalMs: 30,
+			openskyActiveIntervalMs: 25_000,
+			selectionRetryBaseMs: 60_000,
+			selectionRetryMaxMs: 900_000,
 		});
 
 		try {
@@ -300,6 +307,8 @@ describe('Coordinator against real Redis', () => {
 			return renew();
 		};
 		const timeline = new CoverageTimeline(leaseClient, 60_000, leaseKey, authorityKey, coverageKey);
+		// An existing adsb.fi authority, as the fake health store reports it.
+		await redis.hset(authorityKey, 'provider', 'adsbfi', 'epoch', '1', 'timeline_version', '1');
 		const credits: number[] = [];
 		const messages: string[] = [];
 		let published = 0;
@@ -319,7 +328,8 @@ describe('Coordinator against real Redis', () => {
 				}),
 				write: async () => 'written' as const,
 			},
-			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			fetchOpensky: async () => ({ kind: 'failed' as const, error: 'http_503' }),
+			openskyAuthenticated: true,
 			healthTiming: { degradedTimeoutMs: 60_000, recoveryWindowMs: 120_000 },
 			openskyCadence: {
 				healthyMs: 900_000,
@@ -329,11 +339,13 @@ describe('Coordinator against real Redis', () => {
 				backoffMaxMs: 900_000,
 			},
 			timeline: {
-				credit: (token, activeSuccessMs) => {
+				credit: (token, provider, activeSuccessMs) => {
 					credits.push(activeSuccessMs);
-					return timeline.credit(token, activeSuccessMs);
+					return timeline.credit(token, provider, activeSuccessMs);
 				},
 				close: (token, reason, nowMs) => timeline.close(token, reason, nowMs),
+				commit: (token, provider, atMs) => timeline.commit(token, provider, atMs),
+				relinquish: (token, expected, nowMs) => timeline.relinquish(token, expected, nowMs),
 			},
 			fetchCycle: async (): Promise<SplitResult> => ({
 				messages: [{ key: 'abc123', value: '{}' }],
@@ -354,6 +366,10 @@ describe('Coordinator against real Redis', () => {
 			backoffBaseMs: 50,
 			backoffMaxMs: 50,
 			frozenFeedMs: 10_000,
+			adsbfiStandbyIntervalMs: 30,
+			openskyActiveIntervalMs: 25_000,
+			selectionRetryBaseMs: 60_000,
+			selectionRetryMaxMs: 900_000,
 		});
 
 		try {

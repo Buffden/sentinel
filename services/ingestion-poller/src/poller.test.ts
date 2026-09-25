@@ -12,7 +12,7 @@ import {
 	planNextPoll,
 	projectDailyBudget,
 	rateLimitLogLine,
-	checkOpenskyHealth,
+	fetchOpenskyCycle,
 	validateOpenskyBody,
 } from './poller.js';
 
@@ -406,7 +406,7 @@ describe('validateOpenskyBody (ADR-022 section 3)', () => {
 	});
 });
 
-describe('checkOpenskyHealth: fetch and validate only', () => {
+describe('fetchOpenskyCycle: fetch, validate and map, never publish', () => {
 	const anonymous = async () => null;
 	const respond =
 		(status: number, body: unknown, headers: Record<string, string> = {}) =>
@@ -419,25 +419,66 @@ describe('checkOpenskyHealth: fetch and validate only', () => {
 			{ time: 1790365527, states: null },
 			{ 'x-rate-limit-remaining': '399' },
 		);
-		expect(await checkOpenskyHealth(anonymous, withCredits as typeof fetch)).toEqual({
+		expect(await fetchOpenskyCycle(anonymous, withCredits as typeof fetch)).toEqual({
 			kind: 'ok',
+			messages: [],
+			responseTime: 1790365527,
 			creditsRemaining: 399,
 		});
 		const without = respond(200, { time: 1790365527, states: [] });
-		expect(await checkOpenskyHealth(anonymous, without as typeof fetch)).toEqual({
+		expect(await fetchOpenskyCycle(anonymous, without as typeof fetch)).toEqual({
 			kind: 'ok',
+			messages: [],
+			responseTime: 1790365527,
 			creditsRemaining: null,
 		});
+	});
+
+	it('maps each state vector into the opensky envelope, keyed by ICAO24', async () => {
+		const vector = [
+			'ac34bf',
+			'SWA1932 ',
+			'United States',
+			1790371084,
+			1790371085,
+			-122.3,
+			37.6,
+			1500,
+			false,
+			120,
+			90,
+			0,
+			null,
+			1600,
+			'1234',
+			false,
+			0,
+			3,
+		];
+		const result = await fetchOpenskyCycle(
+			anonymous,
+			respond(200, { time: 1790371086, states: [vector] }) as typeof fetch,
+		);
+		expect(result.kind).toBe('ok');
+		if (result.kind !== 'ok') return;
+		expect(result.messages).toHaveLength(1);
+		expect(result.messages[0]!.key).toBe('ac34bf');
+		const envelope = JSON.parse(result.messages[0]!.value) as {
+			provider: string;
+			payload: { icao24: string };
+		};
+		expect(envelope.provider).toBe('opensky');
+		expect(envelope.payload.icao24).toBe('ac34bf');
 	});
 
 	it('a 429 carries its retry time, or null when the header is missing', async () => {
 		// The retry value captured in CP2's real 429.
 		const withRetry = respond(429, '', { 'x-rate-limit-retry-after-seconds': '31952' });
-		expect(await checkOpenskyHealth(anonymous, withRetry as typeof fetch)).toEqual({
+		expect(await fetchOpenskyCycle(anonymous, withRetry as typeof fetch)).toEqual({
 			kind: 'rate_limited',
 			retryAfterSeconds: 31952,
 		});
-		expect(await checkOpenskyHealth(anonymous, respond(429, '') as typeof fetch)).toEqual({
+		expect(await fetchOpenskyCycle(anonymous, respond(429, '') as typeof fetch)).toEqual({
 			kind: 'rate_limited',
 			retryAfterSeconds: null,
 		});
@@ -445,7 +486,7 @@ describe('checkOpenskyHealth: fetch and validate only', () => {
 
 	it('classifies status, validation, network and token failures', async () => {
 		const check = (fetchFn: unknown, getToken = anonymous) =>
-			checkOpenskyHealth(getToken, fetchFn as typeof fetch);
+			fetchOpenskyCycle(getToken, fetchFn as typeof fetch);
 		expect(await check(respond(503, ''))).toEqual({ kind: 'failed', error: 'http_503' });
 		expect(await check(respond(200, 'not json'))).toEqual({
 			kind: 'failed',

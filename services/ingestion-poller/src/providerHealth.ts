@@ -83,12 +83,15 @@ function emptyHealth(atMs: number): ProviderHealth {
 // One request outcome. `firstDeployment` is decided at lease acquisition (no
 // initialized authority and no health record for any provider). Only then
 // does a first success mean HEALTHY; otherwise unknown health must prove
-// itself through RECOVERING.
+// itself through RECOVERING. `stale` means the provider had not been asked
+// for longer than its check interval before this request (ADR-022 section
+// 4): whatever its stored state, a success then starts RECOVERING afresh,
+// and a failure is applied to the stored state as usual.
 export function applyEvidence(
 	current: ProviderHealth | null,
 	ev: HealthEvidence,
 	timing: TransitionTiming,
-	opts: { firstDeployment?: boolean } = {},
+	opts: { firstDeployment?: boolean; stale?: boolean } = {},
 ): ProviderHealth {
 	const at = ev.atMs;
 	const probe = ev.probe ? { lastProbeMs: at } : {};
@@ -112,6 +115,7 @@ export function applyEvidence(
 			);
 		}
 		const h = settleDeadline(current, at, timing);
+		if (opts.stale) return recorded(enter(h, 'RECOVERING', at, at));
 		switch (h.state) {
 			case 'HEALTHY':
 				return recorded(h);

@@ -1,37 +1,52 @@
-// Ingestion coordinator (ADR-022): the single process that will own live
-// provider authority.
+// Ingestion coordinator (ADR-022): the single process that owns live provider
+// authority.
 //
-// The coordinator polls adsb.fi and publishes to adsb.raw while it holds
-// {live-provider}:lease, and waits as a follower otherwise. After each
-// successful, fresh cycle it credits adsb.fi coverage in the Redis timeline
-// (coverageTimeline.ts). It also keeps adsb.fi and OpenSky health
-// (providerHealth.ts) and runs OpenSky standby checks, which never publish.
-// Nothing acts on health yet: failover is not here, so authority, once
-// committed, stays adsb.fi even while its health says UNAVAILABLE.
+// While it holds {live-provider}:lease the coordinator runs one request loop
+// per provider, adsb.fi and OpenSky, and waits as a follower otherwise. What
+// a request is for depends on authority at the moment it runs:
+//
+// - the authoritative provider's request is an active cycle: it publishes to
+//   adsb.raw and credits that provider's coverage;
+// - the other provider's request is a standby check: health only, never a
+//   publish, never a commit;
+// - while authority is none, a request is a candidate: health evidence, and,
+//   if the response qualifies, a delivery that publishes and then commits
+//   authority. Candidates run one at a time.
+//
+// Health drives authority in one direction only (ADR-022 section 4): when the
+// authoritative provider's health reaches UNAVAILABLE, authority is
+// relinquished to none, and a selection round tries eligible providers until
+// one commits. A working authority is never replaced here; failback from
+// OpenSky to adsb.fi is CP3f.
+//
+// Three things stay separate. Provider health describes the upstream
+// provider. Coverage describes successful authoritative delivery. Authority
+// decides who may publish.
 //
 // Health before Kafka: a request's outcome is recorded as soon as the
 // request and its validation finish, before publishing. A publish failure
 // afterwards fails the cycle and closes coverage, but adds no health failure.
 //
-// Kafka before Redis: a cycle fetches, validates, publishes every message,
-// and only then credits coverage. There is no transaction across the two, so
+// Kafka before Redis: a cycle publishes every message and only then credits
+// coverage or commits authority. There is no transaction across the two, so
 // a crash or Redis failure after a publish leaves delivered positions
 // uncredited. That can delay a signal loss, never cause a false one.
 //
-// Fail closed: a renewal that returns 0, errors or times out means ownership
-// can no longer be confirmed. The coordinator stops polling and publishing at
-// once, never deletes the key (it may already be a successor's), and goes
-// back to follower mode.
+// One publisher at a time: every publish goes through one queue, and each
+// re-checks authority when its turn comes. A send that has already started
+// cannot be recalled, so a candidate waits for it to settle before
+// publishing.
 //
-// Timeline writes fail closed the same way: a rejected token, an error or a
-// timeout drops the lease. Otherwise a failure close that did not land could
-// leave coverage open, and the next success would count the failure.
+// Fail closed: a renewal, health write or timeline write that is refused,
+// errors or times out means ownership can no longer be confirmed. The
+// coordinator stops at once, never deletes the key (it may already be a
+// successor's), and goes back to follower mode.
 //
-// The lease is not fencing. Leadership is re-checked between fetching a cycle
-// and publishing it, which narrows the window, but a Kafka send that has
-// already started cannot be recalled (ADR-022 section 8). The timeline scripts
-// check the token, so a stale coordinator can still publish but cannot write
-// coverage.
+// The lease is not fencing. Leadership is re-checked between fetching and
+// publishing, which narrows the window, but a Kafka send that has already
+// started cannot be recalled (ADR-022 section 8). The timeline scripts check
+// the token, so a stale coordinator can still publish but cannot write
+// authority or coverage.
 
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +64,7 @@ import {
 import { AdsbfiFreshness, type FreshnessVerdict } from './adsbfiFreshness.js';
 import { CoordinatorLease } from './coordinatorLease.js';
 import { CoverageTimeline, type CoverageCloseReason } from './coverageTimeline.js';
-import { checkOpenskyHealth, type OpenskyCheckResult } from './poller.js';
+import { fetchOpenskyCycle, openskyAuthenticated, type OpenskyFetchResult } from './poller.js';
 import {
 	applyEvidence,
 	expireDegraded,
@@ -62,6 +77,7 @@ import {
 	type TransitionTiming,
 } from './providerHealth.js';
 import { PROVIDERS, ProviderHealthStore } from './providerHealthStore.js';
+import { isStale, nextSelectionRetryMs, planSelectionRound } from './providerSelection.js';
 
 const TOPIC = 'adsb.raw';
 
@@ -70,9 +86,11 @@ type Lease = Pick<
 	'token' | 'tryAcquire' | 'renew' | 'release' | 'forget' | 'currentHolder'
 >;
 
-type Timeline = Pick<CoverageTimeline, 'credit' | 'close'>;
+type Timeline = Pick<CoverageTimeline, 'credit' | 'close' | 'commit' | 'relinquish'>;
 
 type HealthStore = Pick<ProviderHealthStore, 'readForAcquisition' | 'write'>;
+
+type Messages = SplitResult['messages'];
 
 export interface CoordinatorDeps {
 	lease: Lease;
@@ -80,25 +98,59 @@ export interface CoordinatorDeps {
 	health: HealthStore;
 	// One adsb.fi request: the split response, or the failure's last_error class.
 	fetchCycle: () => Promise<SplitResult | AdsbfiFetchFailure>;
-	// One OpenSky standby check. It never publishes, and it always runs while
-	// this coordinator holds the lease: CP3e will depend on OpenSky's health.
-	checkOpensky: () => Promise<OpenskyCheckResult>;
+	// One OpenSky request: mapped messages, or a failure or rate limit. It
+	// never publishes; the coordinator decides what the request is for.
+	fetchOpensky: () => Promise<OpenskyFetchResult>;
+	// Anonymous OpenSky access has a small daily budget: logged as a warning
+	// whenever OpenSky becomes authoritative without credentials.
+	openskyAuthenticated: boolean;
 	healthTiming: TransitionTiming;
 	openskyCadence: OpenskyCadence;
 	// Publishes one cycle's messages and returns the first offset.
-	publish: (messages: SplitResult['messages']) => Promise<string>;
+	publish: (messages: Messages) => Promise<string>;
 	log: Log;
 	renewalIntervalMs: number;
 	followerRetryMs: number;
+	// adsb.fi while authoritative, with the CP1 backoff after failures.
 	pollIntervalMs: number;
 	backoffBaseMs: number;
 	backoffMaxMs: number;
 	frozenFeedMs: number;
+	// adsb.fi while not authoritative, with the same backoff.
+	adsbfiStandbyIntervalMs: number;
+	// OpenSky while authoritative.
+	openskyActiveIntervalMs: number;
+	// Selection retry after a delivery failure while authority is none.
+	selectionRetryBaseMs: number;
+	selectionRetryMaxMs: number;
 }
 
-// How an active cycle ended. `lease_lost` means this acquisition can no
-// longer write: the next lease holder closes any open coverage.
-type CycleOutcome = 'success' | 'failure' | 'lease_lost';
+// Who holds authority, as this coordinator knows it. `none` also covers a
+// timeline that never had an authority: nothing is written for it, and the
+// first commit creates epoch 1.
+type Mode = Provider | 'none';
+
+type Role = 'active' | 'standby' | 'candidate';
+
+// What asked for a request. While a delivery retry is pending, only a round
+// may publish as a candidate.
+type Trigger = 'cadence' | 'round';
+
+interface RequestOutcome {
+	role: Role;
+	// The provider answered badly (health failure evidence).
+	providerFailed: boolean;
+	// An active cycle failed (including a publish failure).
+	cycleFailed: boolean;
+	committed: boolean;
+	leaseLost: boolean;
+}
+
+interface RestoredState {
+	authorityInitialized: boolean;
+	authorityProvider: string | null;
+	openskyDelayMs: number;
+}
 
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -109,28 +161,28 @@ function errorMessage(err: unknown): string {
 export class Coordinator {
 	private stopping = false;
 	private renewalActive = false;
-	private acquireTimer: ReturnType<typeof setTimeout> | null = null;
-	private renewTimer: ReturnType<typeof setTimeout> | null = null;
-	private pollTimer: ReturnType<typeof setTimeout> | null = null;
+	private acquireTimer: Timer | null = null;
+	private renewTimer: Timer | null = null;
 	private pendingAcquire: Promise<void> | null = null;
-	private inFlightCycle: Promise<void> | null = null;
-	private consecutiveFailures = 0;
 	private waitingLogged = false;
-	// Reset on every acquisition: a new lease holder must see adsb.fi's `now`
-	// advance before it credits coverage.
+	// One per acquisition, never reset by an authority change: standby checks
+	// keep it current, so adsb.fi can deliver on its first request after
+	// authority becomes none.
 	private freshness: AdsbfiFreshness;
 
-	// ---- Provider health, per acquisition ----
+	// ---- Per acquisition ----
 	// Incremented on every acquisition. Anything started under an older term
-	// (a late cycle, check or timer from a lost lease) sees the change and
-	// writes nothing, so it can never touch the new term's health.
+	// (a late request or timer from a lost lease) sees the change and writes
+	// nothing.
 	private term = 0;
+	private mode: Mode = 'none';
 	// Rebuilt from Redis at every acquisition; null is unknown health.
 	private health: Record<Provider, ProviderHealth | null> = { adsbfi: null, opensky: null };
 	// A true first deployment, decided at acquisition: no initialized authority
 	// and no health record. Only then may adsb.fi's first valid response mean
 	// HEALTHY straight away.
 	private firstDeployment = false;
+
 	// Health transitions for one provider run one at a time, so a request
 	// outcome and a deadline callback can never interleave.
 	private healthQueue: Record<Provider, Promise<unknown>> = {
@@ -138,10 +190,34 @@ export class Coordinator {
 		opensky: Promise.resolve(),
 	};
 	private deadlineTimers: Record<Provider, Timer | null> = { adsbfi: null, opensky: null };
-	private openskyTimer: Timer | null = null;
-	private inFlightCheck: Promise<void> | null = null;
-	// OpenSky checks failed in a row while UNAVAILABLE and not paused.
+
+	// Within one acquisition, requests to one provider run one at a time, and
+	// candidate requests across both providers run one at a time. Both queues
+	// start empty at every acquisition: work left from a lost lease is
+	// term-guarded and writes nothing, so a new holder never waits for it.
+	private requestQueue: Record<Provider, Promise<unknown>> = {
+		adsbfi: Promise.resolve(),
+		opensky: Promise.resolve(),
+	};
+	private candidateQueue: Promise<unknown> = Promise.resolve();
+	private requestTimers: Record<Provider, Timer | null> = { adsbfi: null, opensky: null };
+	// Every request still running, of any acquisition, for shutdown to await.
+	private inFlight = new Set<Promise<unknown>>();
+	// Every publish, of any provider, role or acquisition, runs one at a
+	// time: a send that has started cannot be recalled.
+	private publishQueue: Promise<unknown> = Promise.resolve();
+
+	// adsb.fi requests failed in a row, for the CP1 backoff.
+	private adsbfiFailures = 0;
+	// OpenSky requests failed in a row while UNAVAILABLE and not paused.
 	private openskyUnavailableStep = 0;
+
+	// ---- Selection while authority is none ----
+	// Providers that used their one immediate attempt in this entry into none.
+	private oneShotUsed = new Set<Provider>();
+	private retryStep = 0;
+	private retryTimer: Timer | null = null;
+	private round: Promise<void> | null = null;
 
 	constructor(private readonly deps: CoordinatorDeps) {
 		this.freshness = new AdsbfiFreshness(deps.frozenFeedMs);
@@ -151,8 +227,17 @@ export class Coordinator {
 		return this.deps.lease.token !== null;
 	}
 
+	// Who holds authority, as this coordinator knows it.
+	get authority(): Mode {
+		return this.mode;
+	}
+
 	start(): void {
 		this.scheduleAcquire(0);
+	}
+
+	private current(token: string, term: number): boolean {
+		return !this.stopping && this.deps.lease.token === token && this.term === term;
 	}
 
 	// ---- Follower: acquire -------------------------------------------------
@@ -191,6 +276,9 @@ export class Coordinator {
 		}
 		this.waitingLogged = false;
 		const term = ++this.term;
+		this.mode = 'none';
+		this.requestQueue = { adsbfi: Promise.resolve(), opensky: Promise.resolve() };
+		this.candidateQueue = Promise.resolve();
 		log('info', 'lease acquired: now leader', { lease_token: lease.token });
 		// A shutdown that raced the acquisition releases the lease itself.
 		if (this.stopping) return;
@@ -200,7 +288,7 @@ export class Coordinator {
 		this.renewalActive = true;
 		if (!(await this.renewOnce())) return;
 		this.scheduleRenewal();
-		this.consecutiveFailures = 0;
+		this.adsbfiFailures = 0;
 		this.freshness = new AdsbfiFreshness(this.deps.frozenFeedMs);
 
 		// Any segment still open was left by a coordinator that stopped without
@@ -211,12 +299,23 @@ export class Coordinator {
 		if (token === null || !(await this.closeCoverage(token, 'coordinator_down'))) return;
 		if (this.stopping) return;
 
-		// Health is restored before any request, so no outcome can be applied
-		// to the previous holder's in-memory view or to unrestored state.
-		const openskyDelayMs = await this.restoreProviderHealth(token, term);
-		if (openskyDelayMs === null || this.stopping) return;
-		this.schedulePoll(0);
-		this.scheduleOpenskyCheck(token, term, openskyDelayMs);
+		// Health first, then authority, both before any request.
+		const restored = await this.restoreProviderHealth(token, term);
+		if (restored === null || !this.current(token, term)) return;
+		if (!(await this.restoreAuthority(token, term, restored))) return;
+		if (!this.current(token, term)) return;
+
+		// The authority's loop starts at once. While none, the selection round
+		// entered above makes the first requests. (Read through the getter:
+		// restoreAuthority may have changed it.)
+		const mode = this.authority;
+		if (mode === 'adsbfi') {
+			this.scheduleRequest('adsbfi', 0, token, term);
+			this.scheduleRequest('opensky', restored.openskyDelayMs, token, term);
+		} else if (mode === 'opensky') {
+			this.scheduleRequest('opensky', 0, token, term);
+			this.scheduleRequest('adsbfi', 0, token, term);
+		}
 	}
 
 	// ---- Leader: renew -----------------------------------------------------
@@ -256,9 +355,7 @@ export class Coordinator {
 		// never deleted here.
 		this.deps.lease.forget();
 		this.stopRenewal();
-		if (this.pollTimer !== null) clearTimeout(this.pollTimer);
-		this.pollTimer = null;
-		this.clearHealthTimers();
+		this.clearTimers();
 		this.deps.log('warn', 'lease lost: stopped polling and publishing', {
 			lease_token: token,
 			reason,
@@ -267,82 +364,179 @@ export class Coordinator {
 		this.scheduleAcquire(this.deps.followerRetryMs);
 	}
 
-	// ---- Leader: poll ------------------------------------------------------
+	private clearTimers(): void {
+		for (const provider of PROVIDERS) {
+			const request = this.requestTimers[provider];
+			if (request !== null) clearTimeout(request);
+			this.requestTimers[provider] = null;
+			const deadline = this.deadlineTimers[provider];
+			if (deadline !== null) clearTimeout(deadline);
+			this.deadlineTimers[provider] = null;
+		}
+		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+		this.retryTimer = null;
+	}
 
-	private schedulePoll(delayMs: number): void {
-		const token = this.deps.lease.token;
-		const term = this.term;
-		if (this.stopping || token === null) return;
-		this.pollTimer = setTimeout(() => {
-			this.pollTimer = null;
-			const cycle: Promise<void> = this.runCycle(token, term).finally(() => {
-				// A cycle from a lost lease can finish after this process has
-				// reacquired and started a new one. Clearing the field then would
-				// let shutdown release the lease while the new cycle still publishes.
-				if (this.inFlightCycle === cycle) this.inFlightCycle = null;
-			});
-			this.inFlightCycle = cycle;
+	// ---- Leader: request loops -----------------------------------------------
+
+	private scheduleRequest(provider: Provider, delayMs: number, token: string, term: number): void {
+		if (!this.current(token, term)) return;
+		const existing = this.requestTimers[provider];
+		if (existing !== null) clearTimeout(existing);
+		this.requestTimers[provider] = setTimeout(() => {
+			this.requestTimers[provider] = null;
+			void this.request(provider, token, term, 'cadence');
 		}, delayMs);
 	}
 
-	private async runCycle(token: string, term: number): Promise<void> {
-		const { lease, log } = this.deps;
-		if (this.stopping || lease.token !== token) return;
-		const outcome = await this.activeCycle(token, term);
-		if (outcome === 'lease_lost') return;
-		// Every failed active cycle asks Redis to close coverage. The close is
-		// idempotent, so Redis, not local state, decides whether a segment was
-		// open.
-		if (outcome === 'failure' && !(await this.closeCoverage(token, 'failure'))) return;
-
-		const ok = outcome === 'success';
-		if (ok && this.consecutiveFailures > 0) {
-			log('info', 'adsb.fi recovered', { after_failures: this.consecutiveFailures });
-		}
-		this.consecutiveFailures = ok ? 0 : this.consecutiveFailures + 1;
-
-		if (this.stopping || lease.token !== token) return;
-		const delay = nextDelayMs(
-			this.consecutiveFailures,
-			this.deps.pollIntervalMs,
-			this.deps.backoffBaseMs,
-			this.deps.backoffMaxMs,
-		);
-		if (this.consecutiveFailures > 0) {
-			log('warn', 'backing off before next request', {
-				consecutive_failures: this.consecutiveFailures,
-				delay_ms: delay,
-			});
-		}
-		this.schedulePoll(delay);
+	// One request to a provider, after any already running for it. Its role is
+	// decided when it starts, from authority at that moment.
+	private request(
+		provider: Provider,
+		token: string,
+		term: number,
+		trigger: Trigger,
+	): Promise<RequestOutcome | null> {
+		const run = this.requestQueue[provider].then(async () => {
+			if (!this.current(token, term)) return null;
+			const outcome =
+				this.mode === 'none'
+					? await this.asCandidate(() => this.providerRequest(provider, token, term, trigger))
+					: await this.providerRequest(provider, token, term, trigger);
+			if (outcome !== null && !outcome.leaseLost && this.current(token, term)) {
+				this.scheduleNext(provider, outcome, token, term);
+			}
+			return outcome;
+		});
+		this.requestQueue[provider] = run.catch(() => undefined);
+		this.inFlight.add(run);
+		void run.finally(() => this.inFlight.delete(run)).catch(() => undefined);
+		return run;
 	}
 
-	// Fetch, validate, publish, then credit (ADR-022 sections 3 and 6).
-	private async activeCycle(token: string, term: number): Promise<CycleOutcome> {
+	private asCandidate<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.candidateQueue.then(fn);
+		this.candidateQueue = run.catch(() => undefined);
+		return run;
+	}
+
+	private roleOf(provider: Provider): Role {
+		if (this.mode === provider) return 'active';
+		return this.mode === 'none' ? 'candidate' : 'standby';
+	}
+
+	// The next request's delay, from the provider's role now (authority may
+	// have changed during the request) and how the request went.
+	private scheduleNext(
+		provider: Provider,
+		outcome: RequestOutcome,
+		token: string,
+		term: number,
+	): void {
+		const role = this.roleOf(provider);
+		let delayMs: number;
+		if (provider === 'adsbfi') {
+			const failed = outcome.role === 'active' ? outcome.cycleFailed : outcome.providerFailed;
+			this.adsbfiFailures = failed ? this.adsbfiFailures + 1 : 0;
+			const interval =
+				role === 'active' ? this.deps.pollIntervalMs : this.deps.adsbfiStandbyIntervalMs;
+			delayMs = nextDelayMs(
+				this.adsbfiFailures,
+				interval,
+				this.deps.backoffBaseMs,
+				this.deps.backoffMaxMs,
+			);
+			if (this.adsbfiFailures > 0) {
+				this.deps.log('warn', 'backing off before next request', {
+					provider,
+					consecutive_failures: this.adsbfiFailures,
+					delay_ms: delayMs,
+				});
+			}
+		} else if (role === 'active') {
+			delayMs = this.deps.openskyActiveIntervalMs;
+		} else {
+			delayMs = this.openskyStandbyDelayMs();
+		}
+		this.scheduleRequest(provider, delayMs, token, term);
+	}
+
+	private openskyStandbyDelayMs(): number {
+		return nextOpenskyCheckDelayMs(
+			this.health.opensky,
+			Date.now(),
+			this.openskyUnavailableStep,
+			this.deps.openskyCadence,
+		);
+	}
+
+	// Fetch, validate, record health, then act on the role (ADR-022 sections
+	// 3 and 6). The role is read inside the candidate queue when authority is
+	// none, so a commit by the other provider turns this into a standby check.
+	private async providerRequest(
+		provider: Provider,
+		token: string,
+		term: number,
+		trigger: Trigger,
+	): Promise<RequestOutcome> {
+		const role = this.roleOf(provider);
+		// ADR-022 section 4: a success after stale health proves only a start.
+		// Staleness is judged only for a round's immediate attempt: a request
+		// made at the provider's own rate is on schedule, never stale, even if
+		// scheduling jitter puts it a moment past one interval.
+		const stale =
+			role === 'candidate' && trigger === 'round' && this.isProviderStale(provider, Date.now());
+		return provider === 'adsbfi'
+			? this.adsbfiRequest(role, stale, token, term, trigger)
+			: this.openskyRequest(role, stale, token, term, trigger);
+	}
+
+	private outcomeFor(role: Role): (o: Partial<RequestOutcome>) => RequestOutcome {
+		return (o) => ({
+			role,
+			providerFailed: false,
+			cycleFailed: false,
+			committed: false,
+			leaseLost: false,
+			...o,
+		});
+	}
+
+	private async adsbfiRequest(
+		role: Role,
+		stale: boolean,
+		token: string,
+		term: number,
+		trigger: Trigger,
+	): Promise<RequestOutcome> {
 		const { lease, log } = this.deps;
+		const outcome = this.outcomeFor(role);
 		const result = await this.deps.fetchCycle();
 		// The fetch can take seconds. If the lease was lost meanwhile, a
-		// successor may already be publishing, so this cycle is dropped.
-		if (lease.token !== token) {
+		// successor may already be publishing, so this request is dropped.
+		if (lease.token !== token || this.term !== term) {
 			if (!('error' in result)) {
 				log('warn', 'lease lost during cycle: fetched positions discarded, not published', {
 					lease_token: token,
 					discarded: result.messages.length,
 				});
 			}
-			return 'lease_lost';
+			return outcome({ leaseLost: true });
 		}
 		// Request or response failure, already logged by the adapter: provider
 		// health evidence, and a failed active cycle.
 		if ('error' in result) {
 			const ev: HealthEvidence = { kind: 'failure', atMs: Date.now(), error: result.error };
-			return (await this.recordHealth('adsbfi', token, term, ev)) ? 'failure' : 'lease_lost';
+			if (!(await this.recordHealth('adsbfi', token, term, ev))) {
+				return outcome({ leaseLost: true });
+			}
+			return this.failRequest(role, 'adsbfi', token, outcome, true);
 		}
 		const split = result;
 
-		// The freshness verdict serves both health and coverage: frozen is a
-		// health failure and a coverage failure; seeded and unconfirmed are
-		// valid responses (health success) that coverage does not credit.
+		// The freshness verdict serves health, coverage and candidacy: frozen
+		// is a health failure; seeded and unconfirmed are valid responses
+		// (health success) that neither credit coverage nor commit authority.
 		const verdict: FreshnessVerdict = this.freshness.observe(split.responseNowMs, Date.now());
 		if (verdict === 'frozen') {
 			// A frozen feed fails validation, so nothing from it is published.
@@ -352,65 +546,500 @@ export class Coordinator {
 				frozen_feed_ms: this.deps.frozenFeedMs,
 			});
 			const ev: HealthEvidence = { kind: 'failure', atMs: Date.now(), error: 'frozen_feed' };
-			return (await this.recordHealth('adsbfi', token, term, ev)) ? 'failure' : 'lease_lost';
+			if (!(await this.recordHealth('adsbfi', token, term, ev))) {
+				return outcome({ leaseLost: true });
+			}
+			return this.failRequest(role, 'adsbfi', token, outcome, true);
 		}
 
 		// Recorded before publishing, so a Kafka failure below cannot reach it.
-		if (!(await this.recordHealth('adsbfi', token, term, { kind: 'success', atMs: Date.now() }))) {
-			return 'lease_lost';
+		const success: HealthEvidence = { kind: 'success', atMs: Date.now() };
+		if (!(await this.recordHealth('adsbfi', token, term, success, stale))) {
+			return outcome({ leaseLost: true });
 		}
 
-		let firstOffset = 'none';
-		if (split.messages.length > 0) {
-			try {
-				firstOffset = await this.deps.publish(split.messages);
-			} catch (err) {
-				// A failed publish fails the active cycle, but says nothing about
-				// adsb.fi's health.
-				log('error', 'poll cycle error', { error: errorMessage(err) });
-				return 'failure';
+		if (role === 'standby') {
+			log('info', 'adsb.fi standby check', {
+				freshness: verdict,
+				aircraft: split.messages.length,
+				state: this.health.adsbfi?.state ?? 'unknown',
+			});
+			return outcome({});
+		}
+		if (role === 'candidate') {
+			if (verdict !== 'fresh') {
+				log('info', 'adsb.fi candidate not delivered: freshness not confirmed', {
+					freshness: verdict,
+				});
+				return outcome({});
 			}
+			return this.deliverCandidate('adsbfi', split.messages, token, term, trigger, outcome);
+		}
+
+		// Active cycle.
+		const published = await this.publishAs('adsbfi', split.messages);
+		if (published.status === 'authority_changed') {
+			log('info', 'adsb.fi cycle dropped: authority changed before publishing');
+			return outcome({});
+		}
+		if (published.status === 'failed') {
+			// A failed publish fails the active cycle, but says nothing about
+			// adsb.fi's health.
+			log('error', 'poll cycle error', { error: published.error });
+			return this.failRequest(role, 'adsbfi', token, outcome, false);
 		}
 		// The publish stage has completed (immediately after validation for a
 		// cycle with nothing to publish): this is the coverage timestamp.
 		const activeSuccessMs = Date.now();
 		const credited = verdict === 'fresh';
 		log('info', 'poll cycle complete', {
-			...pollCycleSummary(split, firstOffset),
+			...pollCycleSummary(split, published.firstOffset),
 			lease_token: token,
 			freshness: verdict,
 			coverage_credited: credited,
 		});
-		if (!credited) return 'success';
-		if (lease.token !== token) return 'lease_lost';
-		return (await this.creditCoverage(token, activeSuccessMs)) ? 'success' : 'lease_lost';
+		if (!credited) return outcome({});
+		if (lease.token !== token) return outcome({ leaseLost: true });
+		return (await this.creditCoverage(token, 'adsbfi', activeSuccessMs))
+			? outcome({})
+			: outcome({ leaseLost: true });
+	}
+
+	private async openskyRequest(
+		role: Role,
+		stale: boolean,
+		token: string,
+		term: number,
+		trigger: Trigger,
+	): Promise<RequestOutcome> {
+		const { lease, log } = this.deps;
+		const outcome = this.outcomeFor(role);
+		let result: OpenskyFetchResult;
+		try {
+			result = await this.deps.fetchOpensky();
+		} catch (err) {
+			result = { kind: 'failed', error: `error: ${errorMessage(err)}` };
+		}
+		if (lease.token !== token || this.term !== term) return outcome({ leaseLost: true });
+
+		// Every OpenSky request is health evidence, whatever its role: there is
+		// never a second request for the same purpose.
+		const atMs = Date.now();
+		let ev: HealthEvidence;
+		if (result.kind === 'ok') {
+			ev = { kind: 'success', atMs, creditsRemaining: result.creditsRemaining, probe: true };
+		} else if (result.kind === 'rate_limited' && result.retryAfterSeconds !== null) {
+			ev = {
+				kind: 'paused',
+				atMs,
+				error: 'rate_limited',
+				pausedUntilMs: atMs + result.retryAfterSeconds * 1000,
+				probe: true,
+			};
+		} else {
+			const error = result.kind === 'failed' ? result.error : 'rate_limited';
+			ev = { kind: 'failure', atMs, error, probe: true };
+		}
+		const previous = this.health.opensky;
+		if (!(await this.recordHealth('opensky', token, term, ev, stale))) {
+			return outcome({ leaseLost: true });
+		}
+		const next = this.health.opensky;
+		if (ev.kind === 'success' || next === null || next.state !== 'UNAVAILABLE') {
+			this.openskyUnavailableStep = 0;
+		} else if (next.pausedUntilMs === null) {
+			this.openskyUnavailableStep =
+				previous?.state === 'UNAVAILABLE' ? this.openskyUnavailableStep + 1 : 1;
+		}
+		log('info', 'opensky request', {
+			provider: 'opensky',
+			role,
+			outcome: result.kind,
+			...(result.kind === 'failed' ? { error: result.error } : {}),
+			...(result.kind === 'ok' ? { aircraft: result.messages.length } : {}),
+			state: next?.state ?? 'unknown',
+			credits_remaining: next?.creditsRemaining ?? null,
+			paused_until_ms: next?.pausedUntilMs ?? null,
+		});
+
+		if (result.kind !== 'ok') return this.failRequest(role, 'opensky', token, outcome, true);
+		if (role === 'standby') return outcome({});
+		if (role === 'candidate') {
+			return this.deliverCandidate('opensky', result.messages, token, term, trigger, outcome);
+		}
+
+		// Active cycle.
+		const published = await this.publishAs('opensky', result.messages);
+		if (published.status === 'authority_changed') return outcome({});
+		if (published.status === 'failed') {
+			log('error', 'opensky cycle error', { error: published.error });
+			return this.failRequest(role, 'opensky', token, outcome, false);
+		}
+		const activeSuccessMs = Date.now();
+		log('info', 'opensky cycle complete', {
+			provider: 'opensky',
+			published: result.messages.length,
+			first_offset: published.firstOffset,
+			lease_token: token,
+		});
+		if (lease.token !== token) return outcome({ leaseLost: true });
+		return (await this.creditCoverage(token, 'opensky', activeSuccessMs))
+			? outcome({})
+			: outcome({ leaseLost: true });
+	}
+
+	// A failed request. For an active cycle it also closes coverage (the first
+	// failed active cycle, ADR-022 section 5); standby and candidate requests
+	// have no coverage of their own.
+	private async failRequest(
+		role: Role,
+		provider: Provider,
+		token: string,
+		outcome: (o: Partial<RequestOutcome>) => RequestOutcome,
+		providerFailed: boolean,
+	): Promise<RequestOutcome> {
+		if (role !== 'active') return outcome({ providerFailed });
+		// Only while this provider still holds authority: once relinquished,
+		// RELINQUISH has already closed anything that was open.
+		if (this.mode === provider && !(await this.closeCoverage(token, 'failure'))) {
+			return outcome({ leaseLost: true });
+		}
+		return outcome({ providerFailed, cycleFailed: true });
+	}
+
+	// ---- Leader: publishing ---------------------------------------------------
+
+	// Publishes as provider's active cycle, after any publish already running,
+	// and only if provider still holds authority when its turn comes.
+	private publishAs(
+		provider: Provider,
+		messages: Messages,
+	): Promise<
+		| { status: 'published'; firstOffset: string }
+		| { status: 'failed'; error: string }
+		| { status: 'authority_changed' }
+	> {
+		return this.serializedPublish(async () => {
+			if (this.mode !== provider) return { status: 'authority_changed' as const };
+			return this.sendAll(messages);
+		});
+	}
+
+	private serializedPublish<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.publishQueue.then(fn);
+		this.publishQueue = run.catch(() => undefined);
+		return run;
+	}
+
+	private async sendAll(
+		messages: Messages,
+	): Promise<{ status: 'published'; firstOffset: string } | { status: 'failed'; error: string }> {
+		if (messages.length === 0) return { status: 'published', firstOffset: 'none' };
+		try {
+			return { status: 'published', firstOffset: await this.deps.publish(messages) };
+		} catch (err) {
+			return { status: 'failed', error: errorMessage(err) };
+		}
+	}
+
+	// ---- Leader: selection and commit -------------------------------------
+
+	// A candidate's delivery while authority is none: publish every message,
+	// then commit authority and open coverage at the publish-completion time.
+	// Authority changes only if the commit succeeds.
+	private async deliverCandidate(
+		provider: Provider,
+		messages: Messages,
+		token: string,
+		term: number,
+		trigger: Trigger,
+		outcome: (o: Partial<RequestOutcome>) => RequestOutcome,
+	): Promise<RequestOutcome> {
+		const { log } = this.deps;
+		// While a delivery retry is pending, requests at a provider's own rate
+		// are health evidence only; the retry round makes the next delivery.
+		if (trigger === 'cadence' && this.retryTimer !== null) {
+			log('info', 'candidate not delivered: waiting for the selection retry', { provider });
+			return outcome({});
+		}
+		// Waits for any publish still running, such as a relinquished
+		// provider's send that could not be recalled.
+		const published = await this.serializedPublish(async () => {
+			if (this.mode !== 'none' || !this.current(token, term)) {
+				return { status: 'authority_changed' as const };
+			}
+			return this.sendAll(messages);
+		});
+		if (published.status === 'authority_changed') return outcome({});
+		if (published.status === 'failed') {
+			log('error', 'candidate publish failed: authority stays none', {
+				provider,
+				error: published.error,
+			});
+			this.scheduleSelectionRetry(token, term, 'publish_failed');
+			return outcome({});
+		}
+		const commitMs = Date.now();
+		if (this.mode !== 'none' || !this.current(token, term)) return outcome({});
+
+		let result;
+		try {
+			result = await this.deps.timeline.commit(token, provider, commitMs);
+		} catch (err) {
+			this.loseLeadership(token, 'authority commit error: result unknown', err);
+			return outcome({ leaseLost: true });
+		}
+		if (result.status === 'lease_mismatch') {
+			this.loseLeadership(token, 'authority commit rejected: token no longer matches');
+			return outcome({ leaseLost: true });
+		}
+		if (result.status === 'not_none') {
+			// Redis holds an authority this coordinator believed was none.
+			this.loseLeadership(token, `authority commit refused: authority is ${result.authority}`);
+			return outcome({ leaseLost: true });
+		}
+		if (result.status === 'stale_clock') {
+			log('warn', 'authority commit refused: time is not after the last success', {
+				provider,
+				commit_ms: commitMs,
+			});
+			this.scheduleSelectionRetry(token, term, 'stale_clock');
+			return outcome({});
+		}
+
+		this.mode = provider;
+		this.retryStep = 0;
+		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+		this.retryTimer = null;
+		log('info', 'authority committed', {
+			provider,
+			epoch: result.epoch,
+			timeline_version: result.timelineVersion,
+			commit_ms: commitMs,
+			published: messages.length,
+		});
+		if (provider === 'opensky' && !this.deps.openskyAuthenticated) {
+			log('warn', 'opensky authoritative without credentials: the anonymous budget will run out', {
+				active_interval_ms: this.deps.openskyActiveIntervalMs,
+			});
+		}
+		// The other provider continues as a standby check at its own rate.
+		const other: Provider = provider === 'adsbfi' ? 'opensky' : 'adsbfi';
+		if (this.requestTimers[other] === null) {
+			const delayMs =
+				other === 'adsbfi' ? this.deps.adsbfiStandbyIntervalMs : this.openskyStandbyDelayMs();
+			this.scheduleRequest(other, delayMs, token, term);
+		}
+		return outcome({ committed: true });
+	}
+
+	// The authoritative provider has become UNAVAILABLE: stop its active
+	// cycles at once and relinquish authority to none, then select.
+	private async relinquish(provider: Provider, token: string, term: number): Promise<void> {
+		if (this.mode !== provider || !this.current(token, term)) return;
+		const { log } = this.deps;
+		// No new active cycle of this provider starts from here, and a cycle
+		// that has not reached its publish drops out when its turn comes.
+		this.mode = 'none';
+		const timer = this.requestTimers[provider];
+		if (timer !== null) clearTimeout(timer);
+		this.requestTimers[provider] = null;
+		log('warn', 'authoritative provider UNAVAILABLE: relinquishing authority', { provider });
+
+		let result;
+		try {
+			result = await this.deps.timeline.relinquish(token, provider, Date.now());
+		} catch (err) {
+			this.loseLeadership(token, 'authority relinquish error: result unknown', err);
+			return;
+		}
+		if (result.status !== 'relinquished') {
+			this.loseLeadership(
+				token,
+				result.status === 'lease_mismatch'
+					? 'authority relinquish rejected: token no longer matches'
+					: `authority relinquish refused: ${result.status}`,
+			);
+			return;
+		}
+		log('info', 'authority relinquished: now none', {
+			from: provider,
+			timeline_version: result.timelineVersion,
+			closed_segment: result.member,
+		});
+		this.enterNone(token, term, 'relinquished');
+	}
+
+	// A genuine entry into none: one-shots and the delivery retry start over.
+	private enterNone(token: string, term: number, reason: string): void {
+		this.oneShotUsed = new Set();
+		this.retryStep = 0;
+		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+		this.retryTimer = null;
+		this.startSelectionRound(token, term, reason);
+	}
+
+	private startSelectionRound(token: string, term: number, reason: string): void {
+		if (this.round !== null || !this.current(token, term)) return;
+		this.round = this.runSelectionRound(token, term, reason).finally(() => {
+			this.round = null;
+		});
+	}
+
+	// Tries eligible providers one after another, stopping at the first
+	// commit. Each attempt is that provider's next request, made now.
+	private async runSelectionRound(token: string, term: number, reason: string): Promise<void> {
+		const nowMs = Date.now();
+		const stale = {
+			adsbfi: this.isProviderStale('adsbfi', nowMs),
+			opensky: this.isProviderStale('opensky', nowMs),
+		};
+		const plan = planSelectionRound(this.health, stale, nowMs, this.oneShotUsed);
+		this.deps.log('info', 'selection round', {
+			reason,
+			plan: plan.map((p) => `${p.provider}:tier${p.tier}${p.oneShot ? ':one_shot' : ''}`),
+		});
+		for (const attempt of plan) {
+			if (this.mode !== 'none' || !this.current(token, term)) break;
+			if (attempt.oneShot) this.oneShotUsed.add(attempt.provider);
+			const timer = this.requestTimers[attempt.provider];
+			if (timer !== null) clearTimeout(timer);
+			this.requestTimers[attempt.provider] = null;
+			await this.request(attempt.provider, token, term, 'round');
+		}
+		if (!this.current(token, term)) return;
+		if (this.mode === 'none') {
+			this.deps.log('warn', 'selection round ended without an authority', {
+				reason,
+				retry_pending: this.retryTimer !== null,
+			});
+		}
+		// Every provider keeps a request scheduled at its own rate.
+		for (const provider of PROVIDERS) {
+			if (this.requestTimers[provider] === null) {
+				const delayMs =
+					provider === 'adsbfi' ? this.deps.adsbfiStandbyIntervalMs : this.openskyStandbyDelayMs();
+				this.scheduleRequest(provider, delayMs, token, term);
+			}
+		}
+	}
+
+	// A delivery failed for a reason that is not provider health: retry the
+	// whole round on the coordinator's own backoff. One-shots are not re-armed.
+	private scheduleSelectionRetry(token: string, term: number, reason: string): void {
+		if (this.retryTimer !== null || !this.current(token, term)) return;
+		this.retryStep++;
+		const delayMs = nextSelectionRetryMs(
+			this.retryStep,
+			this.deps.selectionRetryBaseMs,
+			this.deps.selectionRetryMaxMs,
+		);
+		this.deps.log('warn', 'selection retry scheduled', { reason, retry_in_ms: delayMs });
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = null;
+			if (this.mode === 'none') this.startSelectionRound(token, term, 'retry');
+		}, delayMs);
+	}
+
+	private isProviderStale(provider: Provider, nowMs: number): boolean {
+		const h = this.health[provider];
+		const intervalMs =
+			provider === 'adsbfi'
+				? Math.max(
+						this.deps.adsbfiStandbyIntervalMs,
+						Math.min(
+							this.deps.backoffMaxMs,
+							this.deps.backoffBaseMs * 2 ** Math.max(0, this.adsbfiFailures - 1),
+						),
+					)
+				: nextOpenskyCheckDelayMs(
+						h,
+						nowMs,
+						Math.max(1, this.openskyUnavailableStep),
+						this.deps.openskyCadence,
+					);
+		return isStale(h, nowMs, intervalMs);
+	}
+
+	// ADR-022 section 7, after health: a stored authority whose provider is
+	// restored UNAVAILABLE (including paused) is relinquished before any
+	// request; a stored none, or a timeline that never had an authority,
+	// enters selection; a stored authority that is DEGRADED keeps authority.
+	private async restoreAuthority(
+		token: string,
+		term: number,
+		restored: RestoredState,
+	): Promise<boolean> {
+		const { log } = this.deps;
+		const stored = restored.authorityProvider;
+		if (!restored.authorityInitialized || stored === 'none') {
+			log('info', 'authority restored: none', {
+				never_committed: !restored.authorityInitialized,
+			});
+			this.mode = 'none';
+			this.enterNone(
+				token,
+				term,
+				restored.authorityInitialized ? 'restored_none' : 'first_deployment',
+			);
+			return true;
+		}
+		if (stored !== 'adsbfi' && stored !== 'opensky') {
+			this.loseLeadership(token, `stored authority is not a known provider: ${stored}`);
+			return false;
+		}
+		this.mode = stored;
+		log('info', 'authority restored', {
+			provider: stored,
+			health: this.health[stored]?.state ?? 'unknown',
+		});
+		if (this.health[stored]?.state === 'UNAVAILABLE') await this.relinquish(stored, token, term);
+		return this.current(token, term);
 	}
 
 	// ---- Leader: coverage timeline -----------------------------------------
 
 	// Returns false when the write was refused or its result is unknown. The
 	// lease is then dropped, so nothing more is published under this
-	// acquisition.
-	private async creditCoverage(token: string, activeSuccessMs: number): Promise<boolean> {
+	// acquisition. A credit for a provider that no longer holds authority is
+	// benign: its cycle finished after authority moved on.
+	private async creditCoverage(
+		token: string,
+		provider: Provider,
+		activeSuccessMs: number,
+	): Promise<boolean> {
 		const { log } = this.deps;
 		try {
-			const result = await this.deps.timeline.credit(token, activeSuccessMs);
+			const result = await this.deps.timeline.credit(token, provider, activeSuccessMs);
 			if (result.status === 'lease_mismatch') {
 				this.loseLeadership(token, 'timeline write rejected: token no longer matches');
 				return false;
 			}
-			if (result.status === 'bootstrapped') {
-				log('info', 'adsb.fi authority committed and coverage opened', {
-					active_success_ms: activeSuccessMs,
-					timeline_version: result.timelineVersion,
+			if (result.status === 'authority_changed') {
+				// Benign only for a cycle that finished after this coordinator had
+				// already moved authority on. If it still believes this provider
+				// holds authority, memory and Redis disagree: publishing on would
+				// be unsafe, so it fails closed and the next acquisition resyncs.
+				if (this.mode === provider) {
+					this.loseLeadership(
+						token,
+						`authority is ${result.authority ?? 'not initialized'} in Redis, not ${provider}`,
+					);
+					return false;
+				}
+				log('info', 'coverage not credited: authority changed', {
+					provider,
+					authority: result.authority,
 				});
 			} else if (result.status === 'opened') {
 				log('info', 'coverage opened', {
+					provider,
 					active_success_ms: activeSuccessMs,
 					timeline_version: result.timelineVersion,
 				});
 			} else if (result.status === 'stale_clock') {
 				log('warn', 'coverage not credited: time is not after the last success', {
+					provider,
 					active_success_ms: activeSuccessMs,
 				});
 			}
@@ -460,17 +1089,19 @@ export class Coordinator {
 
 	// Applies one request outcome and persists it. Returns false when this
 	// acquisition can no longer write (the lease is then dropped), true
-	// otherwise, including when the outcome was dropped as stale.
+	// otherwise.
 	private recordHealth(
 		provider: Provider,
 		token: string,
 		term: number,
 		ev: HealthEvidence,
+		stale = false,
 	): Promise<boolean> {
 		return this.serializeHealth(provider, async () => {
 			if (this.term !== term || this.deps.lease.token !== token) return false;
 			const next = applyEvidence(this.health[provider], ev, this.deps.healthTiming, {
 				firstDeployment: provider === 'adsbfi' && this.firstDeployment,
+				stale,
 			});
 			return this.persistHealth(provider, token, term, next);
 		});
@@ -508,6 +1139,12 @@ export class Coordinator {
 			});
 		}
 		this.armDeadline(provider, token, term);
+		// The authoritative provider has become UNAVAILABLE. Not awaited: the
+		// relinquish and its selection round must not run inside this
+		// provider's health queue.
+		if (this.mode === provider && next.state === 'UNAVAILABLE') {
+			void this.relinquish(provider, token, term);
+		}
 		return true;
 	}
 
@@ -542,19 +1179,9 @@ export class Coordinator {
 		}, delayMs);
 	}
 
-	private clearHealthTimers(): void {
-		for (const provider of PROVIDERS) {
-			const timer = this.deadlineTimers[provider];
-			if (timer !== null) clearTimeout(timer);
-			this.deadlineTimers[provider] = null;
-		}
-		if (this.openskyTimer !== null) clearTimeout(this.openskyTimer);
-		this.openskyTimer = null;
-	}
-
-	// ADR-022 section 7, at acquisition and before any request. Returns the
-	// delay before the first OpenSky check, or null when the lease was lost.
-	private async restoreProviderHealth(token: string, term: number): Promise<number | null> {
+	// ADR-022 section 7, at acquisition and before any request. Returns what
+	// authority restoration needs, or null when the lease was lost.
+	private async restoreProviderHealth(token: string, term: number): Promise<RestoredState | null> {
 		const { log } = this.deps;
 		let snapshot;
 		try {
@@ -601,101 +1228,23 @@ export class Coordinator {
 			opensky: this.health.opensky?.state ?? 'unknown',
 			first_deployment: this.firstDeployment,
 		});
-		const authority = snapshot.authorityProvider;
-		if (authority !== null && this.health[authority as Provider]?.state === 'UNAVAILABLE') {
-			// ADR-022 says authority becomes none here. That switch is failover
-			// (CP3e); until then authority is left exactly as it is.
-			log(
-				'warn',
-				'authoritative provider restored UNAVAILABLE: authority unchanged until failover exists',
-				{
-					provider: authority,
-				},
-			);
-		}
 
 		const opensky = this.health.opensky;
-		if (openskyPauseExpired) return 0;
-		if (opensky?.state === 'UNAVAILABLE' && opensky.pausedUntilMs === null) {
-			// A restored outage restarts its backoff at the initial value.
-			this.openskyUnavailableStep = 1;
-		}
-		return nextOpenskyCheckDelayMs(
-			opensky,
-			nowMs,
-			this.openskyUnavailableStep,
-			this.deps.openskyCadence,
-		);
-	}
-
-	// ---- Leader: OpenSky standby checks -------------------------------------
-
-	private scheduleOpenskyCheck(token: string, term: number, delayMs: number): void {
-		if (this.stopping || this.deps.lease.token !== token || this.term !== term) return;
-		this.openskyTimer = setTimeout(() => {
-			this.openskyTimer = null;
-			const check: Promise<void> = this.runOpenskyCheck(token, term).finally(() => {
-				if (this.inFlightCheck === check) this.inFlightCheck = null;
-			});
-			this.inFlightCheck = check;
-		}, delayMs);
-	}
-
-	// Fetch and validate only: a check never publishes, never touches coverage
-	// and never changes authority. Its only effect is OpenSky's health.
-	private async runOpenskyCheck(token: string, term: number): Promise<void> {
-		if (this.stopping || this.deps.lease.token !== token || this.term !== term) return;
-		let result: OpenskyCheckResult;
-		try {
-			result = await this.deps.checkOpensky();
-		} catch (err) {
-			result = { kind: 'failed', error: `error: ${errorMessage(err)}` };
-		}
-		if (this.deps.lease.token !== token || this.term !== term) return;
-
-		const atMs = Date.now();
-		let ev: HealthEvidence;
-		if (result.kind === 'ok') {
-			ev = { kind: 'success', atMs, creditsRemaining: result.creditsRemaining, probe: true };
-		} else if (result.kind === 'rate_limited' && result.retryAfterSeconds !== null) {
-			ev = {
-				kind: 'paused',
-				atMs,
-				error: 'rate_limited',
-				pausedUntilMs: atMs + result.retryAfterSeconds * 1000,
-				probe: true,
-			};
+		let openskyDelayMs: number;
+		if (openskyPauseExpired) {
+			openskyDelayMs = 0;
 		} else {
-			const error = result.kind === 'failed' ? result.error : 'rate_limited';
-			ev = { kind: 'failure', atMs, error, probe: true };
+			if (opensky?.state === 'UNAVAILABLE' && opensky.pausedUntilMs === null) {
+				// A restored outage restarts its backoff at the initial value.
+				this.openskyUnavailableStep = 1;
+			}
+			openskyDelayMs = this.openskyStandbyDelayMs();
 		}
-
-		const previous = this.health.opensky;
-		if (!(await this.recordHealth('opensky', token, term, ev))) return;
-		const next = this.health.opensky;
-		if (ev.kind === 'success' || next === null || next.state !== 'UNAVAILABLE') {
-			this.openskyUnavailableStep = 0;
-		} else if (next.pausedUntilMs === null) {
-			this.openskyUnavailableStep =
-				previous?.state === 'UNAVAILABLE' ? this.openskyUnavailableStep + 1 : 1;
-		}
-		const delayMs = nextOpenskyCheckDelayMs(
-			next,
-			Date.now(),
-			this.openskyUnavailableStep,
-			this.deps.openskyCadence,
-		);
-		this.deps.log('info', 'opensky health check', {
-			provider: 'opensky',
-			outcome: result.kind,
-			...(result.kind === 'failed' ? { error: result.error } : {}),
-			state: next?.state ?? 'unknown',
-			credits_remaining: next?.creditsRemaining ?? null,
-			paused_until_ms: next?.pausedUntilMs ?? null,
-			next_check_in_ms: delayMs,
-		});
-		if (this.stopping) return;
-		this.scheduleOpenskyCheck(token, term, delayMs);
+		return {
+			authorityInitialized: snapshot.authorityInitialized,
+			authorityProvider: snapshot.authorityProvider,
+			openskyDelayMs,
+		};
 	}
 
 	// ---- Clean shutdown ----------------------------------------------------
@@ -703,22 +1252,26 @@ export class Coordinator {
 	// Order matters: the lease is held until the last in-flight publish has
 	// finished, so a successor cannot start publishing alongside it.
 	async shutdown(): Promise<void> {
-		// 1. Stop starting new poll cycles (and new acquisition attempts).
+		// 1. Stop starting new requests, rounds and acquisition attempts.
 		this.stopping = true;
-		if (this.pollTimer !== null) clearTimeout(this.pollTimer);
 		if (this.acquireTimer !== null) clearTimeout(this.acquireTimer);
-		if (this.openskyTimer !== null) clearTimeout(this.openskyTimer);
-		this.pollTimer = null;
 		this.acquireTimer = null;
-		this.openskyTimer = null;
+		for (const provider of PROVIDERS) {
+			const timer = this.requestTimers[provider];
+			if (timer !== null) clearTimeout(timer);
+			this.requestTimers[provider] = null;
+		}
+		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+		this.retryTimer = null;
 		if (this.pendingAcquire !== null) await this.pendingAcquire;
 
-		// 2. Let the in-flight cycle finish, including its publish, and any
-		// in-flight OpenSky check. Renewal keeps running meanwhile, so the
-		// lease is still held. Health stays in Redis for the next holder.
-		if (this.inFlightCycle !== null) await this.inFlightCycle;
-		if (this.inFlightCheck !== null) await this.inFlightCheck;
-		this.clearHealthTimers();
+		// 2. Let in-flight requests and any selection round finish, including
+		// their publishes. Renewal keeps running meanwhile, so the lease is
+		// still held. Health stays in Redis for the next holder.
+		if (this.round !== null) await this.round;
+		await Promise.allSettled([...this.inFlight]);
+		await this.publishQueue;
+		this.clearTimers();
 
 		// 3. Close coverage while the lease is still held and renewed. A
 		// failure here drops the lease, and the next holder closes the segment
@@ -790,7 +1343,8 @@ function main(): void {
 		timeline: new CoverageTimeline(redis, config.COVERAGE_RETENTION_MS),
 		health: new ProviderHealthStore(redis),
 		fetchCycle: () => fetchAdsbfiResponse(adsbfiLog),
-		checkOpensky: () => checkOpenskyHealth(),
+		fetchOpensky: () => fetchOpenskyCycle(),
+		openskyAuthenticated: openskyAuthenticated(),
 		healthTiming: {
 			degradedTimeoutMs: config.PROVIDER_DEGRADED_TIMEOUT_MS,
 			recoveryWindowMs: config.PROVIDER_RECOVERY_WINDOW_MS,
@@ -813,6 +1367,10 @@ function main(): void {
 		backoffBaseMs: config.ADSBFI_BACKOFF_BASE_MS,
 		backoffMaxMs: config.ADSBFI_BACKOFF_MAX_MS,
 		frozenFeedMs: config.ADSBFI_FROZEN_FEED_MS,
+		adsbfiStandbyIntervalMs: config.ADSBFI_STANDBY_INTERVAL_MS,
+		openskyActiveIntervalMs: config.OPENSKY_ACTIVE_INTERVAL_MS,
+		selectionRetryBaseMs: config.SELECTION_RETRY_BASE_MS,
+		selectionRetryMaxMs: config.SELECTION_RETRY_MAX_MS,
 	});
 
 	let shuttingDown = false;
@@ -838,7 +1396,8 @@ function main(): void {
 		.connect()
 		.then(() => {
 			log('info', 'coordinator starting', {
-				providers: ['adsbfi'],
+				providers: ['adsbfi', 'opensky'],
+				opensky_authenticated: openskyAuthenticated(),
 				degraded_timeout_ms: config.PROVIDER_DEGRADED_TIMEOUT_MS,
 				recovery_window_ms: config.PROVIDER_RECOVERY_WINDOW_MS,
 				lease_ttl_ms: config.COORDINATOR_LEASE_TTL_MS,
@@ -846,6 +1405,8 @@ function main(): void {
 				follower_retry_ms: config.COORDINATOR_FOLLOWER_RETRY_MS,
 				redis_command_timeout_ms: config.COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
 				poll_interval_ms: config.ADSBFI_POLL_INTERVAL_MS,
+				adsbfi_standby_interval_ms: config.ADSBFI_STANDBY_INTERVAL_MS,
+				opensky_active_interval_ms: config.OPENSKY_ACTIVE_INTERVAL_MS,
 				frozen_feed_ms: config.ADSBFI_FROZEN_FEED_MS,
 				coverage_retention_ms: config.COVERAGE_RETENTION_MS,
 			});

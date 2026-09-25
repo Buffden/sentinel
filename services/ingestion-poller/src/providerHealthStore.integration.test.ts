@@ -153,7 +153,7 @@ describe('ProviderHealthStore against real Redis', () => {
 });
 
 describe('Coordinator health end to end against real Redis', () => {
-	it('health goes HEALTHY, DEGRADED, UNAVAILABLE, RECOVERING, HEALTHY while authority never moves', async () => {
+	it('adsb.fi commits, fails to UNAVAILABLE, relinquishes to none, then recovers and commits again', async () => {
 		await redis.del(leaseKey); // the coordinator acquires it itself
 		const client = new Redis(REDIS_URL, { commandTimeout: 5_000 });
 		let now = 1_790_283_486_000;
@@ -174,7 +174,8 @@ describe('Coordinator health end to end against real Redis', () => {
 					skippedOutsideBox: 0,
 				};
 			},
-			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			fetchOpensky: async () => ({ kind: 'failed' as const, error: 'http_503' }),
+			openskyAuthenticated: true,
 			// Scaled: 300 ms to UNAVAILABLE, 300 ms to recover.
 			healthTiming: { degradedTimeoutMs: 300, recoveryWindowMs: 300 },
 			openskyCadence: {
@@ -192,6 +193,10 @@ describe('Coordinator health end to end against real Redis', () => {
 			backoffBaseMs: 30,
 			backoffMaxMs: 60,
 			frozenFeedMs: 10_000,
+			adsbfiStandbyIntervalMs: 30,
+			openskyActiveIntervalMs: 25_000,
+			selectionRetryBaseMs: 60_000,
+			selectionRetryMaxMs: 900_000,
 		});
 		const state = async () => (await redis.hget(healthKeys.adsbfi, 'state')) ?? 'unknown';
 		const authorityCore = async () =>
@@ -199,11 +204,14 @@ describe('Coordinator health end to end against real Redis', () => {
 
 		try {
 			coordinator.start();
-			// No authority and no health: a true first deployment, HEALTHY at once.
+			// No authority ever committed and no health: a true first deployment.
+			// The first adsb.fi response seeds freshness (HEALTHY, no delivery);
+			// OpenSky is down; the next, fresh adsb.fi response commits epoch 1.
 			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi');
 			expect(await state()).toBe('HEALTHY');
-			const committed = await authorityCore();
-			// One extension, so the failure close below has length and writes a member.
+			expect(await authorityCore()).toEqual(['adsbfi', '1', expect.any(String)]);
+			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('1');
+			// One extension, so the failure close below has length.
 			await waitFor(async () => {
 				const [open, last] = await redis.hmget(
 					authorityKey,
@@ -216,21 +224,27 @@ describe('Coordinator health end to end against real Redis', () => {
 			failing = true;
 			await waitFor(async () => (await state()) === 'DEGRADED');
 			const degradedSince = await redis.hget(healthKeys.adsbfi, 'state_since_ms');
-			await waitFor(async () => (await state()) === 'UNAVAILABLE');
-			// Stamped at the logical deadline, not when the timer ran.
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'none');
+			expect(await state()).toBe('UNAVAILABLE');
 			expect(Number(await redis.hget(healthKeys.adsbfi, 'state_since_ms'))).toBe(
 				Number(degradedSince) + 300,
 			);
-			expect(await authorityCore()).toEqual(committed);
-			// Coverage closed through CP3b only: one failure segment, authority kept.
+			// Relinquished: literal none, epoch kept, one revision after the
+			// failure close (commit 1, close 2, relinquish 3).
+			const none = await redis.hgetall(authorityKey);
+			expect(none).toMatchObject({ provider: 'none', epoch: '1', coverage_open_since_ms: '' });
+			expect(none['timeline_version']).toBe('3');
 			const closed = await redis.zrange(coverageKey, '0', '-1');
 			expect(closed).toHaveLength(1);
 			expect(closed[0]).toMatch(/^adsbfi\|\d+\|\d+\|failure$/);
 
+			// adsb.fi answers again: RECOVERING is eligible, so its next fresh
+			// request, as a candidate, commits authority from none: epoch 2.
 			failing = false;
-			await waitFor(async () => (await state()) === 'RECOVERING');
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi');
+			expect(await redis.hget(authorityKey, 'epoch')).toBe('2');
+			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('4');
 			await waitFor(async () => (await state()) === 'HEALTHY');
-			expect(await authorityCore()).toEqual(committed);
 			expect(await redis.hget(healthKeys.adsbfi, 'last_error')).toBe('http_503');
 		} finally {
 			await coordinator.shutdown();
