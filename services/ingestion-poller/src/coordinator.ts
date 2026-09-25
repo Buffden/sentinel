@@ -534,9 +534,10 @@ export class Coordinator {
 		}
 		const split = result;
 
-		// The freshness verdict serves health, coverage and candidacy: frozen
-		// is a health failure; seeded and unconfirmed are valid responses
-		// (health success) that neither credit coverage nor commit authority.
+		// Freshness serves health and coverage, not authority. Frozen is a
+		// health failure; seeded and unconfirmed are valid health successes
+		// that may establish authority after a successful publish, but they do
+		// not credit coverage until a later fresh cycle.
 		const verdict: FreshnessVerdict = this.freshness.observe(split.responseNowMs, Date.now());
 		if (verdict === 'frozen') {
 			// A frozen feed fails validation, so nothing from it is published.
@@ -567,13 +568,15 @@ export class Coordinator {
 			return outcome({});
 		}
 		if (role === 'candidate') {
-			if (verdict !== 'fresh') {
-				log('info', 'adsb.fi candidate not delivered: freshness not confirmed', {
-					freshness: verdict,
-				});
-				return outcome({});
-			}
-			return this.deliverCandidate('adsbfi', split.messages, token, term, trigger, outcome);
+			return this.deliverCandidate(
+				'adsbfi',
+				split.messages,
+				token,
+				term,
+				trigger,
+				verdict === 'fresh',
+				outcome,
+			);
 		}
 
 		// Active cycle.
@@ -665,7 +668,15 @@ export class Coordinator {
 		if (result.kind !== 'ok') return this.failRequest(role, 'opensky', token, outcome, true);
 		if (role === 'standby') return outcome({});
 		if (role === 'candidate') {
-			return this.deliverCandidate('opensky', result.messages, token, term, trigger, outcome);
+			return this.deliverCandidate(
+				'opensky',
+				result.messages,
+				token,
+				term,
+				trigger,
+				true,
+				outcome,
+			);
 		}
 
 		// Active cycle.
@@ -745,14 +756,16 @@ export class Coordinator {
 	// ---- Leader: selection and commit -------------------------------------
 
 	// A candidate's delivery while authority is none: publish every message,
-	// then commit authority and open coverage at the publish-completion time.
-	// Authority changes only if the commit succeeds.
+	// then commit authority. If this response qualifies as coverage, CREDIT
+	// opens coverage separately at the same publish-completion timestamp.
+	// Authority changes only if COMMIT succeeds.
 	private async deliverCandidate(
 		provider: Provider,
 		messages: Messages,
 		token: string,
 		term: number,
 		trigger: Trigger,
+		creditEligible: boolean,
 		outcome: (o: Partial<RequestOutcome>) => RequestOutcome,
 	): Promise<RequestOutcome> {
 		const { log } = this.deps;
@@ -822,6 +835,9 @@ export class Coordinator {
 			log('warn', 'opensky authoritative without credentials: the anonymous budget will run out', {
 				active_interval_ms: this.deps.openskyActiveIntervalMs,
 			});
+		}
+		if (creditEligible && !(await this.creditCoverage(token, provider, commitMs))) {
+			return outcome({ committed: true, leaseLost: true });
 		}
 		// The other provider continues as a standby check at its own rate.
 		const other: Provider = provider === 'adsbfi' ? 'opensky' : 'adsbfi';

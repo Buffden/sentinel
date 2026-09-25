@@ -692,7 +692,7 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
 	});
 
-	it('true first deployment: HEALTHY on the first valid response, and no authority from CREDIT', async () => {
+	it('true first deployment: a seeded adsb.fi response may commit authority without opening coverage', async () => {
 		healthStore.snapshot = {
 			authorityInitialized: false,
 			authorityProvider: null,
@@ -706,12 +706,12 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 			consecutiveFailures: 0,
 			lastFailureMs: null,
 		});
-		// The first response only seeds freshness: no publish, no commit, and
-		// CREDIT is never asked to bootstrap authority.
-		expect(publish).not.toHaveBeenCalled();
+		// Freshness gates coverage, not authority: the first valid response is
+		// published and commits authority, but seeded data does not CREDIT.
+		expect(publish).toHaveBeenCalledTimes(1);
+		expect(timeline.commits.map((entry) => entry.provider)).toEqual(['adsbfi']);
 		expect(timeline.credits).toEqual([]);
-		expect(timeline.commits).toEqual([]);
-		expect(coordinator.authority).toBe('none');
+		expect(coordinator.authority).toBe('adsbfi');
 	});
 
 	it('a Kafka failure after a provider success adds no health failure', async () => {
@@ -842,10 +842,12 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		await vi.advanceTimersByTimeAsync(10);
 		expect(timeline.relinquishes).toEqual(['adsbfi']);
 		expect(events.indexOf('relinquish:adsbfi')).toBeLessThan(events.indexOf('fetch'));
-		// Its emergency attempt only seeds freshness; nothing is published.
-		expect(publish).not.toHaveBeenCalled();
+		// After relinquish, the emergency request is a candidate. Its seeded
+		// response may restore authority, but it still cannot open coverage.
+		expect(publish).toHaveBeenCalledTimes(1);
+		expect(timeline.commits.map((entry) => entry.provider)).toEqual(['adsbfi']);
 		expect(timeline.creditProviders).toEqual([]);
-		expect(coordinator.authority).toBe('none');
+		expect(coordinator.authority).toBe('adsbfi');
 	});
 
 	it.each([
@@ -1124,7 +1126,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		expect(publish).not.toHaveBeenCalled();
 	});
 
-	it('a stored none enters selection; a new acquisition seeds freshness, so the first response cannot commit', async () => {
+	it('a stored none lets the preferred adsb.fi candidate commit on its first valid response', async () => {
 		authorityIs('none');
 		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
 		opensky(() => ({ kind: 'failed', error: 'http_503' }));
@@ -1132,11 +1134,8 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		await vi.advanceTimersByTimeAsync(10);
 		// Stored HEALTHY restores as DEGRADED (downtime proves nothing): tier 2.
 		expect(plans()[0]).toEqual(['adsbfi:tier2', 'opensky:tier2:one_shot']);
-		expect(events).toContain('adsb.fi candidate not delivered: freshness not confirmed');
-		expect(timeline.commits).toEqual([]);
-		// The next request, at the standby rate, is fresh and commits.
-		await vi.advanceTimersByTimeAsync(STANDBY_MS);
-		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
+		expect(timeline.commits.map((entry) => entry.provider)).toEqual(['adsbfi']);
+		expect(timeline.creditProviders).toEqual([]); // seeded: authority only
 		expect(coordinator.authority).toBe('adsbfi');
 		expect(publish).toHaveBeenCalledTimes(1);
 	});
@@ -1152,10 +1151,13 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		const health = events.indexOf('health:opensky:HEALTHY');
 		const pub = events.indexOf('publish');
 		const commit = events.indexOf('commit:opensky');
+		const credit = events.indexOf('credit:opensky');
 		expect(health).toBeGreaterThanOrEqual(0);
 		expect(health).toBeLessThan(pub);
 		expect(pub).toBeLessThan(commit);
+		expect(commit).toBeLessThan(credit);
 		expect(committed()).toEqual([expect.objectContaining({ provider: 'opensky', epoch: 2 })]);
+		expect(timeline.creditProviders).toEqual(['opensky']);
 		expect(coordinator.authority).toBe('opensky');
 	});
 
@@ -1169,6 +1171,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		await vi.advanceTimersByTimeAsync(10);
 		expect(publish).not.toHaveBeenCalled();
 		expect(timeline.commits.map((c) => c.provider)).toEqual(['opensky']);
+		expect(timeline.creditProviders).toEqual(['opensky']);
 	});
 
 	it('a Kafka failure keeps health success and authority none, and retries without re-arming one-shots', async () => {
@@ -1210,8 +1213,9 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(10);
 		expect(timeline.commits).toEqual([]);
-		// Its next requests at the standby rate: one seeds, the next commits.
-		await vi.advanceTimersByTimeAsync(2 * STANDBY_MS + 1_000);
+		// Its next successful request may commit even though it only seeds
+		// freshness; coverage waits for a later fresh cycle.
+		await vi.advanceTimersByTimeAsync(STANDBY_MS + 1_000);
 		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
 		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
 	});

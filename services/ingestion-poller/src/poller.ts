@@ -61,8 +61,6 @@ export interface AdsbRawEvent {
 	fetched_at_ms: number; // processing time of this poll cycle; NOT source event time
 }
 
-// ---- Credit budget (pure helpers, unit-tested) -------------------------------
-
 // ---- Rate-limit headers ------------------------------------------------------
 
 // Both OpenSky rate-limit headers are whole numbers. Anything else (missing,
