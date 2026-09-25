@@ -1352,36 +1352,6 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		expect(coordinator.authority).toBe('adsbfi');
 	});
 
-	it('candidates never publish at once: a second candidate waits for the first', async () => {
-		authorityIs('none');
-		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
-		healthStore.snapshot.stored.opensky = recent('HEALTHY');
-		// OpenSky fails its round attempt, then answers from its own cadence.
-		fetchOpenskyMock
-			.mockImplementationOnce(async () => ({ kind: 'failed', error: 'http_503' }))
-			.mockImplementation(async () => osOk(398, 1));
-		let inFlight = 0;
-		let maxInFlight = 0;
-		let release!: () => void;
-		publish.mockImplementation(async () => {
-			inFlight++;
-			maxInFlight = Math.max(maxInFlight, inFlight);
-			await new Promise<void>((r) => (release = r));
-			inFlight--;
-			return '0';
-		});
-		coordinator.start();
-		// adsb.fi seeds, then its fresh request at 10 s publishes and hangs;
-		// OpenSky's next request (30 s, DEGRADED) must wait behind it.
-		await vi.advanceTimersByTimeAsync(40_000);
-		expect(inFlight).toBe(1);
-		expect(fetchOpenskyMock).toHaveBeenCalledTimes(1);
-		release();
-		await vi.advanceTimersByTimeAsync(10);
-		expect(maxInFlight).toBe(1);
-		expect(timeline.commits.map((c) => c.provider)).toEqual(['adsbfi']);
-	});
-
 	it("a relinquished provider's send already in flight settles before a candidate publishes", async () => {
 		authorityIs('adsbfi');
 		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');

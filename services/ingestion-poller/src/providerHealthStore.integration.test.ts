@@ -205,12 +205,14 @@ describe('Coordinator health end to end against real Redis', () => {
 		try {
 			coordinator.start();
 			// No authority ever committed and no health: a true first deployment.
-			// The first adsb.fi response seeds freshness (HEALTHY, no delivery);
-			// OpenSky is down; the next, fresh adsb.fi response commits epoch 1.
+			// The first valid adsb.fi response seeds freshness, publishes, and
+			// commits epoch 1. Coverage stays closed until the next fresh cycle.
 			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi');
 			expect(await state()).toBe('HEALTHY');
 			expect(await authorityCore()).toEqual(['adsbfi', '1', expect.any(String)]);
 			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('1');
+			await waitFor(async () => (await redis.hget(authorityKey, 'coverage_open_since_ms')) !== '');
+			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('2');
 			// One extension, so the failure close below has length.
 			await waitFor(async () => {
 				const [open, last] = await redis.hmget(
@@ -229,21 +231,22 @@ describe('Coordinator health end to end against real Redis', () => {
 			expect(Number(await redis.hget(healthKeys.adsbfi, 'state_since_ms'))).toBe(
 				Number(degradedSince) + 300,
 			);
-			// Relinquished: literal none, epoch kept, one revision after the
-			// failure close (commit 1, close 2, relinquish 3).
+			// Relinquished: literal none, epoch kept. Revisions are commit 1,
+			// coverage open 2, failure close 3, relinquish 4.
 			const none = await redis.hgetall(authorityKey);
 			expect(none).toMatchObject({ provider: 'none', epoch: '1', coverage_open_since_ms: '' });
-			expect(none['timeline_version']).toBe('3');
+			expect(none['timeline_version']).toBe('4');
 			const closed = await redis.zrange(coverageKey, '0', '-1');
 			expect(closed).toHaveLength(1);
 			expect(closed[0]).toMatch(/^adsbfi\|\d+\|\d+\|failure$/);
 
 			// adsb.fi answers again: RECOVERING is eligible, so its next fresh
-			// request, as a candidate, commits authority from none: epoch 2.
+			// candidate commits epoch 2 and separately opens coverage.
 			failing = false;
 			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi');
 			expect(await redis.hget(authorityKey, 'epoch')).toBe('2');
-			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('4');
+			await waitFor(async () => (await redis.hget(authorityKey, 'coverage_open_since_ms')) !== '');
+			expect(await redis.hget(authorityKey, 'timeline_version')).toBe('6');
 			await waitFor(async () => (await state()) === 'HEALTHY');
 			expect(await redis.hget(healthKeys.adsbfi, 'last_error')).toBe('http_503');
 		} finally {
