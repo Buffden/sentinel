@@ -136,7 +136,7 @@ The Alert Evaluator remains the complete Alert Layer. Removing its direct Neo4j 
 | Consumes | `deviation.candidates`, `proximity.candidates` — group `alert-evaluator` |
 | Reads Redis | `entity:live:*`, `alert-state:*`, `recent-loss:*`, `deviation-state:*`, `{live-provider}:authority`, `{live-provider}:coverage`, leader lease |
 | Writes Redis | `alert-state:*`, `deviation-state:*`; consumes qualifying `recent-loss:*` |
-| Reads TimescaleDB | `position_history` only for last-known signal-loss position payload |
+| Reads TimescaleDB | None. The signal-loss scan takes `last_seen_ms`, `provider`, `on_ground`, callsign and last-known position from Redis `entity:live:{entity_id}` |
 | Publishes | `alerts` |
 | Coordination | Redis lease `alert-evaluator:leader` |
 
@@ -217,7 +217,7 @@ Derived candidate topics have short retention because they are transient rule in
 
 | Object | Writer | Readers |
 | --- | --- | --- |
-| `position_history` | Position Consumer | Alert Evaluator, API |
+| `position_history` | Position Consumer | API |
 | `route_references`, `route_reference_points` | Synthetic/manual seed | Deviation Detector |
 | `alerts` | API | API |
 | `users`, `user_workspaces` | API | API |
