@@ -37,7 +37,7 @@ Only one ADS-B provider is authoritative at a time. The service has three ADS-B 
 
 The ingestion coordinator runs the adsb.fi adapter, and only while it holds the Redis lease `{live-provider}:lease`. It renews the lease every 5 s, and each renewal also writes `heartbeat_ms` to `{live-provider}:authority`. A second coordinator waits as a follower and takes over once the leader's lease expires.
 
-The coordinator also keeps the adsb.fi authority record and coverage timeline (ADR-022 sections 5 to 7). Each cycle fetches, checks that adsb.fi's `now` has advanced, publishes every message, and only then credits coverage in one atomic, lease-checked Redis script. The first credited cycle commits adsb.fi as the authority. A failed cycle closes the open coverage segment at the last success. A new lease holder closes any segment its predecessor left open before it polls. Nothing reads the timeline yet, and there is still no provider health, no OpenSky authority and no failover, so authority stays adsb.fi once committed.
+The coordinator also keeps the adsb.fi authority record and coverage timeline (ADR-022 sections 5 to 7). Each cycle fetches, checks that adsb.fi's `now` has advanced, publishes every message, and only then credits coverage in one atomic, lease-checked Redis script. The first credited cycle commits adsb.fi as the authority. A failed cycle closes the open coverage segment at the last success. A new lease holder closes any segment its predecessor left open before it polls. The Alert Evaluator reads the timeline to measure signal-loss silence (see Alert Evaluator below). There is still no provider health, no OpenSky authority and no failover, so authority stays adsb.fi once committed.
 
 The lease is a duplicate-instance guard, not fencing. Kafka never checks it, so a coordinator paused past its lease can still complete a send after a successor has taken over (ADR-022 section 8). The standalone pollers do not take the lease, so none of them may run alongside a coordinator.
 
@@ -134,7 +134,7 @@ The Alert Evaluator remains the complete Alert Layer. Removing its direct Neo4j 
 | Direction | Contract |
 | --- | --- |
 | Consumes | `deviation.candidates`, `proximity.candidates` — group `alert-evaluator` |
-| Reads Redis | `entity:live:*`, `alert-state:*`, `recent-loss:*`, `deviation-state:*`, leader lease |
+| Reads Redis | `entity:live:*`, `alert-state:*`, `recent-loss:*`, `deviation-state:*`, `{live-provider}:authority`, `{live-provider}:coverage`, leader lease |
 | Writes Redis | `alert-state:*`, `deviation-state:*`; consumes qualifying `recent-loss:*` |
 | Reads TimescaleDB | `position_history` only for last-known signal-loss position payload |
 | Publishes | `alerts` |
@@ -145,6 +145,7 @@ The Alert Evaluator remains the complete Alert Layer. Removing its direct Neo4j 
 - Only the current lease holder joins/polls the `alert-evaluator` Kafka consumer group.
 - Lease renewal and release are ownership-safe compare-and-expire / compare-and-delete operations.
 - Signal loss is detected by a scheduled Redis scan because absence of telemetry does not generate a Kafka event.
+- Each scan first reads `{live-provider}:authority` and `{live-provider}:coverage` once, in one `MULTI`/`EXEC`, and judges every entity against that snapshot with one scan time (ADR-022 section 5). An entity's silence is its **observed silence**: the coverage of the provider in its `provider` field since `last_seen_ms`. `SIGNAL_LOSS` fires only when that reaches the threshold, so provider outages and pipeline downtime add nothing. A missing or uncovered provider, an uninitialized timeline, or an unreadable timeline means no signal-loss alerts; there is no wall-clock fallback. An unreadable timeline ends only that scan: proximity and composite run in the candidate consumer and are unaffected.
 - Route deviation state lives in `deviation-state:{entity_id}`. Replayed/out-of-order classifications cannot regress or double-increment an episode.
 - `proximity.candidates` already means: exact proximity confirmed, new episode, and no `KNOWN_ASSOCIATE` relationship. The evaluator therefore does **not** query Neo4j again.
 - When a proximity candidate arrives, inspect `alert-state` / `recent-loss` for both entities:
@@ -245,8 +246,8 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 | `deviation-state:{entity_id}` | Alert Evaluator | Alert Evaluator | Sustained deviation episode state |
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | Ownership-safe lease |
 | `{live-provider}:lease` | Ingestion coordinator | Ingestion coordinator | Duplicate-instance guard for the coordinator, not fencing |
-| `{live-provider}:authority` | Ingestion coordinator | None yet | Authoritative provider, epoch, open coverage segment, `timeline_version`, and the lease heartbeat |
-| `{live-provider}:coverage` | Ingestion coordinator | None yet | Closed adsb.fi coverage segments, scored by end time |
+| `{live-provider}:authority` | Ingestion coordinator | Alert Evaluator | Authoritative provider, epoch, open coverage segment, `timeline_version`, and the lease heartbeat |
+| `{live-provider}:coverage` | Ingestion coordinator | Alert Evaluator | Closed adsb.fi coverage segments, scored by end time |
 | `position-updates` | Position Consumer | API instances | Live position pub/sub |
 | `alert-events` | API | API instances | Alert lifecycle fan-out |
 

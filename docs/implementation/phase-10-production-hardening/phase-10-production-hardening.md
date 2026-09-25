@@ -58,7 +58,7 @@ Tune implementation choices only from observed evidence.
 
 A measured provider comparison (Pre-CP1) changed this phase's order. ADR-020 now makes adsb.fi the primary regional live source and OpenSky the fallback, with exactly one authoritative live provider at a time, explicit failover, and no merging of positions from both. The order follows from that: build the new primary, make the fallback production-safe, then connect them through provider health, and only then move on to system-wide observability, the failure lab and load.
 
-CP3a and CP3b are **Done**. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
+CP3a, CP3b and CP3c are **Done**. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
 
 | # | Checkpoint | Smallest observable result | Status |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ CP3a and CP3b are **Done**. Every later checkpoint is **Pending**. Each one foll
 | CP3 | Provider health, failover and failback | Design first, with its own ADR. Then cutting off adsb.fi makes OpenSky take over, and adsb.fi takes back over when it has recovered steadily. Both switches are logged, the switch does not bounce during an unstable recovery, and aircraft both providers see raise no false signal-loss alert | Experiment done and ADR-022 accepted. Implementation split into CP3a to CP3f below |
 | CP3a | Coordinator lease and heartbeat | One coordinator process runs the adsb.fi adapter only while it holds `{live-provider}:lease`, and `heartbeat_ms` advances every 5 s. A second coordinator stays idle while the lease is held, and takes over once the first is killed and its lease expires. See [concepts/coordinator-lease/](concepts/coordinator-lease/) | Done |
 | CP3b | adsb.fi authority and coverage timeline | The `{live-provider}:authority` hash and `{live-provider}:coverage` sorted set open, extend and close adsb.fi coverage segments with the ADR-022 reasons, and `timeline_version` changes only when a segment opens, closes or authority is committed. See [concepts/authority-coverage-timeline/](concepts/authority-coverage-timeline/) | Done |
-| CP3c | Evaluator observed silence | The Alert Evaluator counts only the owning provider's coverage toward the signal-loss threshold. Repeating the outage experiment raises no mass `SIGNAL_LOSS` wave, and an evaluator restart after downtime raises no restart burst | Pending |
+| CP3c | Evaluator observed silence | The Alert Evaluator counts only the owning provider's coverage toward the signal-loss threshold. Repeating the outage experiment raises no mass `SIGNAL_LOSS` wave, and an evaluator restart after downtime raises no restart burst. See [concepts/observed-silence/](concepts/observed-silence/) | Done |
 | CP3d | Provider health state machines | The `{live-provider}:health:*` hashes move through `HEALTHY`, `DEGRADED`, `UNAVAILABLE` and `RECOVERING` at the ADR-022 thresholds, driven by real request outcomes | Pending |
 | CP3e | Failover to OpenSky | Cutting adsb.fi off makes OpenSky authoritative only after a successful OpenSky active cycle, and the switch is logged. A failed publish during the switch leaves authority at `none` | Pending |
 | CP3f | Failback hysteresis and restart restoration | adsb.fi takes authority back only when `HEALTHY` and OpenSky has been authoritative for at least 5 min, an unstable recovery does not bounce authority, and a coordinator restart restores state per ADR-022 section 7 | Pending |
@@ -122,11 +122,11 @@ It changes the signal-loss contract, so `ARCHITECTURE.md`, `DATA_MODEL.md` and t
 - a Redis coverage timeline;
 - signal loss measured as silence observed by the aircraft's owning provider.
 
-Of the candidate directions above, the first was chosen, in the form of one coordinator rather than separate pollers. The Position Consumer and mass-silence options were rejected. Implementation is under way: CP3a and CP3b are done, and CP3c to CP3f are pending.
+Of the candidate directions above, the first was chosen, in the form of one coordinator rather than separate pollers. The Position Consumer and mass-silence options were rejected. Implementation is under way: CP3a to CP3c are done, and CP3d to CP3f are pending.
 
 ### CP3 sub-checkpoints
 
-ADR-022 is implemented in six sub-checkpoints. CP3a and CP3b are Done; CP3c to CP3f are Pending. Each one keeps strictly to its own scope and does not build anything that belongs to a later one.
+ADR-022 is implemented in six sub-checkpoints. CP3a to CP3c are Done; CP3d to CP3f are Pending. Each one keeps strictly to its own scope and does not build anything that belongs to a later one.
 
 The evaluator change (CP3c) comes before any provider switching. Coverage plus observed silence fixes the mass-alert wave from the outage experiment using adsb.fi alone. That proves the signal-loss fix end to end before health and switching add complexity.
 

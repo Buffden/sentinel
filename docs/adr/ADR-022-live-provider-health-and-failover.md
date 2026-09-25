@@ -1,6 +1,6 @@
 # ADR-022: Live Provider Health, Failover and Observed Silence
 
-**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat) and CP3b (adsb.fi authority and coverage timeline) implemented; CP3c-CP3f pending.
+**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat), CP3b (adsb.fi authority and coverage timeline) and CP3c (evaluator observed silence) implemented; CP3d-CP3f pending.
 **Date:** 2026-09-23
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-020 (aviation data provider strategy), ADR-021 (`adsb.raw` provider envelope)
 
