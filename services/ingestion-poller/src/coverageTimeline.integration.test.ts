@@ -124,6 +124,60 @@ describe('CoverageTimeline against real Redis', () => {
 		expect(await snapshot()).toBe(before);
 	});
 
+	// Three shapes of close, decided by last_active_success_ms against
+	// coverage_open_since_ms.
+	it('a positive open segment closes exactly as before: member, version, prune', async () => {
+		await timeline.credit(TOKEN, 1_000);
+		await timeline.credit(TOKEN, 1_001);
+		expect(await timeline.close(TOKEN, 'coordinator_shutdown', 2_000)).toEqual({
+			status: 'closed',
+			member: 'adsbfi|1000|1001|coordinator_shutdown',
+			timelineVersion: 2,
+			pruned: 0,
+		});
+		expect(await coverage()).toEqual(['adsbfi|1000|1001|coordinator_shutdown', '1001']);
+	});
+
+	it('a zero-length open segment closes without writing a member, still one revision', async () => {
+		// Opened by one credited cycle and closed before another: start == end.
+		await timeline.credit(TOKEN, 1_000);
+		expect(await timeline.close(TOKEN, 'coordinator_shutdown', 2_000)).toEqual({
+			status: 'closed_empty',
+			timelineVersion: 2,
+		});
+		expect(await coverage()).toEqual([]);
+		const record = await authority();
+		expect(record['coverage_open_since_ms']).toBe('');
+		expect(record['last_active_success_ms']).toBe('1000');
+		expect(record['timeline_version']).toBe('2');
+		// Closed now: a second close is a true no-op.
+		const before = await snapshot();
+		expect(await timeline.close(TOKEN, 'failure', 3_000)).toEqual({ status: 'already_closed' });
+		expect(await snapshot()).toBe(before);
+	});
+
+	it('a backwards open segment is an invariant error: it writes nothing and throws', async () => {
+		// The credit script cannot produce this; only a corrupted hash can.
+		await redis.hset(
+			authorityKey,
+			'provider',
+			'adsbfi',
+			'epoch',
+			'1',
+			'coverage_open_since_ms',
+			'5000',
+			'last_active_success_ms',
+			'4000',
+			'timeline_version',
+			'3',
+		);
+		const before = await snapshot();
+		await expect(timeline.close(TOKEN, 'failure', 6_000)).rejects.toThrow(
+			/before coverage_open_since_ms/,
+		);
+		expect(await snapshot()).toBe(before);
+	});
+
 	it('opens a new segment on recovery, keeping epoch and authority_since_ms', async () => {
 		await timeline.credit(TOKEN, 1_000);
 		await timeline.close(TOKEN, 'failure', 1_500);
@@ -148,14 +202,15 @@ describe('CoverageTimeline against real Redis', () => {
 
 	it('records coordinator_shutdown and coordinator_down as the close reason', async () => {
 		await timeline.credit(TOKEN, 1_000);
+		await timeline.credit(TOKEN, 1_500);
 		await timeline.close(TOKEN, 'coordinator_shutdown', 2_000);
 		await timeline.credit(TOKEN, 3_000);
 		await timeline.credit(TOKEN, 4_000);
 		await timeline.close(TOKEN, 'coordinator_down', 5_000);
 
 		expect(await coverage()).toEqual([
-			'adsbfi|1000|1000|coordinator_shutdown',
-			'1000',
+			'adsbfi|1000|1500|coordinator_shutdown',
+			'1500',
 			'adsbfi|3000|4000|coordinator_down',
 			'4000',
 		]);
@@ -231,6 +286,28 @@ describe('Coordinator with the real lease and timeline', () => {
 
 		const coordinator = new Coordinator({
 			lease: new CoordinatorLease(client, 5_000, leaseKey, authorityKey),
+			// Provider health is not under test here: a store that always
+			// writes and has nothing stored, without touching Redis.
+			health: {
+				readForAcquisition: async () => ({
+					authorityInitialized: true,
+					authorityProvider: 'adsbfi',
+					stored: {
+						adsbfi: { health: null, problem: null, present: false },
+						opensky: { health: null, problem: null, present: false },
+					},
+				}),
+				write: async () => 'written' as const,
+			},
+			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			healthTiming: { degradedTimeoutMs: 60_000, recoveryWindowMs: 120_000 },
+			openskyCadence: {
+				healthyMs: 900_000,
+				degradedMs: 30_000,
+				recoveringMs: 25_000,
+				backoffBaseMs: 60_000,
+				backoffMaxMs: 900_000,
+			},
 			timeline: new CoverageTimeline(client, RETENTION_MS, leaseKey, authorityKey, coverageKey),
 			fetchCycle: async (): Promise<SplitResult> => {
 				if (advance) now += 1_000;
@@ -285,6 +362,13 @@ describe('Coordinator with the real lease and timeline', () => {
 			publishFails = false;
 			await waitFor(async () => (await version()) === 3, 5_000);
 			expect(await field('coverage_open_since_ms')).not.toBe('');
+			// Let it extend at least once, so the frozen close below has length.
+			await waitFor(
+				async () =>
+					Number(await field('last_active_success_ms')) >
+					Number(await field('coverage_open_since_ms')),
+				5_000,
+			);
 
 			// A frozen feed never extends the segment, then closes it at the
 			// last cycle whose now advanced.
@@ -302,6 +386,13 @@ describe('Coordinator with the real lease and timeline', () => {
 			// Advancing again reopens, and clean shutdown closes it.
 			advance = true;
 			await waitFor(async () => (await version()) === 5, 5_000);
+			// One extension, so the shutdown close has length and writes a member.
+			await waitFor(
+				async () =>
+					Number(await field('last_active_success_ms')) >
+					Number(await field('coverage_open_since_ms')),
+				5_000,
+			);
 		} finally {
 			await coordinator.shutdown();
 			await client.quit();

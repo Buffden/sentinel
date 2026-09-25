@@ -1,6 +1,6 @@
 # ADR-022: Live Provider Health, Failover and Observed Silence
 
-**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat), CP3b (adsb.fi authority and coverage timeline) and CP3c (evaluator observed silence) implemented; CP3d-CP3f pending.
+**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat), CP3b (adsb.fi authority and coverage timeline), CP3c (evaluator observed silence) and CP3d (provider health state machines) implemented; CP3e-CP3f pending.
 **Date:** 2026-09-23
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-020 (aviation data provider strategy), ADR-021 (`adsb.raw` provider envelope)
 
@@ -33,7 +33,7 @@ An **active cycle** is a request by the authoritative provider or by the single 
 
 ### 2. Provider health
 
-Health is judged only from provider and request evidence, never from individual aircraft. Every request counts: active cycles and checks alike.
+Health is judged only from provider and request evidence, never from individual aircraft. Every request counts: active cycles and checks alike. A request's outcome is recorded as soon as the request and its validation finish, before anything is published. A publish that fails afterwards adds no health failure and does not undo the recorded success.
 
 **A request fails on any of these:**
 - a network error or timeout;
@@ -47,7 +47,7 @@ Health is judged only from provider and request evidence, never from individual 
 | --- | --- | --- |
 | `HEALTHY` | 120 s of all-successful requests in `RECOVERING`, or the first-deployment bootstrap (section 7) | Any failure: `DEGRADED`, except an OpenSky `429` with a retry time, which goes straight to `UNAVAILABLE` (paused) |
 | `DEGRADED` | A failure while `HEALTHY`, or restored on restart (section 7) | Success: `HEALTHY`. 60 s after entering `DEGRADED` without a success: `UNAVAILABLE` |
-| `UNAVAILABLE` | 60 s in `DEGRADED` without success; any failure while `RECOVERING`; for OpenSky, a `429` with a retry time from any state (sets `paused_until_ms`); or restored on restart (section 7) | First success: `RECOVERING` |
+| `UNAVAILABLE` | 60 s in `DEGRADED` without success; any failure while `RECOVERING`; a failure while health is unknown; for OpenSky, a `429` with a retry time from any state (sets `paused_until_ms`); or restored on restart (section 7) | First success: `RECOVERING` |
 | `RECOVERING` | The first success after `UNAVAILABLE`, or after unknown or stale health (section 4) | 120 s with every request succeeding: `HEALTHY`. Any failure: `UNAVAILABLE`, clearing the recovery streak and restarting the provider's failure backoff |
 
 `RECOVERING` has no failure tolerance, even while the provider is authoritative.
@@ -60,7 +60,7 @@ Health is judged only from provider and request evidence, never from individual 
 | adsb.fi, otherwise | Check every 10 s, with CP1 backoff while failing |
 | OpenSky, authoritative | Active cycle every 25 s |
 | OpenSky, `HEALTHY` standby | Check every 15 min (96 credits a day) |
-| OpenSky, `DEGRADED` standby | Recheck after 60 s |
+| OpenSky, `DEGRADED` standby | Recheck every 30 s, so a check lands inside the 60 s before `UNAVAILABLE` |
 | OpenSky, paused | Nothing until `paused_until_ms`, then an immediate check |
 | OpenSky, `UNAVAILABLE` and not paused | Backoff from 60 s, doubling to 15 min |
 | OpenSky, `RECOVERING` | Every 25 s |
@@ -184,8 +184,8 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
   4. stop renewal;
   5. release the lease.
 - **Lost lease.** A coordinator that loses its lease stops polling, publishing and writing immediately.
-- **Startup, with no initialized authority record** (a true first deployment): a record is initialized only when both `provider` and `epoch` exist, so a hash holding only `heartbeat_ms` counts as none. Authority starts `none`. The first successful adsb.fi active cycle bootstraps adsb.fi to `HEALTHY` and commits it.
-- **Lease acquisition, with an initialized record** (a restart, another coordinator taking over, or the same process reacquiring): before polling, close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. Restore health as follows:
+- **Startup, with no initialized authority record** (a true first deployment): a record is initialized only when both `provider` and `epoch` exist, so a hash holding only `heartbeat_ms` counts as none. Authority starts `none`. A **true first deployment** is decided at lease acquisition: no initialized authority record and no provider health record. Only then does the first valid adsb.fi response initialize adsb.fi health directly as `HEALTHY`, right after the request and validation and before publishing. Committing authority remains the separate step after a successful publish, so a publish that fails leaves adsb.fi `HEALTHY` with authority still uninitialized.
+- **Lease acquisition, with an initialized record** (a restart, another coordinator taking over, or the same process reacquiring): before polling, close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. A provider with no health record, such as the first run of health tracking on an existing authority record, has unknown health: its first success enters `RECOVERING` and its first failure `UNAVAILABLE`. Restore health as follows:
 
 | Stored | Restored as |
 | --- | --- |
@@ -209,7 +209,7 @@ CP3 supports one active coordinator per deployment.
 | Recovery window | 120 s, every request succeeding |
 | Minimum time on OpenSky before failback | 5 min |
 | adsb.fi check rate when not authoritative | 10 s |
-| OpenSky check rates | 15 min standby, 60 s recheck when `DEGRADED` on standby, 25 s recovering |
+| OpenSky check rates | 15 min standby, 30 s recheck when `DEGRADED` on standby, 25 s recovering |
 | adsb.fi frozen feed | `now` not advancing for 10 s |
 | Lease TTL and renewal (heartbeat) | 15 s and 5 s |
 | Stale heartbeat | 60 s |

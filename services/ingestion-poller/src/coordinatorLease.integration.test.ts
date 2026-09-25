@@ -190,6 +190,28 @@ describe('Coordinator against real Redis', () => {
 		let responseNowMs = 1790283486000;
 		const coordinator = new Coordinator({
 			lease,
+			// Provider health is not under test here: a store that always
+			// writes and has nothing stored, without touching Redis.
+			health: {
+				readForAcquisition: async () => ({
+					authorityInitialized: true,
+					authorityProvider: 'adsbfi',
+					stored: {
+						adsbfi: { health: null, problem: null, present: false },
+						opensky: { health: null, problem: null, present: false },
+					},
+				}),
+				write: async () => 'written' as const,
+			},
+			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			healthTiming: { degradedTimeoutMs: 60_000, recoveryWindowMs: 120_000 },
+			openskyCadence: {
+				healthyMs: 900_000,
+				degradedMs: 30_000,
+				recoveringMs: 25_000,
+				backoffBaseMs: 60_000,
+				backoffMaxMs: 900_000,
+			},
 			// A timeline that always succeeds without touching Redis, so the only
 			// command the pause can time out is the lease renewal under test.
 			// The timeline's own fail-closed paths are covered in
@@ -284,6 +306,28 @@ describe('Coordinator against real Redis', () => {
 		let responseNowMs = 1790283486000;
 		const coordinator = new Coordinator({
 			lease,
+			// Provider health is not under test here: a store that always
+			// writes and has nothing stored, without touching Redis.
+			health: {
+				readForAcquisition: async () => ({
+					authorityInitialized: true,
+					authorityProvider: 'adsbfi',
+					stored: {
+						adsbfi: { health: null, problem: null, present: false },
+						opensky: { health: null, problem: null, present: false },
+					},
+				}),
+				write: async () => 'written' as const,
+			},
+			checkOpensky: async () => ({ kind: 'ok' as const, creditsRemaining: null }),
+			healthTiming: { degradedTimeoutMs: 60_000, recoveryWindowMs: 120_000 },
+			openskyCadence: {
+				healthyMs: 900_000,
+				degradedMs: 30_000,
+				recoveringMs: 25_000,
+				backoffBaseMs: 60_000,
+				backoffMaxMs: 900_000,
+			},
 			timeline: {
 				credit: (token, activeSuccessMs) => {
 					credits.push(activeSuccessMs);

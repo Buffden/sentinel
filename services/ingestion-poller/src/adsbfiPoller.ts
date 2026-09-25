@@ -31,6 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import { config } from './config.js';
 import { adsbRawEnvelope } from './envelope.js';
+import { classifyRequestError } from './providerHealth.js';
 
 const TOPIC = 'adsb.raw';
 
@@ -196,11 +197,17 @@ const BOX: Box = {
 	lomax: config.ADSBFI_BOX_LOMAX,
 };
 
-// Fetch and split one adsb.fi response, without publishing. Returns null when
-// the request or response failed (already logged). Split out from publishing
-// so the ingestion coordinator can check it still holds its lease between the
-// two steps.
-export async function fetchAdsbfiCycle(logFn: Log): Promise<SplitResult | null> {
+// Fetch and split one adsb.fi response, without publishing. A failure is
+// returned as its last_error class (providerHealth.ts), already logged:
+// `timeout`, `network:<code>`, `rate_limited`, `http_<status>` or
+// `validation: <message>`. Split out from publishing so the ingestion
+// coordinator can record provider health and check it still holds its lease
+// between the two steps.
+export interface AdsbfiFetchFailure {
+	error: string;
+}
+
+export async function fetchAdsbfiResponse(logFn: Log): Promise<SplitResult | AdsbfiFetchFailure> {
 	const fetchedAtMs = Date.now();
 	let response: Response;
 	try {
@@ -212,26 +219,32 @@ export async function fetchAdsbfiCycle(logFn: Log): Promise<SplitResult | null> 
 		logFn('warn', 'adsb.fi request failed', {
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return null;
+		return { error: classifyRequestError(err) };
 	}
 
 	if (response.status === 429) {
 		logFn('warn', 'adsb.fi rate limited (429, no retry time given)');
-		return null;
+		return { error: 'rate_limited' };
 	}
 	if (!response.ok) {
 		logFn('warn', 'adsb.fi returned an error status', { http_status: response.status });
-		return null;
+		return { error: `http_${response.status}` };
 	}
 
 	try {
 		return splitAdsbfiResponse(await response.json(), BOX, fetchedAtMs);
 	} catch (err) {
-		logFn('error', 'adsb.fi response rejected', {
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return null;
+		const message = err instanceof Error ? err.message : String(err);
+		logFn('error', 'adsb.fi response rejected', { error: message });
+		return { error: `validation: ${message}` };
 	}
+}
+
+// The legacy single-provider loop (`npm run poll:adsbfi`) only needs to know
+// whether the cycle failed.
+export async function fetchAdsbfiCycle(logFn: Log): Promise<SplitResult | null> {
+	const result = await fetchAdsbfiResponse(logFn);
+	return 'error' in result ? null : result;
 }
 
 export function pollCycleSummary(split: SplitResult, firstOffset: string): Record<string, unknown> {

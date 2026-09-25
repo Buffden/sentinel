@@ -47,6 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { Kafka, Partitioners } from 'kafkajs';
 import { config } from './config.js';
 import { adsbRawEnvelope } from './envelope.js';
+import { classifyRequestError } from './providerHealth.js';
 
 // extended=1 instructs OpenSky to include the category field (index 17 in the
 // state vector). Without it, entity_subtype and provider_category are always
@@ -500,6 +501,80 @@ async function fetchStateVectors(): Promise<FetchResult> {
 		kind: 'ok',
 		events: (body.states as unknown[][]).map((s) => mapStateVector(s, fetchedAtMs)),
 		creditsRemaining,
+	};
+}
+
+// ---- OpenSky health check (ADR-022, CP3d) ------------------------------------
+
+// A standby check for the ingestion coordinator: fetch and validate only,
+// never publish. Its outcome is provider health evidence and nothing else.
+
+export type OpenskyCheckResult =
+	| { kind: 'ok'; creditsRemaining: number | null }
+	| { kind: 'failed'; error: string }
+	| { kind: 'rate_limited'; retryAfterSeconds: number | null };
+
+// ADR-022 section 3: `time` is a finite number (epoch seconds, not ms: the
+// adsb.fi millisecond check does not apply), and `states` is an array or null.
+// Returns the problem, or null when the body is valid.
+export function validateOpenskyBody(body: unknown): string | null {
+	if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+		return 'response is not a JSON object';
+	}
+	const { time, states } = body as { time?: unknown; states?: unknown };
+	if (typeof time !== 'number' || !Number.isFinite(time)) return 'time is not a finite number';
+	if (states !== null && !Array.isArray(states)) return 'states is neither an array nor null';
+	return null;
+}
+
+// A failure to get or refresh the access token makes OpenSky unusable from
+// here, so it is a health failure too, classed `auth: ...`. Error messages
+// never contain the client secret.
+export async function checkOpenskyHealth(
+	getToken: () => Promise<string | null> = getAccessToken,
+	fetchFn: typeof fetch = fetch,
+): Promise<OpenskyCheckResult> {
+	let token: string | null;
+	try {
+		token = await getToken();
+	} catch (err) {
+		const cls = classifyRequestError(err);
+		return { kind: 'failed', error: `auth: ${cls.startsWith('error: ') ? cls.slice(7) : cls}` };
+	}
+
+	const headers: Record<string, string> = { Accept: 'application/json' };
+	if (token) headers['Authorization'] = `Bearer ${token}`;
+	let response: Response;
+	try {
+		response = await fetchFn(OPENSKY_URL, {
+			headers,
+			signal: AbortSignal.timeout(config.FETCH_TIMEOUT_MS),
+		});
+	} catch (err) {
+		return { kind: 'failed', error: classifyRequestError(err) };
+	}
+
+	if (response.status === 429) {
+		return {
+			kind: 'rate_limited',
+			retryAfterSeconds: parseRetryAfterSeconds(
+				response.headers.get('x-rate-limit-retry-after-seconds'),
+			),
+		};
+	}
+	if (!response.ok) return { kind: 'failed', error: `http_${response.status}` };
+
+	let body: unknown;
+	try {
+		body = await response.json();
+	} catch {
+		return { kind: 'failed', error: 'validation: response is not JSON' };
+	}
+	const problem = validateOpenskyBody(body);
+	if (problem !== null) return { kind: 'failed', error: `validation: ${problem}` };
+	return {
+		kind: 'ok',
+		creditsRemaining: parseCreditsRemaining(response.headers.get('x-rate-limit-remaining')),
 	};
 }
 

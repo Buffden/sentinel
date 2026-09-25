@@ -50,6 +50,10 @@ export type CreditResult =
 export type CloseResult =
 	| { status: 'lease_mismatch' }
 	| { status: 'closed'; member: string; timelineVersion: number; pruned: number }
+	// The open segment had no length (opened by one credited cycle, closed
+	// before another): coverage closed and a revision taken, but no member,
+	// since a zero-length segment holds no coverage.
+	| { status: 'closed_empty'; timelineVersion: number }
 	// Nothing was open: nothing written, no new revision.
 	| { status: 'already_closed' };
 
@@ -91,8 +95,14 @@ export const CREDIT_SCRIPT = `
 
 // KEYS: lease, authority, coverage. ARGV: token, reason, prune cutoff (ms).
 // Closes at last_active_success_ms, never at the failure or crash time, so no
-// known failure is ever counted as coverage. Prunes only when it closes, so a
-// close with nothing open writes nothing at all.
+// known failure is ever counted as coverage. Prunes only when it writes a
+// member, so a close with nothing open writes nothing at all.
+//
+// A segment is written only when it has length. When the last success is
+// the open time itself, coverage still closes (one revision) but no member is
+// written. A last success before the open time cannot come from the credit
+// script, so it is refused as an invariant error rather than written
+// backwards, and the caller fails closed.
 export const CLOSE_SCRIPT = `
 	if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 		return {'lease_mismatch'}
@@ -103,6 +113,15 @@ export const CLOSE_SCRIPT = `
 		return {'already_closed'}
 	end
 	local last = redis.call('HGET', KEYS[2], 'last_active_success_ms')
+	if not last or tonumber(last) < tonumber(open) then
+		return redis.error_reply('invariant: last_active_success_ms ' .. tostring(last) ..
+			' is before coverage_open_since_ms ' .. open)
+	end
+	if tonumber(last) == tonumber(open) then
+		redis.call('HSET', KEYS[2], 'coverage_open_since_ms', '')
+		local v = redis.call('HINCRBY', KEYS[2], 'timeline_version', 1)
+		return {'closed_empty', v}
+	end
 	local member = provider .. '|' .. open .. '|' .. last .. '|' .. ARGV[2]
 	redis.call('ZADD', KEYS[3], last, member)
 	redis.call('HSET', KEYS[2], 'coverage_open_since_ms', '')
@@ -160,6 +179,7 @@ export class CoverageTimeline {
 		)) as [string, ...(string | number)[]];
 		const [status, member, version, pruned] = reply;
 		if (status === 'lease_mismatch' || status === 'already_closed') return { status };
+		if (status === 'closed_empty') return { status, timelineVersion: Number(member) };
 		if (status === 'closed') {
 			return {
 				status,

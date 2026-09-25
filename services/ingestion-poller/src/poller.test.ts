@@ -12,6 +12,8 @@ import {
 	planNextPoll,
 	projectDailyBudget,
 	rateLimitLogLine,
+	checkOpenskyHealth,
+	validateOpenskyBody,
 } from './poller.js';
 
 // One real OpenSky state vector, positional per the API contract documented
@@ -376,5 +378,99 @@ describe('rateLimitLogLine', () => {
 	it('logs nothing for an ordinary cycle', () => {
 		const ok: CycleOutcome = { kind: 'ok' };
 		expect(rateLimitLogLine(planNextPoll(NOT_PAUSED, ok, T0, OPTS), ok, T0)).toBeNull();
+	});
+});
+
+// ---- OpenSky health check (CP3d) ---------------------------------------------
+
+describe('validateOpenskyBody (ADR-022 section 3)', () => {
+	it('accepts a numeric epoch-seconds time with states as an array or null', () => {
+		// Shape observed live on 2026-09-25: time in seconds, 150 states.
+		expect(validateOpenskyBody({ time: 1790365527, states: [] })).toBeNull();
+		expect(validateOpenskyBody({ time: 1790365527, states: null })).toBeNull();
+	});
+
+	it('rejects a non-numeric time, other states values, and non-objects', () => {
+		expect(validateOpenskyBody({ time: '1790365527', states: [] })).toBe(
+			'time is not a finite number',
+		);
+		expect(validateOpenskyBody({ states: [] })).toBe('time is not a finite number');
+		expect(validateOpenskyBody({ time: Number.NaN, states: [] })).toBe(
+			'time is not a finite number',
+		);
+		expect(validateOpenskyBody({ time: 1790365527, states: {} })).toBe(
+			'states is neither an array nor null',
+		);
+		expect(validateOpenskyBody({ time: 1790365527 })).toBe('states is neither an array nor null');
+		expect(validateOpenskyBody([])).toBe('response is not a JSON object');
+	});
+});
+
+describe('checkOpenskyHealth: fetch and validate only', () => {
+	const anonymous = async () => null;
+	const respond =
+		(status: number, body: unknown, headers: Record<string, string> = {}) =>
+		async () =>
+			new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers });
+
+	it('a valid response is ok, with the credits header when present', async () => {
+		const withCredits = respond(
+			200,
+			{ time: 1790365527, states: null },
+			{ 'x-rate-limit-remaining': '399' },
+		);
+		expect(await checkOpenskyHealth(anonymous, withCredits as typeof fetch)).toEqual({
+			kind: 'ok',
+			creditsRemaining: 399,
+		});
+		const without = respond(200, { time: 1790365527, states: [] });
+		expect(await checkOpenskyHealth(anonymous, without as typeof fetch)).toEqual({
+			kind: 'ok',
+			creditsRemaining: null,
+		});
+	});
+
+	it('a 429 carries its retry time, or null when the header is missing', async () => {
+		// The retry value captured in CP2's real 429.
+		const withRetry = respond(429, '', { 'x-rate-limit-retry-after-seconds': '31952' });
+		expect(await checkOpenskyHealth(anonymous, withRetry as typeof fetch)).toEqual({
+			kind: 'rate_limited',
+			retryAfterSeconds: 31952,
+		});
+		expect(await checkOpenskyHealth(anonymous, respond(429, '') as typeof fetch)).toEqual({
+			kind: 'rate_limited',
+			retryAfterSeconds: null,
+		});
+	});
+
+	it('classifies status, validation, network and token failures', async () => {
+		const check = (fetchFn: unknown, getToken = anonymous) =>
+			checkOpenskyHealth(getToken, fetchFn as typeof fetch);
+		expect(await check(respond(503, ''))).toEqual({ kind: 'failed', error: 'http_503' });
+		expect(await check(respond(200, 'not json'))).toEqual({
+			kind: 'failed',
+			error: 'validation: response is not JSON',
+		});
+		expect(await check(respond(200, { time: 'x', states: [] }))).toEqual({
+			kind: 'failed',
+			error: 'validation: time is not a finite number',
+		});
+		const dns = async () => {
+			throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } });
+		};
+		expect(await check(dns)).toEqual({ kind: 'failed', error: 'network:ENOTFOUND' });
+		const tokenFails = async () => {
+			throw new Error('OpenSky token request failed: HTTP 401');
+		};
+		let fetched = false;
+		const neverCalled = async () => {
+			fetched = true;
+			return new Response('{}');
+		};
+		expect(await check(neverCalled, tokenFails)).toEqual({
+			kind: 'failed',
+			error: 'auth: OpenSky token request failed: HTTP 401',
+		});
+		expect(fetched).toBe(false);
 	});
 });

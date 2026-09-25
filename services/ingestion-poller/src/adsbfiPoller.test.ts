@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { nextDelayMs, splitAdsbfiResponse, toResponseNowMs } from './adsbfiPoller.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+	fetchAdsbfiCycle,
+	fetchAdsbfiResponse,
+	nextDelayMs,
+	splitAdsbfiResponse,
+	toResponseNowMs,
+} from './adsbfiPoller.js';
 
 const BOX = { lamin: 36.9, lomin: -122.8, lamax: 38.1, lomax: -121.5 };
 
@@ -80,5 +86,43 @@ describe('nextDelayMs', () => {
 		for (const failures of [1, 2, 5, 20]) {
 			expect(nextDelayMs(failures, INTERVAL, BASE, MAX, () => 0)).toBe(INTERVAL);
 		}
+	});
+});
+
+// ---- Failure classes for provider health (CP3d) --------------------------------
+
+describe('fetchAdsbfiResponse: last_error classes', () => {
+	const quiet = () => {};
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+	const stub = (impl: () => Promise<Response>) => vi.stubGlobal('fetch', vi.fn(impl));
+
+	it('returns the split response on success, including zero aircraft', async () => {
+		stub(async () => new Response(JSON.stringify({ now: 1790365486000, ac: [] })));
+		const result = await fetchAdsbfiResponse(quiet);
+		expect('error' in result).toBe(false);
+	});
+
+	it('classifies the failure shapes observed live', async () => {
+		stub(async () => new Response('', { status: 400 })); // the bad-path response
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'http_400' });
+		stub(async () => new Response('', { status: 429 }));
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'rate_limited' });
+		stub(async () => {
+			throw Object.assign(new Error('The operation was aborted due to timeout'), {
+				name: 'TimeoutError',
+			});
+		});
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'timeout' });
+		stub(async () => new Response(JSON.stringify({ ac: [] })));
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({
+			error: 'validation: adsb.fi response "now" is not epoch milliseconds: undefined',
+		});
+	});
+
+	it('keeps the legacy wrapper returning null on failure', async () => {
+		stub(async () => new Response('', { status: 503 }));
+		expect(await fetchAdsbfiCycle(quiet)).toBeNull();
 	});
 });

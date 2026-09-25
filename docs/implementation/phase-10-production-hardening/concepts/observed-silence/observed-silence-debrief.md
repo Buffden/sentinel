@@ -172,7 +172,7 @@ This is the boundary that raised 124 alerts in the original outage experiment.
 
 These were seen during CP3c and deliberately left alone:
 
-- **Coordinator `TimeoutNegativeWarning`.** At startup the coordinator logs a negative timeout equal to minus the current epoch in milliseconds, apparently a first-cycle delay computed from a zero "last request" time. Node clamps it to 1 ms, so it is harmless. It is a CP3b coordinator quirk.
+- **`TimeoutNegativeWarning`.** A negative timeout equal to minus the current epoch in milliseconds is logged at startup. Node clamps it to 1 ms, so it is harmless. Later experiments (CP3d) show it appears whenever a KafkaJS producer connects under Node 23, not specifically in the coordinator. That KafkaJS's connect path is the origin is an inference, not traced, and it remains deferred.
 - **Historical `alert-state:*` gates.** Over a thousand gates from earlier runs have no expiry. The Position Consumer clears a gate when its aircraft reappears, which is why the count fell during the runs, but gates for aircraft that never return stay.
 - **A stopped Position Consumer.** If the consumer stops while coverage keeps being credited, aircraft would look silent. That is a consumer failure, not a provider failure, and belongs to the failure lab (ADR-022 non-goals).
 - **Evaluator `.env` loading.** The evaluator runs at the 300 s code default because it does not load its `.env`. CP4 configuration work (ADR-022 non-goals).

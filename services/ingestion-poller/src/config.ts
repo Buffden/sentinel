@@ -239,4 +239,50 @@ export const config = {
 		process.env['COVERAGE_RETENTION_MS'],
 		(86_400 + 900 + 30) * 1_000,
 	),
+
+	// ---- Provider health (ADR-022 section 2) ----
+
+	// DEGRADED becomes UNAVAILABLE this long after entering DEGRADED without a
+	// success, measured from entry. Repeated failures never move it.
+	PROVIDER_DEGRADED_TIMEOUT_MS: requirePositiveInt(
+		'PROVIDER_DEGRADED_TIMEOUT_MS',
+		process.env['PROVIDER_DEGRADED_TIMEOUT_MS'],
+		60_000,
+	),
+	// RECOVERING becomes HEALTHY after this long with every request succeeding.
+	PROVIDER_RECOVERY_WINDOW_MS: requirePositiveInt(
+		'PROVIDER_RECOVERY_WINDOW_MS',
+		process.env['PROVIDER_RECOVERY_WINDOW_MS'],
+		120_000,
+	),
+	// Check rates while OpenSky is on standby. HEALTHY costs 96 credits a day
+	// on the 1-credit SF Bay box. The DEGRADED recheck is 30 s so one check
+	// lands inside the 60 s before UNAVAILABLE.
+	OPENSKY_HEALTHY_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_HEALTHY_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_HEALTHY_CHECK_INTERVAL_MS'],
+		900_000,
+	),
+	OPENSKY_DEGRADED_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_DEGRADED_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_DEGRADED_CHECK_INTERVAL_MS'],
+		30_000,
+	),
+	OPENSKY_RECOVERING_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_RECOVERING_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_RECOVERING_CHECK_INTERVAL_MS'],
+		25_000,
+	),
+	// While UNAVAILABLE and not paused: from this, doubling, up to the max.
+	// Separate from OPENSKY_BACKOFF_*, which belong to the legacy poller.
+	OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS: requirePositiveInt(
+		'OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS',
+		process.env['OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS'],
+		60_000,
+	),
+	OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS: requirePositiveInt(
+		'OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS',
+		process.env['OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS'],
+		900_000,
+	),
 } as const;

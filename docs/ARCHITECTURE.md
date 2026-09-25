@@ -28,16 +28,20 @@ This document defines Sentinel's service boundaries, component contracts, persis
 
 | Direction | Contract |
 | --- | --- |
-| Reads | ADS-B providers (adsb.fi as the regional primary, OpenSky as the fallback, per ADR-020), AISHub |
+| Reads | ADS-B providers (adsb.fi as the regional primary, OpenSky as the fallback, per ADR-020), AISHub; the coordinator also reads its own `{live-provider}` keys at lease acquisition |
 | Publishes | `adsb.raw`, `ais.raw` |
-| Writes Redis | `{live-provider}:lease`, `{live-provider}:authority`, `{live-provider}:coverage` (ingestion coordinator only) |
+| Writes Redis | `{live-provider}:lease`, `{live-provider}:authority`, `{live-provider}:coverage`, `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (ingestion coordinator only) |
 | Coordination | Redis lease `{live-provider}:lease` (ingestion coordinator only) |
 
 Only one ADS-B provider is authoritative at a time. The service has three ADS-B entry points: the standalone OpenSky poller, the standalone adsb.fi poller, and the ingestion coordinator (ADR-022). Which one runs is an operator choice until automatic provider failover exists.
 
 The ingestion coordinator runs the adsb.fi adapter, and only while it holds the Redis lease `{live-provider}:lease`. It renews the lease every 5 s, and each renewal also writes `heartbeat_ms` to `{live-provider}:authority`. A second coordinator waits as a follower and takes over once the leader's lease expires.
 
-The coordinator also keeps the adsb.fi authority record and coverage timeline (ADR-022 sections 5 to 7). Each cycle fetches, checks that adsb.fi's `now` has advanced, publishes every message, and only then credits coverage in one atomic, lease-checked Redis script. The first credited cycle commits adsb.fi as the authority. A failed cycle closes the open coverage segment at the last success. A new lease holder closes any segment its predecessor left open before it polls. The Alert Evaluator reads the timeline to measure signal-loss silence (see Alert Evaluator below). There is still no provider health, no OpenSky authority and no failover, so authority stays adsb.fi once committed.
+The coordinator also keeps the adsb.fi authority record and coverage timeline (ADR-022 sections 5 to 7). Each cycle fetches, checks that adsb.fi's `now` has advanced, publishes every message, and only then credits coverage in one atomic, lease-checked Redis script. The first credited cycle commits adsb.fi as the authority. A failed cycle closes the open coverage segment at the last success. A new lease holder closes any segment its predecessor left open before it polls. A segment with no length (opened by one credited cycle and closed before another) closes without writing a member. The Alert Evaluator reads the timeline to measure signal-loss silence (see Alert Evaluator below).
+
+The coordinator also keeps each provider's health (ADR-022 section 2) in `{live-provider}:health:adsbfi` and `{live-provider}:health:opensky`, moving through `HEALTHY`, `DEGRADED`, `UNAVAILABLE` and `RECOVERING`. Health is judged only from requests to the provider: each request's outcome is recorded right after the request and its validation, before anything is published, so a Kafka failure never counts against a provider. `DEGRADED` becomes `UNAVAILABLE` on a timer 60 s after entry, whether or not a request is finishing. The coordinator checks OpenSky on standby at ADR-022's rates (15 min when `HEALTHY`) without ever publishing its data, and honours an OpenSky `429` retry time as a pause. Health is restored at every lease acquisition, before any request.
+
+Three things are kept apart: **provider health** describes the upstream provider, **coverage** describes successful authoritative delivery, and **authority** decides who may publish. Nothing acts on health yet: there is no OpenSky authority and no failover, so authority stays adsb.fi once committed, even while adsb.fi's health is `UNAVAILABLE`.
 
 The lease is a duplicate-instance guard, not fencing. Kafka never checks it, so a coordinator paused past its lease can still complete a send after a successor has taken over (ADR-022 section 8). The standalone pollers do not take the lease, so none of them may run alongside a coordinator.
 
@@ -247,7 +251,8 @@ The Alert Evaluator does not read Neo4j in the current v1 contract.
 | `alert-evaluator:leader` | Alert Evaluator | Alert Evaluator | Ownership-safe lease |
 | `{live-provider}:lease` | Ingestion coordinator | Ingestion coordinator | Duplicate-instance guard for the coordinator, not fencing |
 | `{live-provider}:authority` | Ingestion coordinator | Alert Evaluator | Authoritative provider, epoch, open coverage segment, `timeline_version`, and the lease heartbeat |
-| `{live-provider}:coverage` | Ingestion coordinator | Alert Evaluator | Closed adsb.fi coverage segments, scored by end time |
+| `{live-provider}:coverage` | Ingestion coordinator | Alert Evaluator | Closed adsb.fi coverage segments with positive length, scored by end time |
+| `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` | Ingestion coordinator | Ingestion coordinator (restore at acquisition), operators | Provider health state and request evidence. Not used for signal loss |
 | `position-updates` | Position Consumer | API instances | Live position pub/sub |
 | `alert-events` | API | API instances | Alert lifecycle fan-out |
 
