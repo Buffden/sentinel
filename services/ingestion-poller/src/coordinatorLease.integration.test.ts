@@ -196,6 +196,7 @@ describe('Coordinator against real Redis', () => {
 				readForAcquisition: async () => ({
 					authorityInitialized: true,
 					authorityProvider: 'adsbfi',
+					authoritySinceMs: null,
 					stored: {
 						adsbfi: { health: null, problem: null, present: false },
 						opensky: { health: null, problem: null, present: false },
@@ -323,6 +324,7 @@ describe('Coordinator against real Redis', () => {
 				readForAcquisition: async () => ({
 					authorityInitialized: true,
 					authorityProvider: 'adsbfi',
+					authoritySinceMs: null,
 					stored: {
 						adsbfi: { health: null, problem: null, present: false },
 						opensky: { health: null, problem: null, present: false },
@@ -347,6 +349,8 @@ describe('Coordinator against real Redis', () => {
 				},
 				close: (token, reason, nowMs) => timeline.close(token, reason, nowMs),
 				commit: (token, provider, atMs) => timeline.commit(token, provider, atMs),
+				handover: (token, expected, next, atMs) =>
+					timeline.handover(token, expected, next, atMs),
 				relinquish: (token, expected, nowMs) => timeline.relinquish(token, expected, nowMs),
 			},
 			fetchCycle: async (): Promise<SplitResult> => ({

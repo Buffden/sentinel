@@ -713,6 +713,7 @@ describe('Coordinator provider health (ADR-022 section 2, CP3d)', () => {
 		healthStore.snapshot = {
 			authorityInitialized: false,
 			authorityProvider: null,
+			authoritySinceMs: null,
 			stored: { adsbfi: UNKNOWN, opensky: UNKNOWN },
 		};
 		fetchOpenskyMock.mockImplementation(async () => ({ kind: 'failed', error: 'http_503' }));
@@ -1497,6 +1498,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		healthStore.snapshot = {
 			authorityInitialized: false,
 			authorityProvider: null,
+			authoritySinceMs: null,
 			stored: { adsbfi: UNKNOWN, opensky: UNKNOWN },
 		};
 		adsbfiFails();
