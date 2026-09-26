@@ -401,7 +401,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			r.coordinator.start();
 
 			await waitFor(async () => (await redis.zcard(coverageKey)) === 1);
-			expect((await redis.zrange(coverageKey, 0, -1))[0]).toMatch(
+			expect((await redis.zrange(coverageKey, '0', '-1'))[0]).toMatch(
 				/^opensky\|\d+\|\d+\|coordinator_down$/,
 			);
 			await waitFor(() => r.acceptedProviders.length > 0);
