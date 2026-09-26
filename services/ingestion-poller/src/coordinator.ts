@@ -133,6 +133,7 @@ interface RequestOutcome {
 	providerFailed: boolean;
 	// An active cycle failed (including a publish failure).
 	cycleFailed: boolean;
+	deliveryFailed: boolean;
 	committed: boolean;
 	leaseLost: boolean;
 }
@@ -204,8 +205,9 @@ export class Coordinator {
 	// ---- Selection while authority is none ----
 	// Providers that used their one immediate attempt in this entry into none.
 	private oneShotUsed = new Set<Provider>();
-	private retryStep = 0;
-	private retryTimer: Timer | null = null;
+	// Delivery failures are not provider-health failures. Back them off on
+	// that provider's request schedule instead of maintaining another timer.
+	private deliveryFailures: Record<Provider, number> = { adsbfi: 0, opensky: 0 };
 	private round: Promise<void> | null = null;
 
 	constructor(private readonly deps: CoordinatorDeps) {
@@ -361,8 +363,6 @@ export class Coordinator {
 			if (deadline !== null) clearTimeout(deadline);
 			this.deadlineTimers[provider] = null;
 		}
-		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
-		this.retryTimer = null;
 	}
 
 	// ---- Leader: request loops -----------------------------------------------
@@ -414,6 +414,23 @@ export class Coordinator {
 	): void {
 		const role = this.roleOf(provider);
 		let delayMs: number;
+
+		if (outcome.committed) this.deliveryFailures[provider] = 0;
+		if (role === 'candidate' && outcome.deliveryFailed) {
+			const step = ++this.deliveryFailures[provider];
+			delayMs = nextSelectionRetryMs(
+				step,
+				this.deps.selectionRetryBaseMs,
+				this.deps.selectionRetryMaxMs,
+			);
+			this.deps.log('warn', 'candidate delivery backing off', {
+				provider,
+				retry_in_ms: delayMs,
+			});
+			this.scheduleRequest(provider, delayMs, token, term);
+			return;
+		}
+
 		if (provider === 'adsbfi') {
 			const failed = outcome.role === 'active' ? outcome.cycleFailed : outcome.providerFailed;
 			this.adsbfiFailures = failed ? this.adsbfiFailures + 1 : 0;
@@ -466,8 +483,8 @@ export class Coordinator {
 		const stale =
 			role === 'candidate' && trigger === 'round' && this.isProviderStale(provider, Date.now());
 		return provider === 'adsbfi'
-			? this.adsbfiRequest(role, stale, token, term, trigger)
-			: this.openskyRequest(role, stale, token, term, trigger);
+			? this.adsbfiRequest(role, stale, token, term)
+			: this.openskyRequest(role, stale, token, term);
 	}
 
 	private outcomeFor(role: Role): (o: Partial<RequestOutcome>) => RequestOutcome {
@@ -475,6 +492,7 @@ export class Coordinator {
 			role,
 			providerFailed: false,
 			cycleFailed: false,
+			deliveryFailed: false,
 			committed: false,
 			leaseLost: false,
 			...o,
@@ -486,7 +504,6 @@ export class Coordinator {
 		stale: boolean,
 		token: string,
 		term: number,
-		trigger: Trigger,
 	): Promise<RequestOutcome> {
 		const { lease, log } = this.deps;
 		const outcome = this.outcomeFor(role);
@@ -552,7 +569,6 @@ export class Coordinator {
 				split.messages,
 				token,
 				term,
-				trigger,
 				verdict === 'fresh',
 				outcome,
 			);
@@ -597,7 +613,6 @@ export class Coordinator {
 		stale: boolean,
 		token: string,
 		term: number,
-		trigger: Trigger,
 	): Promise<RequestOutcome> {
 		const { lease, log } = this.deps;
 		const outcome = this.outcomeFor(role);
@@ -657,7 +672,6 @@ export class Coordinator {
 				result.messages,
 				token,
 				term,
-				trigger,
 				true,
 				outcome,
 			);
@@ -748,18 +762,10 @@ export class Coordinator {
 		messages: Messages,
 		token: string,
 		term: number,
-		trigger: Trigger,
 		creditEligible: boolean,
 		outcome: (o: Partial<RequestOutcome>) => RequestOutcome,
 	): Promise<RequestOutcome> {
 		const { log } = this.deps;
-		// While a delivery retry is pending, requests at a provider's own rate
-		// are health evidence only; the retry round makes the next delivery.
-		if (trigger === 'cadence' && this.retryTimer !== null) {
-			log('info', 'candidate not delivered: waiting for the selection retry', { provider });
-			return outcome({});
-		}
-
 		// Candidate publish + COMMIT stay in the same serialization lane. If two
 		// candidates finish fetching together, the second re-checks mode only
 		// after the first has either committed authority or failed.
@@ -772,8 +778,7 @@ export class Coordinator {
 					provider,
 					error: published.error,
 				});
-				this.scheduleSelectionRetry(token, term, 'publish_failed');
-				return outcome({});
+				return outcome({ deliveryFailed: true });
 			}
 
 			const commitMs = Date.now();
@@ -800,14 +805,11 @@ export class Coordinator {
 					provider,
 					commit_ms: commitMs,
 				});
-				this.scheduleSelectionRetry(token, term, 'stale_clock');
-				return outcome({});
+				return outcome({ deliveryFailed: true });
 			}
 
 			this.mode = provider;
-			this.retryStep = 0;
-			if (this.retryTimer !== null) clearTimeout(this.retryTimer);
-			this.retryTimer = null;
+			this.deliveryFailures[provider] = 0;
 			log('info', 'authority committed', {
 				provider,
 				epoch: result.epoch,
@@ -876,12 +878,11 @@ export class Coordinator {
 		this.enterNone(token, term, 'relinquished');
 	}
 
-	// A genuine entry into none: one-shots and the delivery retry start over.
+	// A genuine entry into none: one-shots and per-provider delivery backoff
+	// start over.
 	private enterNone(token: string, term: number, reason: string): void {
 		this.oneShotUsed = new Set();
-		this.retryStep = 0;
-		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
-		this.retryTimer = null;
+		this.deliveryFailures = { adsbfi: 0, opensky: 0 };
 		this.startSelectionRound(token, term, reason);
 	}
 
@@ -915,10 +916,7 @@ export class Coordinator {
 		}
 		if (!this.current(token, term)) return;
 		if (this.mode === 'none') {
-			this.deps.log('warn', 'selection round ended without an authority', {
-				reason,
-				retry_pending: this.retryTimer !== null,
-			});
+			this.deps.log('warn', 'selection round ended without an authority', { reason });
 		}
 		// Every provider keeps a request scheduled at its own rate.
 		for (const provider of PROVIDERS) {
@@ -928,23 +926,6 @@ export class Coordinator {
 				this.scheduleRequest(provider, delayMs, token, term);
 			}
 		}
-	}
-
-	// A delivery failed for a reason that is not provider health: retry the
-	// whole round on the coordinator's own backoff. One-shots are not re-armed.
-	private scheduleSelectionRetry(token: string, term: number, reason: string): void {
-		if (this.retryTimer !== null || !this.current(token, term)) return;
-		this.retryStep++;
-		const delayMs = nextSelectionRetryMs(
-			this.retryStep,
-			this.deps.selectionRetryBaseMs,
-			this.deps.selectionRetryMaxMs,
-		);
-		this.deps.log('warn', 'selection retry scheduled', { reason, retry_in_ms: delayMs });
-		this.retryTimer = setTimeout(() => {
-			this.retryTimer = null;
-			if (this.mode === 'none') this.startSelectionRound(token, term, 'retry');
-		}, delayMs);
 	}
 
 	private isProviderStale(provider: Provider, nowMs: number): boolean {
@@ -1267,8 +1248,6 @@ export class Coordinator {
 			if (timer !== null) clearTimeout(timer);
 			this.requestTimers[provider] = null;
 		}
-		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
-		this.retryTimer = null;
 		if (this.pendingAcquire !== null) await this.pendingAcquire;
 
 		// 2. Let in-flight requests and any selection round finish, including

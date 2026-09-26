@@ -259,9 +259,9 @@ export const config = {
 		10_000,
 		ADSBFI_MIN_REQUEST_INTERVAL_MS,
 	),
-	// Retry of a whole selection round after a delivery failure while
-	// authority is none (a publish that failed, or a commit refused for its
-	// time): from this, doubling, up to the max.
+	// Per-provider candidate delivery backoff while authority is none. A
+	// healthy upstream response whose Kafka publish or authority commit cannot
+	// complete retries from this base, doubling up to the max.
 	SELECTION_RETRY_BASE_MS: requirePositiveInt(
 		'SELECTION_RETRY_BASE_MS',
 		process.env['SELECTION_RETRY_BASE_MS'],
