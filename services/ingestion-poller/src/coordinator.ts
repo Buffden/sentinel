@@ -16,8 +16,8 @@
 // Health drives authority in one direction only (ADR-022 section 4): when the
 // authoritative provider's health reaches UNAVAILABLE, authority is
 // relinquished to none, and a selection round tries eligible providers until
-// one commits. A working authority is never replaced here; failback from
-// Proactive failback from a healthy OpenSky authority is not implemented here.
+// one commits. Proactive failback from a healthy OpenSky authority is not
+// implemented here.
 //
 // Three things stay separate. Provider health describes the upstream
 // provider. Coverage describes successful authoritative delivery. Authority
@@ -48,21 +48,11 @@
 // the token, so a stale coordinator can still publish but cannot write
 // authority or coverage.
 
-import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
-import { Redis } from 'ioredis';
-import { Kafka, Partitioners } from 'kafkajs';
-import { config } from './config.js';
-import {
-	fetchAdsbfiResponse,
-	type AdsbfiFetchFailure,
-	type Log,
-	type SplitResult,
-} from './adsbfiPoller.js';
+import type { AdsbfiFetchFailure, Log, SplitResult } from './adsbfiPoller.js';
 import { AdsbfiFreshness, type FreshnessVerdict } from './adsbfiFreshness.js';
 import { CoordinatorLease } from './coordinatorLease.js';
 import { CoverageTimeline, type CoverageCloseReason } from './coverageTimeline.js';
-import { fetchOpenskyCycle, openskyAuthenticated, type OpenskyFetchResult } from './poller.js';
+import type { OpenskyFetchResult } from './poller.js';
 import {
 	applyEvidence,
 	expireDegraded,
@@ -590,7 +580,6 @@ export class Coordinator {
 			skipped_non_icao: split.skippedNonIcao,
 			skipped_no_position: split.skippedNoPosition,
 			skipped_outside_box: split.skippedOutsideBox,
-			topic: config.TOPIC,
 			first_offset: published.firstOffset,
 			lease_token: token,
 			freshness: verdict,
@@ -1314,128 +1303,4 @@ export class Coordinator {
 			});
 		}
 	}
-}
-
-// ---- Process wiring --------------------------------------------------------
-
-function main(): void {
-	const instanceId = randomUUID();
-
-	const log: Log = (level, message, extra) => {
-		process.stdout.write(
-			JSON.stringify({
-				timestamp: new Date().toISOString(),
-				level,
-				service: 'ingestion-coordinator',
-				instance_id: instanceId,
-				message,
-				...extra,
-			}) + '\n',
-		);
-	};
-	const adsbfiLog: Log = (level, message, extra) =>
-		log(level, message, { provider: 'adsbfi', ...extra });
-
-	// A renewal that cannot reach Redis must fail rather than wait: the
-	// command timeout turns a hung renewal into a lost lease well before the
-	// key can expire (see the invariant in config.ts).
-	const redis = new Redis(config.REDIS_URL, {
-		commandTimeout: config.COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
-	});
-
-	const producer = new Kafka({
-		clientId: 'ingestion-coordinator',
-		brokers: config.KAFKA_BROKERS,
-		logLevel: 0,
-	}).producer({
-		// Same partitioner as both pollers, so an ICAO24 key maps to the same
-		// partition whichever process published it.
-		createPartitioner: Partitioners.LegacyPartitioner,
-	});
-
-	const coordinator = new Coordinator({
-		lease: new CoordinatorLease(redis, config.COORDINATOR_LEASE_TTL_MS),
-		// Same client as the lease, so timeline writes share its command
-		// timeout and run in order on one connection.
-		timeline: new CoverageTimeline(redis, config.COVERAGE_RETENTION_MS),
-		health: new ProviderHealthStore(redis),
-		fetchCycle: () => fetchAdsbfiResponse(adsbfiLog),
-		fetchOpensky: () => fetchOpenskyCycle(),
-		openskyAuthenticated: openskyAuthenticated(),
-		healthTiming: {
-			degradedTimeoutMs: config.PROVIDER_DEGRADED_TIMEOUT_MS,
-			recoveryWindowMs: config.PROVIDER_RECOVERY_WINDOW_MS,
-		},
-		openskyCadence: {
-			healthyMs: config.OPENSKY_HEALTHY_CHECK_INTERVAL_MS,
-			degradedMs: config.OPENSKY_DEGRADED_CHECK_INTERVAL_MS,
-			recoveringMs: config.OPENSKY_RECOVERING_CHECK_INTERVAL_MS,
-			backoffBaseMs: config.OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS,
-			backoffMaxMs: config.OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS,
-		},
-		publish: async (messages) => {
-			const results = await producer.send({ topic: config.TOPIC, messages });
-			return results[0]?.baseOffset ?? 'unknown';
-		},
-		log,
-		renewalIntervalMs: config.COORDINATOR_RENEWAL_INTERVAL_MS,
-		followerRetryMs: config.COORDINATOR_FOLLOWER_RETRY_MS,
-		pollIntervalMs: config.ADSBFI_POLL_INTERVAL_MS,
-		backoffBaseMs: config.ADSBFI_BACKOFF_BASE_MS,
-		backoffMaxMs: config.ADSBFI_BACKOFF_MAX_MS,
-		frozenFeedMs: config.ADSBFI_FROZEN_FEED_MS,
-		adsbfiStandbyIntervalMs: config.ADSBFI_STANDBY_INTERVAL_MS,
-		openskyActiveIntervalMs: config.OPENSKY_ACTIVE_INTERVAL_MS,
-		selectionRetryBaseMs: config.SELECTION_RETRY_BASE_MS,
-		selectionRetryMaxMs: config.SELECTION_RETRY_MAX_MS,
-	});
-
-	let shuttingDown = false;
-	const shutdown = async (signal: string): Promise<void> => {
-		if (shuttingDown) return;
-		shuttingDown = true;
-		log('info', 'shutdown initiated', { signal });
-		await coordinator.shutdown();
-		// 6. Disconnect only after the lease is released.
-		await producer.disconnect();
-		await redis.quit();
-		log('info', 'shutdown complete');
-		process.exit(0);
-	};
-	process.on('SIGINT', () => {
-		shutdown('SIGINT').catch(() => process.exit(1));
-	});
-	process.on('SIGTERM', () => {
-		shutdown('SIGTERM').catch(() => process.exit(1));
-	});
-
-	producer
-		.connect()
-		.then(() => {
-			log('info', 'coordinator starting', {
-				providers: ['adsbfi', 'opensky'],
-				opensky_authenticated: openskyAuthenticated(),
-				degraded_timeout_ms: config.PROVIDER_DEGRADED_TIMEOUT_MS,
-				recovery_window_ms: config.PROVIDER_RECOVERY_WINDOW_MS,
-				lease_ttl_ms: config.COORDINATOR_LEASE_TTL_MS,
-				renewal_interval_ms: config.COORDINATOR_RENEWAL_INTERVAL_MS,
-				follower_retry_ms: config.COORDINATOR_FOLLOWER_RETRY_MS,
-				redis_command_timeout_ms: config.COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
-				poll_interval_ms: config.ADSBFI_POLL_INTERVAL_MS,
-				adsbfi_standby_interval_ms: config.ADSBFI_STANDBY_INTERVAL_MS,
-				opensky_active_interval_ms: config.OPENSKY_ACTIVE_INTERVAL_MS,
-				frozen_feed_ms: config.ADSBFI_FROZEN_FEED_MS,
-				coverage_retention_ms: config.COVERAGE_RETENTION_MS,
-			});
-			coordinator.start();
-		})
-		.catch((err: unknown) => {
-			log('error', 'coordinator failed to start', { error: errorMessage(err) });
-			process.exit(1);
-		});
-}
-
-// Only run when executed directly (`npm run coordinate`), not when imported by tests.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-	main();
 }
