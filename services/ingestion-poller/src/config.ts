@@ -11,17 +11,6 @@ function requirePositiveInt(name: string, raw: string | undefined, def: number):
 	return n;
 }
 
-function requireNonNegativeInt(name: string, raw: string | undefined, def: number): number {
-	if (raw === undefined || raw === '') return def;
-	const n = parseInt(raw, 10);
-	if (!Number.isFinite(n) || n < 0) {
-		throw new Error(
-			`Config: ${name}=${JSON.stringify(raw)} must be a non-negative integer (0 = no cap)`,
-		);
-	}
-	return n;
-}
-
 function requireFiniteNumber(name: string, raw: string | undefined, def: number): number {
 	if (raw === undefined || raw === '') return def;
 	const n = Number(raw);
@@ -95,50 +84,6 @@ export const config = {
 	// Canonical Kafka topic — do not change without an ADR.
 	TOPIC: 'adsb.raw',
 
-	// How often to poll OpenSky. OpenSky limits access by a daily credit budget,
-	// not a request rate (ADR-020): 400 credits a day anonymous, 4,000 logged in.
-	// The 10 s (anonymous) and 5 s (logged in) figures OpenSky publishes are data
-	// resolution, not an allowed request rate. At 1 credit per call, 25 s is
-	// 3,456 calls a day, inside the logged-in budget.
-	POLL_INTERVAL_MS: requirePositiveInt('POLL_INTERVAL_MS', process.env['POLL_INTERVAL_MS'], 25_000),
-
-	// HTTP fetch timeout per poll cycle. Must leave headroom inside POLL_INTERVAL_MS.
-	FETCH_TIMEOUT_MS: requirePositiveInt('FETCH_TIMEOUT_MS', process.env['FETCH_TIMEOUT_MS'], 8_000),
-
-	// Bounding box for the OpenSky states/all request. Decimal degrees.
-	// Defaults to the SF Bay box adsb.fi also monitors, so a failover between
-	// the two keeps the same area. It is 1.56 square degrees: 1 credit per call.
-	OPENSKY_LAMIN: requireFiniteNumber('OPENSKY_LAMIN', process.env['OPENSKY_LAMIN'], 36.9),
-	OPENSKY_LOMIN: requireFiniteNumber('OPENSKY_LOMIN', process.env['OPENSKY_LOMIN'], -122.8),
-	OPENSKY_LAMAX: requireFiniteNumber('OPENSKY_LAMAX', process.env['OPENSKY_LAMAX'], 38.1),
-	OPENSKY_LOMAX: requireFiniteNumber('OPENSKY_LOMAX', process.env['OPENSKY_LOMAX'], -121.5),
-
-	// Backoff after a 429 whose X-Rate-Limit-Retry-After-Seconds is missing or
-	// unusable. A valid retry header always wins over this. Each retry waits a
-	// random time between the base and an exponential ceiling (base, 2x, 4x...),
-	// capped at the max. Fallback retries are never sooner than 60 s apart and
-	// never more than 15 min apart, so an exhausted budget is not probed in a
-	// fast loop. A valid retry header can legitimately pause for much longer.
-	OPENSKY_BACKOFF_BASE_MS: requirePositiveInt(
-		'OPENSKY_BACKOFF_BASE_MS',
-		process.env['OPENSKY_BACKOFF_BASE_MS'],
-		60_000,
-	),
-	OPENSKY_BACKOFF_MAX_MS: requirePositiveInt(
-		'OPENSKY_BACKOFF_MAX_MS',
-		process.env['OPENSKY_BACKOFF_MAX_MS'],
-		900_000,
-	),
-
-	// Maximum messages per producer.send() call.
-	// 0 = no cap (default) — preserves current behavior during this refactor.
-	// Set to a positive integer to enable chunking when polling larger geographic regions.
-	POLLER_BATCH_MAX_MESSAGES: requireNonNegativeInt(
-		'POLLER_BATCH_MAX_MESSAGES',
-		process.env['POLLER_BATCH_MAX_MESSAGES'],
-		0,
-	),
-
 	// OAuth2 client-credentials, from OpenSky's account "API Client" section.
 	// Optional: undefined means unauthenticated requests, same as before —
 	// the poller falls back to the anonymous rate limit rather than failing.
@@ -174,16 +119,17 @@ export const config = {
 		-121.5,
 	),
 
-	// Normal cadence. adsb.fi positions changed about every 2 s per aircraft in
-	// the provider experiment, and its public limit is 1 request per second.
+	// Active cadence while adsb.fi is authoritative. Its public limit is one
+	// request per second; the provider experiment observed position changes
+	// about every two seconds per aircraft.
 	ADSBFI_POLL_INTERVAL_MS: requireAtLeast(
 		'ADSBFI_POLL_INTERVAL_MS',
 		process.env['ADSBFI_POLL_INTERVAL_MS'],
 		2_000,
 		ADSBFI_MIN_REQUEST_INTERVAL_MS,
 	),
-	// After a failed cycle (429, other HTTP error, network error): bounded
-	// exponential backoff with full jitter, never shorter than the poll interval.
+	// Coordinator backoff after an adsb.fi request failure: bounded
+	// exponential backoff with full jitter, never shorter than the active cadence.
 	ADSBFI_BACKOFF_BASE_MS: requirePositiveInt(
 		'ADSBFI_BACKOFF_BASE_MS',
 		process.env['ADSBFI_BACKOFF_BASE_MS'],
@@ -274,7 +220,6 @@ export const config = {
 		25_000,
 	),
 	// While UNAVAILABLE and not paused: from this, doubling, up to the max.
-	// Separate from OPENSKY_BACKOFF_*, which belong to the legacy poller.
 	OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS: requirePositiveInt(
 		'OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS',
 		process.env['OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS'],
