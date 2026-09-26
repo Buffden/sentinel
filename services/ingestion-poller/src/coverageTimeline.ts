@@ -15,7 +15,7 @@
 // authority: the coordinator treats it as `none` in memory, and the first
 // COMMIT, by either provider, creates epoch 1. Once initialized, having no
 // authority is stored literally as provider=none, never as an empty or
-// missing field, which CP3c would read as an untrusted timeline.
+// missing field, which readers treat as an uninitialized timeline.
 //
 // timeline_version is a revision: each script run that opens or closes a
 // segment, commits authority or relinquishes it increments it once. Extending

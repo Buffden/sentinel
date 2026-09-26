@@ -9,8 +9,8 @@
 // Pure: no Redis, no timers. The coordinator owns the clock, the deadline
 // timer and persistence (providerHealthStore.ts), and passes times in.
 //
-// In CP3d nothing acts on health. It may say adsb.fi is UNAVAILABLE while
-// adsb.fi stays authoritative; switching belongs to CP3e.
+// The state machine is policy-only. The coordinator decides what an
+// UNAVAILABLE state means for authority and request scheduling.
 
 export type Provider = 'adsbfi' | 'opensky';
 export type HealthState = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE' | 'RECOVERING';
