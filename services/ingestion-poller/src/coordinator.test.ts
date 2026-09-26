@@ -1174,7 +1174,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		expect(timeline.creditProviders).toEqual(['opensky']);
 	});
 
-	it('a Kafka failure keeps health success and authority none, and retries without re-arming one-shots', async () => {
+	it('a Kafka failure keeps health success and backs off that candidate without a retry timer', async () => {
 		authorityIs('none');
 		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
 		healthStore.snapshot.stored.opensky = recent('HEALTHY');
@@ -1190,17 +1190,17 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 			consecutiveFailures: 0,
 			lastFailureMs: null,
 		});
-		expect(logs.find((l) => l.message === 'selection retry scheduled')?.extra).toMatchObject({
-			reason: 'publish_failed',
+		expect(logs.find((l) => l.message === 'candidate delivery backing off')?.extra).toMatchObject({
+			provider: 'opensky',
 			retry_in_ms: 60_000,
 		});
-		// The retry round: adsb.fi's emergency one-shot is not offered again.
+		// No second selection-round timer exists. OpenSky retries on its own
+		// candidate schedule, and a second delivery failure doubles its backoff.
 		await vi.advanceTimersByTimeAsync(60_000);
-		expect(plans()).toEqual([['adsbfi:tier2:one_shot', 'opensky:tier2'], ['opensky:tier1']]);
-		// Still failing: the next retry doubles.
+		expect(plans()).toEqual([['adsbfi:tier2:one_shot', 'opensky:tier2']]);
 		expect(
 			logs
-				.filter((l) => l.message === 'selection retry scheduled')
+				.filter((l) => l.message === 'candidate delivery backing off')
 				.map((l) => l.extra['retry_in_ms']),
 		).toEqual([60_000, 120_000]);
 	});
@@ -1220,7 +1220,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
 	});
 
-	it('a commit refused for its time keeps authority none, adds no health failure, and a later retry commits', async () => {
+	it('a commit refused for its time keeps authority none and retries on the provider schedule', async () => {
 		authorityIs('none');
 		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
 		healthStore.snapshot.stored.opensky = recent('HEALTHY');
@@ -1231,9 +1231,10 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		await vi.advanceTimersByTimeAsync(10);
 		expect(coordinator.authority).toBe('none');
 		expect(events).toContain('authority commit refused: time is not after the last success');
-		expect(logs.find((l) => l.message === 'selection retry scheduled')?.extra['reason']).toBe(
-			'stale_clock',
-		);
+		expect(logs.find((l) => l.message === 'candidate delivery backing off')?.extra).toMatchObject({
+			provider: 'opensky',
+			retry_in_ms: 60_000,
+		});
 		expect(healthStore.last('opensky')?.lastFailureMs).toBeNull();
 		expect(coordinator.isLeader).toBe(true);
 		await vi.advanceTimersByTimeAsync(60_000);

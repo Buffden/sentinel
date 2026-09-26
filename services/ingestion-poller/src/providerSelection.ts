@@ -86,9 +86,9 @@ export function nextProviderDelayMs(
 	return Math.max(intervalMs, Math.floor(random() * ceiling));
 }
 
-// The coordinator's own retry after a delivery failure while none (a publish
-// that failed, or a commit refused for its time): 60 s, doubling to 15 min.
-// Separate from provider health: the provider itself answered correctly.
+// Backoff after a candidate delivery failure while authority is none (a
+// publish failure or a commit refused for its time). It is per provider and
+// separate from provider health because the upstream response was valid.
 export function nextSelectionRetryMs(step: number, baseMs: number, maxMs: number): number {
 	return Math.min(maxMs, baseMs * 2 ** (Math.max(1, step) - 1));
 }
