@@ -313,6 +313,165 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 		}
 	}, 15_000);
 
+	it('fails back from OpenSky only after the minimum authority window, using a real Kafka handover', async () => {
+		const authoritySince = Date.now();
+		await redis.hset(
+			authorityKey,
+			'provider',
+			'opensky',
+			'epoch',
+			'4',
+			'authority_since_ms',
+			String(authoritySince),
+			'coverage_open_since_ms',
+			'',
+			'timeline_version',
+			'8',
+		);
+		await redis.hset(
+			healthKeys.opensky,
+			...toHashFields('opensky', healthy('opensky', authoritySince)),
+		);
+		await redis.hset(
+			healthKeys.adsbfi,
+			...toHashFields('adsbfi', healthy('adsbfi', authoritySince)),
+		);
+
+		let adsbSequence = 0;
+		let openskySequence = 0;
+		let responseNowMs = 1_790_700_000_000;
+		const r = runtime(
+			async () => ({
+				messages: [message('adsbfi', ++adsbSequence)],
+				responseNowMs: (responseNowMs += 1_000),
+				total: 1,
+				skippedNonIcao: 0,
+				skippedNoPosition: 0,
+				skippedOutsideBox: 0,
+			}),
+			async () => ({
+				kind: 'ok',
+				messages: [message('opensky', ++openskySequence)],
+				responseTime: Math.floor(Date.now() / 1_000),
+				creditsRemaining: 399,
+			}),
+			undefined,
+			1_500,
+		);
+
+		let stopped = false;
+		try {
+			r.coordinator.start();
+			await waitFor(async () => (await redis.hget(authorityKey, 'coverage_open_since_ms')) !== '');
+			await waitFor(async () => (await redis.hget(healthKeys.adsbfi, 'state')) === 'HEALTHY');
+
+			// Healthy primary alone is not enough: OpenSky must hold authority
+			// for the minimum window first.
+			await sleep(200);
+			expect(await redis.hget(authorityKey, 'provider')).toBe('opensky');
+			expect(await redis.hget(authorityKey, 'epoch')).toBe('4');
+
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 4_000);
+			await waitFor(async () => (await redis.hget(authorityKey, 'coverage_open_since_ms')) !== '');
+
+			const authority = await redis.hgetall(authorityKey);
+			expect(authority).toMatchObject({
+				provider: 'adsbfi',
+				epoch: '5',
+				timeline_version: '12',
+			});
+			const closed = await redis.zrange(coverageKey, '0', '-1');
+			expect(closed.some((member) => /^opensky\|\d+\|\d+\|handover_attempt$/.test(member))).toBe(
+				true,
+			);
+			expect(r.acceptedProviders).toContain('opensky');
+			expect(r.acceptedProviders).toContain('adsbfi');
+			expect(r.getMaxPublishInFlight()).toBe(1);
+			expect(r.logs.some((line) => line.startsWith('failback committed'))).toBe(true);
+
+			await r.coordinator.shutdown();
+			stopped = true;
+			expect(await topicHighWatermark()).toBe(r.acceptedProviders.length);
+		} finally {
+			if (!stopped) await r.coordinator.shutdown();
+			await r.client.quit();
+		}
+	}, 10_000);
+
+	it('restores an interrupted failback as OpenSky first, then retries the handover conservatively', async () => {
+		const now = Date.now();
+		const priorStart = now - 2_000;
+		const priorEnd = now - 1_000;
+		await redis.hset(
+			authorityKey,
+			'provider',
+			'opensky',
+			'epoch',
+			'9',
+			'authority_since_ms',
+			String(now - 10_000),
+			'coverage_open_since_ms',
+			'',
+			'last_active_success_ms',
+			String(priorEnd),
+			'timeline_version',
+			'20',
+		);
+		await redis.zadd(
+			coverageKey,
+			priorEnd,
+			`opensky|${priorStart}|${priorEnd}|handover_attempt`,
+		);
+		await redis.hset(healthKeys.opensky, ...toHashFields('opensky', healthy('opensky', now)));
+		await redis.hset(healthKeys.adsbfi, ...toHashFields('adsbfi', healthy('adsbfi', now)));
+
+		let adsbSequence = 0;
+		let openskySequence = 0;
+		let responseNowMs = 1_790_800_000_000;
+		const r = runtime(
+			async () => ({
+				messages: [message('adsbfi', ++adsbSequence)],
+				responseNowMs: (responseNowMs += 1_000),
+				total: 1,
+				skippedNonIcao: 0,
+				skippedNoPosition: 0,
+				skippedOutsideBox: 0,
+			}),
+			async () => ({
+				kind: 'ok',
+				messages: [message('opensky', ++openskySequence)],
+				responseTime: Math.floor(Date.now() / 1_000),
+				creditsRemaining: 399,
+			}),
+			undefined,
+			100,
+		);
+
+		let stopped = false;
+		try {
+			r.coordinator.start();
+			await waitFor(() => r.acceptedProviders.length > 0);
+			// The persisted state still says OpenSky owns authority, so restart
+			// resumes it rather than treating the old handover attempt as done.
+			expect(r.acceptedProviders[0]).toBe('opensky');
+
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 3_000);
+			expect(await redis.hget(authorityKey, 'epoch')).toBe('10');
+			expect(
+				(await redis.zrange(coverageKey, '0', '-1')).some(
+					(member) => member === `opensky|${priorStart}|${priorEnd}|handover_attempt`,
+				),
+			).toBe(true);
+			expect(r.logs.some((line) => line.startsWith('failback committed'))).toBe(true);
+
+			await r.coordinator.shutdown();
+			stopped = true;
+		} finally {
+			if (!stopped) await r.coordinator.shutdown();
+			await r.client.quit();
+		}
+	}, 10_000);
+
 	it('keeps provider health successful and authority uninitialized when candidate Kafka delivery fails', async () => {
 		const disconnected = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
 		await disconnected.connect();
