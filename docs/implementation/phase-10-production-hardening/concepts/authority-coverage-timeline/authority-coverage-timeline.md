@@ -56,7 +56,7 @@ A coverage segment is a period in which adsb.fi was delivering fresh observation
 | Clean shutdown | Close as `coordinator_shutdown` |
 | A coordinator acquires the lease and finds a segment open | Close it as `coordinator_down`, before polling |
 
-Every close ends at the last credited success, never at the failure, crash or shutdown time. The gap is never counted.
+Every close ends at the last credited success, never at the failure, crash or shutdown time. The gap is never counted. A segment opened by one credited cycle and closed before another has no length: since CP3d it closes (one revision) without writing a member.
 
 ### What makes a cycle count
 

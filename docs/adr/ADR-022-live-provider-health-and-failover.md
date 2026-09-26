@@ -1,6 +1,6 @@
 # ADR-022: Live Provider Health, Failover and Observed Silence
 
-**Status:** Accepted (2026-09-23). Implementation status: CP3a (coordinator lease and heartbeat) and CP3b (adsb.fi authority and coverage timeline) implemented; CP3c-CP3f pending.
+**Status:** Accepted (2026-09-23). Implementation status: CP3a through CP3f implemented.
 **Date:** 2026-09-23
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-020 (aviation data provider strategy), ADR-021 (`adsb.raw` provider envelope)
 
@@ -33,7 +33,7 @@ An **active cycle** is a request by the authoritative provider or by the single 
 
 ### 2. Provider health
 
-Health is judged only from provider and request evidence, never from individual aircraft. Every request counts: active cycles and checks alike.
+Health is judged only from provider and request evidence, never from individual aircraft. Every request counts: active cycles and checks alike. A request's outcome is recorded as soon as the request and its validation finish, before anything is published. A publish that fails afterwards adds no health failure and does not undo the recorded success.
 
 **A request fails on any of these:**
 - a network error or timeout;
@@ -47,7 +47,7 @@ Health is judged only from provider and request evidence, never from individual 
 | --- | --- | --- |
 | `HEALTHY` | 120 s of all-successful requests in `RECOVERING`, or the first-deployment bootstrap (section 7) | Any failure: `DEGRADED`, except an OpenSky `429` with a retry time, which goes straight to `UNAVAILABLE` (paused) |
 | `DEGRADED` | A failure while `HEALTHY`, or restored on restart (section 7) | Success: `HEALTHY`. 60 s after entering `DEGRADED` without a success: `UNAVAILABLE` |
-| `UNAVAILABLE` | 60 s in `DEGRADED` without success; any failure while `RECOVERING`; for OpenSky, a `429` with a retry time from any state (sets `paused_until_ms`); or restored on restart (section 7) | First success: `RECOVERING` |
+| `UNAVAILABLE` | 60 s in `DEGRADED` without success; any failure while `RECOVERING`; a failure while health is unknown; for OpenSky, a `429` with a retry time from any state (sets `paused_until_ms`); or restored on restart (section 7) | First success: `RECOVERING` |
 | `RECOVERING` | The first success after `UNAVAILABLE`, or after unknown or stale health (section 4) | 120 s with every request succeeding: `HEALTHY`. Any failure: `UNAVAILABLE`, clearing the recovery streak and restarting the provider's failure backoff |
 
 `RECOVERING` has no failure tolerance, even while the provider is authoritative.
@@ -60,7 +60,7 @@ Health is judged only from provider and request evidence, never from individual 
 | adsb.fi, otherwise | Check every 10 s, with CP1 backoff while failing |
 | OpenSky, authoritative | Active cycle every 25 s |
 | OpenSky, `HEALTHY` standby | Check every 15 min (96 credits a day) |
-| OpenSky, `DEGRADED` standby | Recheck after 60 s |
+| OpenSky, `DEGRADED` standby | Recheck every 30 s, so a check lands inside the 60 s before `UNAVAILABLE` |
 | OpenSky, paused | Nothing until `paused_until_ms`, then an immediate check |
 | OpenSky, `UNAVAILABLE` and not paused | Backoff from 60 s, doubling to 15 min |
 | OpenSky, `RECOVERING` | Every 25 s |
@@ -96,7 +96,13 @@ Authority is `adsbfi`, `opensky` or `none`. It changes only when a successful ac
 | `UNAVAILABLE`, not paused | Yes, one emergency attempt per entry into `none`, without resetting its backoff |
 | `UNAVAILABLE`, paused | No, until `paused_until_ms` |
 
-**Unknown** means the provider has no health record. **Stale** means there has been no request to it for longer than its current check interval.
+**Unknown** means the provider has no health record. **Stale** means there has been no request to it for longer than its current check interval. Staleness is derived, never stored: a stale provider, even one stored as `HEALTHY`, gets only the one immediate attempt, in the second group, and a success after staleness enters `RECOVERING` with a fresh streak.
+
+- **One-shot attempts.** The unknown, stale and emergency attempts are once per entry into `none`, not once per retry. After its attempt, a provider is not excluded: each of its later requests, at its own rate, is still a candidate.
+- **One request, both purposes.** While authority is `none`, a request to a provider is both its health evidence and a candidate delivery. There is never a separate check followed by a second request to attempt authority.
+- **Delivery failures while `none`.** If a candidate's request and validation succeed but its publish fails, or its commit is refused because its time is not after the last success, authority stays `none`. That provider's next candidate delivery backs off from 60 s, doubling to 15 min, on the same per-provider request schedule; there is no separate selection-retry timer. This is not provider health.
+- **The `none` record.** On an initialized timeline, `none` is stored literally as `provider=none`. `epoch` is kept, `authority_since_ms` becomes the time `none` began, coverage is closed, `last_active_success_ms` is kept, and the change takes one `timeline_version` revision. A timeline that has never had an authority (no `provider` or `epoch`) is treated as `none` in memory and is not written, so no epoch 0 exists. The first commit, by either provider, creates epoch 1.
+- **Commit.** After a successful publish, COMMIT changes only authority, increments the epoch, sets `authority_since_ms`, keeps coverage closed and takes one `timeline_version` revision. CREDIT is separate: it never commits authority and only opens or extends coverage for the provider that already holds it. A seeded adsb.fi response may therefore become authoritative without claiming coverage; a later fresh cycle opens coverage.
 
 - **Voluntary failback** from OpenSky requires adsb.fi `HEALTHY` and at least 5 min since OpenSky's authority was committed. There is no early failback.
 
@@ -122,7 +128,6 @@ Repeated `now` values never extend coverage, so a frozen-feed close ends at the 
 | --- | --- |
 | `failure` | The first failed active cycle, even if the provider stays authoritative |
 | `handover_attempt` | OpenSky is stopped for a failback attempt |
-| `handover` | A failback has committed |
 | `coordinator_shutdown` | Clean shutdown |
 | `coordinator_down` | Found open by the next coordinator to acquire the lease: a restart, another coordinator, or the same process reacquiring |
 
@@ -146,12 +151,12 @@ Repeated `now` values never extend coverage, so a frozen-feed close ends at the 
 
 ### 6. Ordering between Kafka and Redis
 
-There is no transaction spanning Kafka and Redis. Every cycle and every switch runs fetch, then validation, then publishing all of its messages, and only then one atomic Redis update stamped with the publish-completion time.
+There is no transaction spanning Kafka and Redis. Every cycle and every switch runs fetch, validation and publication before any authority or coverage credit. Candidate delivery then COMMITs authority; if that same response qualifies as coverage, CREDIT follows as a separate lease-checked Redis write using the publish-completion time.
 
 **Failback sequence:**
 1. OpenSky finishes its cycle and stops. Its coverage closes as `handover_attempt`, while authority stays `opensky`.
 2. adsb.fi runs a committing cycle.
-3. On success, one update commits `adsbfi` and opens its coverage.
+3. On success, HANDOVER atomically changes the expected `opensky` authority to `adsbfi`, increments the epoch and keeps coverage closed; if that response qualifies for coverage, CREDIT opens coverage separately.
 
 If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its coverage reopens only at its next successful cycle. A failed publish is not adsb.fi health evidence (section 3).
 
@@ -160,7 +165,8 @@ If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its covera
 | Failure | Effect |
 | --- | --- |
 | The publish fails during a switch | Nothing is committed. A failover stays at `none`, and a failback returns to OpenSky |
-| The publish succeeds, then the Redis update fails, or the process crashes between the two | Positions were delivered, but no coverage or authority is credited. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
+| The publish succeeds, then the authority write (COMMIT for failover, HANDOVER for failback) fails or its result is unknown | Positions may have been delivered, but authority is not trusted; the coordinator fails closed |
+| The authority write succeeds, then CREDIT fails or its result is unknown | Authority may already have changed, but no new coverage is assumed; the coordinator fails closed. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
 
 ### 7. Redis state, heartbeat and restart
 
@@ -173,7 +179,7 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | `{live-provider}:coverage` (sorted set) | Closed segments: provider, start, end and reason, scored by end | Evaluator |
 | `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes) | `state`, `state_since_ms`, `last_success_ms`, `last_failure_ms`, `consecutive_failures`, `last_error`, `success_streak_since_ms`. OpenSky also has `paused_until_ms`, `credits_remaining` and `last_probe_ms` | Operators. **Not used for silence** |
 
-- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: each atomic update that opens or closes a coverage segment or commits authority increments it once, so the bootstrap update that both commits authority and opens coverage is one revision. Extending the open segment's `last_active_success_ms` does not increment it.
+- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: COMMIT and HANDOVER increment it once for an authority change, CREDIT increments it once when opening coverage, and CLOSE/RELINQUISH increment it when they change the timeline. HANDOVER only succeeds from the exact expected authority with coverage already closed. Extending an already-open segment's `last_active_success_ms` does not increment it.
 - **Reads.** At the start of each scan the evaluator reads `authority` and the retained `coverage` in one transaction. It evaluates every aircraft against that snapshot and logs `timeline_version`. A provider's segments are its closed members plus, if that provider is the authority and `coverage_open_since_ms` is set, the open span from `coverage_open_since_ms` to `last_active_success_ms`.
 - **Retention.** A `coverage` member is kept until its end is older than live-state TTL + the largest configured signal-loss threshold + one scan interval (today 86,400 + 900 + 30 s). The 900 s is the evaluator's `.env` value. The code default is 300 s, and the outage experiment ran at 300 s because the evaluator did not load `.env`. The coordinator holds this as its own setting. Consistency with the other services' settings is documented, not enforced.
 - **Heartbeat.** The lease renewal script writes `heartbeat_ms` every 5 s, independent of polling, backoff or pauses. It means only that the coordinator is alive and holds the lease. It is stale after 60 s.
@@ -184,8 +190,8 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
   4. stop renewal;
   5. release the lease.
 - **Lost lease.** A coordinator that loses its lease stops polling, publishing and writing immediately.
-- **Startup, with no initialized authority record** (a true first deployment): a record is initialized only when both `provider` and `epoch` exist, so a hash holding only `heartbeat_ms` counts as none. Authority starts `none`. The first successful adsb.fi active cycle bootstraps adsb.fi to `HEALTHY` and commits it.
-- **Lease acquisition, with an initialized record** (a restart, another coordinator taking over, or the same process reacquiring): before polling, close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. Restore health as follows:
+- **Startup, with no initialized authority record** (a true first deployment): a record is initialized only when both `provider` and `epoch` exist, so a hash holding only `heartbeat_ms` counts as none. Authority starts `none`. A **true first deployment** is decided at lease acquisition: no initialized authority record and no provider health record. Only then does the first valid adsb.fi response initialize adsb.fi health directly as `HEALTHY`, right after the request and validation and before publishing. Committing authority remains the separate step after a successful publish, so a publish that fails leaves adsb.fi `HEALTHY` with authority still uninitialized. Either provider may make that first commit (section 4).
+- **Lease acquisition, with an initialized record** (a restart, another coordinator taking over, or the same process reacquiring): before polling, close any open coverage as `coordinator_down`, and keep the stored `epoch`. Keep the stored authority, unless its provider is restored as `UNAVAILABLE`: then authority becomes `none` and a selection round starts. A provider with no health record, such as the first run of health tracking on an existing authority record, has unknown health: its first success enters `RECOVERING` and its first failure `UNAVAILABLE`. Restore health as follows:
 
 | Stored | Restored as |
 | --- | --- |
@@ -193,7 +199,7 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | `UNAVAILABLE` or `RECOVERING` | `UNAVAILABLE`, with the success streak cleared |
 | OpenSky with a future `paused_until_ms` | Paused until then |
 
-A restart can delay failback, but never speed it up.
+There is no persistent "handover in progress" flag. Before HANDOVER commits, OpenSky is still the stored authority, so a restart resumes OpenSky and restored health must prove itself again before another failback attempt. After HANDOVER commits, the stored adsb.fi authority wins. A restart can therefore delay failback, but never speed it up.
 
 ### 8. The lease is not fencing
 
@@ -209,7 +215,7 @@ CP3 supports one active coordinator per deployment.
 | Recovery window | 120 s, every request succeeding |
 | Minimum time on OpenSky before failback | 5 min |
 | adsb.fi check rate when not authoritative | 10 s |
-| OpenSky check rates | 15 min standby, 60 s recheck when `DEGRADED` on standby, 25 s recovering |
+| OpenSky check rates | 15 min standby, 30 s recheck when `DEGRADED` on standby, 25 s recovering |
 | adsb.fi frozen feed | `now` not advancing for 10 s |
 | Lease TTL and renewal (heartbeat) | 15 s and 5 s |
 | Stale heartbeat | 60 s |

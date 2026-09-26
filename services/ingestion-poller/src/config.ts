@@ -11,17 +11,6 @@ function requirePositiveInt(name: string, raw: string | undefined, def: number):
 	return n;
 }
 
-function requireNonNegativeInt(name: string, raw: string | undefined, def: number): number {
-	if (raw === undefined || raw === '') return def;
-	const n = parseInt(raw, 10);
-	if (!Number.isFinite(n) || n < 0) {
-		throw new Error(
-			`Config: ${name}=${JSON.stringify(raw)} must be a non-negative integer (0 = no cap)`,
-		);
-	}
-	return n;
-}
-
 function requireFiniteNumber(name: string, raw: string | undefined, def: number): number {
 	if (raw === undefined || raw === '') return def;
 	const n = Number(raw);
@@ -95,49 +84,15 @@ export const config = {
 	// Canonical Kafka topic — do not change without an ADR.
 	TOPIC: 'adsb.raw',
 
-	// How often to poll OpenSky. OpenSky limits access by a daily credit budget,
-	// not a request rate (ADR-020): 400 credits a day anonymous, 4,000 logged in.
-	// The 10 s (anonymous) and 5 s (logged in) figures OpenSky publishes are data
-	// resolution, not an allowed request rate. At 1 credit per call, 25 s is
-	// 3,456 calls a day, inside the logged-in budget.
-	POLL_INTERVAL_MS: requirePositiveInt('POLL_INTERVAL_MS', process.env['POLL_INTERVAL_MS'], 25_000),
-
-	// HTTP fetch timeout per poll cycle. Must leave headroom inside POLL_INTERVAL_MS.
+	// HTTP timeout shared by OpenSky token and state requests.
 	FETCH_TIMEOUT_MS: requirePositiveInt('FETCH_TIMEOUT_MS', process.env['FETCH_TIMEOUT_MS'], 8_000),
 
-	// Bounding box for the OpenSky states/all request. Decimal degrees.
-	// Defaults to the SF Bay box adsb.fi also monitors, so a failover between
-	// the two keeps the same area. It is 1.56 square degrees: 1 credit per call.
+	// Bounding box for the OpenSky states/all request. Defaults to the same
+	// SF Bay region monitored by adsb.fi so failover keeps geographic scope.
 	OPENSKY_LAMIN: requireFiniteNumber('OPENSKY_LAMIN', process.env['OPENSKY_LAMIN'], 36.9),
 	OPENSKY_LOMIN: requireFiniteNumber('OPENSKY_LOMIN', process.env['OPENSKY_LOMIN'], -122.8),
 	OPENSKY_LAMAX: requireFiniteNumber('OPENSKY_LAMAX', process.env['OPENSKY_LAMAX'], 38.1),
 	OPENSKY_LOMAX: requireFiniteNumber('OPENSKY_LOMAX', process.env['OPENSKY_LOMAX'], -121.5),
-
-	// Backoff after a 429 whose X-Rate-Limit-Retry-After-Seconds is missing or
-	// unusable. A valid retry header always wins over this. Each retry waits a
-	// random time between the base and an exponential ceiling (base, 2x, 4x...),
-	// capped at the max. Fallback retries are never sooner than 60 s apart and
-	// never more than 15 min apart, so an exhausted budget is not probed in a
-	// fast loop. A valid retry header can legitimately pause for much longer.
-	OPENSKY_BACKOFF_BASE_MS: requirePositiveInt(
-		'OPENSKY_BACKOFF_BASE_MS',
-		process.env['OPENSKY_BACKOFF_BASE_MS'],
-		60_000,
-	),
-	OPENSKY_BACKOFF_MAX_MS: requirePositiveInt(
-		'OPENSKY_BACKOFF_MAX_MS',
-		process.env['OPENSKY_BACKOFF_MAX_MS'],
-		900_000,
-	),
-
-	// Maximum messages per producer.send() call.
-	// 0 = no cap (default) — preserves current behavior during this refactor.
-	// Set to a positive integer to enable chunking when polling larger geographic regions.
-	POLLER_BATCH_MAX_MESSAGES: requireNonNegativeInt(
-		'POLLER_BATCH_MAX_MESSAGES',
-		process.env['POLLER_BATCH_MAX_MESSAGES'],
-		0,
-	),
 
 	// OAuth2 client-credentials, from OpenSky's account "API Client" section.
 	// Optional: undefined means unauthenticated requests, same as before —
@@ -174,16 +129,17 @@ export const config = {
 		-121.5,
 	),
 
-	// Normal cadence. adsb.fi positions changed about every 2 s per aircraft in
-	// the provider experiment, and its public limit is 1 request per second.
+	// Active cadence while adsb.fi is authoritative. Its public limit is one
+	// request per second; the provider experiment observed position changes
+	// about every two seconds per aircraft.
 	ADSBFI_POLL_INTERVAL_MS: requireAtLeast(
 		'ADSBFI_POLL_INTERVAL_MS',
 		process.env['ADSBFI_POLL_INTERVAL_MS'],
 		2_000,
 		ADSBFI_MIN_REQUEST_INTERVAL_MS,
 	),
-	// After a failed cycle (429, other HTTP error, network error): bounded
-	// exponential backoff with full jitter, never shorter than the poll interval.
+	// Coordinator backoff after an adsb.fi request failure: bounded
+	// exponential backoff with full jitter, never shorter than the active cadence.
 	ADSBFI_BACKOFF_BASE_MS: requirePositiveInt(
 		'ADSBFI_BACKOFF_BASE_MS',
 		process.env['ADSBFI_BACKOFF_BASE_MS'],
@@ -238,5 +194,86 @@ export const config = {
 		'COVERAGE_RETENTION_MS',
 		process.env['COVERAGE_RETENTION_MS'],
 		(86_400 + 900 + 30) * 1_000,
+	),
+
+	// ---- Provider health (ADR-022 section 2) ----
+
+	// DEGRADED becomes UNAVAILABLE this long after entering DEGRADED without a
+	// success, measured from entry. Repeated failures never move it.
+	PROVIDER_DEGRADED_TIMEOUT_MS: requirePositiveInt(
+		'PROVIDER_DEGRADED_TIMEOUT_MS',
+		process.env['PROVIDER_DEGRADED_TIMEOUT_MS'],
+		60_000,
+	),
+	// RECOVERING becomes HEALTHY after this long with every request succeeding.
+	PROVIDER_RECOVERY_WINDOW_MS: requirePositiveInt(
+		'PROVIDER_RECOVERY_WINDOW_MS',
+		process.env['PROVIDER_RECOVERY_WINDOW_MS'],
+		120_000,
+	),
+	// Check rates while OpenSky is on standby. HEALTHY costs 96 credits a day
+	// on the 1-credit SF Bay box. The DEGRADED recheck is 30 s so one check
+	// lands inside the 60 s before UNAVAILABLE.
+	OPENSKY_HEALTHY_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_HEALTHY_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_HEALTHY_CHECK_INTERVAL_MS'],
+		900_000,
+	),
+	OPENSKY_DEGRADED_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_DEGRADED_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_DEGRADED_CHECK_INTERVAL_MS'],
+		30_000,
+	),
+	OPENSKY_RECOVERING_CHECK_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_RECOVERING_CHECK_INTERVAL_MS',
+		process.env['OPENSKY_RECOVERING_CHECK_INTERVAL_MS'],
+		25_000,
+	),
+	// While UNAVAILABLE and not paused: from this, doubling, up to the max.
+	OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS: requirePositiveInt(
+		'OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS',
+		process.env['OPENSKY_UNAVAILABLE_BACKOFF_BASE_MS'],
+		60_000,
+	),
+	OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS: requirePositiveInt(
+		'OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS',
+		process.env['OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS'],
+		900_000,
+	),
+
+	// ---- Failover and failback (ADR-022 section 4) ----
+
+	// Policy, not an operator tuning knob: OpenSky must hold authority for at
+	// least five minutes before a healthy adsb.fi may take it back.
+	FAILBACK_MIN_OPENSKY_AUTHORITY_MS: 5 * 60_000,
+
+	// OpenSky's active cycle while it is authoritative: 3,456 credits a day on
+	// the 1-credit SF Bay box, inside the 4,000 authenticated budget. Each
+	// active request is also OpenSky's health evidence.
+	OPENSKY_ACTIVE_INTERVAL_MS: requirePositiveInt(
+		'OPENSKY_ACTIVE_INTERVAL_MS',
+		process.env['OPENSKY_ACTIVE_INTERVAL_MS'],
+		25_000,
+	),
+	// adsb.fi's request rate when it is not authoritative (standby, or a
+	// candidate while authority is none), with the same bounded backoff while failing.
+	ADSBFI_STANDBY_INTERVAL_MS: requireAtLeast(
+		'ADSBFI_STANDBY_INTERVAL_MS',
+		process.env['ADSBFI_STANDBY_INTERVAL_MS'],
+		10_000,
+		ADSBFI_MIN_REQUEST_INTERVAL_MS,
+	),
+	// Per-provider candidate delivery backoff while authority is none. A
+	// healthy upstream response whose Kafka publish or authority commit cannot
+	// complete retries from this base, doubling up to the max.
+	SELECTION_RETRY_BASE_MS: requirePositiveInt(
+		'SELECTION_RETRY_BASE_MS',
+		process.env['SELECTION_RETRY_BASE_MS'],
+		60_000,
+	),
+	SELECTION_RETRY_MAX_MS: requirePositiveInt(
+		'SELECTION_RETRY_MAX_MS',
+		process.env['SELECTION_RETRY_MAX_MS'],
+		900_000,
 	),
 } as const;

@@ -560,34 +560,59 @@ The `{live-provider}` hash tag keeps the coordinator's keys in one Redis Cluster
 
 ### `{live-provider}:authority` (hash)
 
-Writer: ingestion coordinator (ADR-022). `heartbeat_ms` is written by the lease renewal script; every other field only by the coverage timeline scripts below. Readers: none yet.
+Writer: ingestion coordinator (ADR-022). `heartbeat_ms` is written by the lease renewal script; every other field only by the coverage timeline scripts below. Readers: Alert Evaluator (signal-loss scan), and the coordinator at lease acquisition (`provider`, `epoch` and `authority_since_ms`).
 
 | Field | Meaning |
 | --- | --- |
-| `provider` | Authoritative provider. Only `adsbfi` is written today |
+| `provider` | Authoritative provider: `adsbfi`, `opensky`, or literal `none` after relinquish |
 | `epoch` | Authority term: 1 at the first commit, incremented on each later commit, never reset, unchanged by a restart or lease takeover |
-| `authority_since_ms` | When the current authority was committed |
+| `authority_since_ms` | When the current authority was committed; also the clock for the five-minute OpenSky failback minimum |
 | `coverage_open_since_ms` | Start of the open coverage segment; empty string when closed |
 | `last_active_success_ms` | Coordinator time at which the latest credited cycle's publish finished |
 | `heartbeat_ms` | Epoch ms from Redis `TIME`, every 5 s while a coordinator holds the lease. Liveness only, not provider health; stale after 60 s per ADR-022 |
-| `timeline_version` | Timeline revision: incremented once per atomic update that opens or closes a segment or commits authority. Extending the open segment does not change it |
+| `timeline_version` | Timeline revision: incremented once per atomic update that opens/closes coverage or changes authority. Extending the open segment does not change it |
 
 - **Initialized** only when both `provider` and `epoch` exist. A hash holding only `heartbeat_ms` is pre-authority bootstrap state and follows first-deployment initialization.
 - No TTL: it outlives every coordinator.
-- **Credit script** (after a fresh cycle's publish): on a pre-authority hash, commits `adsbfi` and opens coverage as one revision; with coverage closed, opens a segment; with it open, extends `last_active_success_ms`. It writes nothing when the time is not after `last_active_success_ms`, and refuses with an error when another provider holds authority.
-- **Close script:** closes the open segment at `last_active_success_ms` into `{live-provider}:coverage`, clears `coverage_open_since_ms`, increments `timeline_version` and prunes. With nothing open it writes nothing.
-- Both scripts check the lease token first and write nothing on a mismatch. A refused, failed or timed-out timeline write makes the coordinator give up the lease.
+- **Commit script:** after a failover candidate's successful publish, changes authority only from virgin/uninitialized state or literal `none`, increments `epoch`, sets `authority_since_ms`, keeps coverage closed and increments `timeline_version`. It never creates coverage.
+- **Handover script:** after a voluntary failback publish, changes authority only from the exact expected live provider (OpenSky) with coverage already closed, increments `epoch`, sets the new `authority_since_ms`, keeps coverage closed and increments `timeline_version`. It refuses an unexpected authority, open coverage, a stale clock or a wrong lease.
+- **Credit script:** only for the provider that already holds authority. With coverage closed it opens a segment, sets `last_active_success_ms` and increments `timeline_version`; with coverage open it only advances `last_active_success_ms`. It never changes authority.
+- **Close script:** closes the open segment at `last_active_success_ms`, clears `coverage_open_since_ms` and increments `timeline_version`. Only a segment with length (`last_active_success_ms` after `coverage_open_since_ms`) is written to `{live-provider}:coverage`, followed by pruning. A segment with no length closes without a member. A backwards segment is refused as an invariant error and the coordinator gives up the lease.
+- **Relinquish script:** changes the expected authority to literal `none`, preserves `epoch` and the last credited success, and closes any still-open coverage conservatively.
+- Every timeline script checks the lease token first and writes nothing on a mismatch. A refused, failed or timed-out write makes the coordinator give up the lease.
 - An adsb.fi cycle is credited only after its response `now` is seen to advance. The tracker for that is kept in memory per lease acquisition, never in Redis.
 
 ### `{live-provider}:coverage` (sorted set)
 
-Writer: ingestion coordinator, through the close script. Readers: none yet.
+Writer: ingestion coordinator, through the close script. Reader: Alert Evaluator (signal-loss scan).
 
-- Member: `<provider>|<start_ms>|<end_ms>|<reason>`, for example `adsbfi|1790285724037|1790285735418|failure`. Deterministic, so the same segment is stored once.
+- Member: `<provider>|<start_ms>|<end_ms>|<reason>`, for example `adsbfi|1790285724037|1790285735418|failure`. Deterministic, so the same segment is stored once. `end_ms` is always after `start_ms`: zero-length segments are never written.
 - Score: `end_ms`.
-- Reasons written today: `failure` (a failed active cycle), `coordinator_shutdown` (clean shutdown), `coordinator_down` (found open by the next coordinator to acquire the lease, before it polls).
+- Reasons written today: `failure` (a failed active cycle), `handover_attempt` (OpenSky deliberately stopped for voluntary failback), `coordinator_shutdown` (clean shutdown), `coordinator_down` (found open by the next coordinator to acquire the lease, before it polls).
 - Retention: a member is pruned once its end is older than `COVERAGE_RETENTION_MS`, default 87,330 s (live-state TTL 86,400 s + largest signal-loss threshold 900 s + one scan interval 30 s). Pruning runs only inside a close that closes a segment.
 - The open segment is not a member: it is `coverage_open_since_ms` to `last_active_success_ms` in the authority hash.
+
+### `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes)
+
+Writer: ingestion coordinator (ADR-022 sections 2 and 7). Readers: the coordinator, when restoring health and selecting authority; operators. Health is not read by the Alert Evaluator for signal loss.
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `HEALTHY`, `DEGRADED`, `UNAVAILABLE` or `RECOVERING`. No hash, or no `state`, means unknown health |
+| `state_since_ms` | When the current state was entered. For `DEGRADED` it is the start of the 60 s window, and repeated failures never move it. An `UNAVAILABLE` reached by that deadline is stamped at the deadline itself |
+| `last_success_ms` | Coordinator time of the latest successful request (request and validation passed) |
+| `last_failure_ms` | Coordinator time of the latest failed request |
+| `consecutive_failures` | Failed requests since the last success. A success resets it to 0. Kafka publish failures never count |
+| `last_error` | Class of the most recently observed failure: `timeout`, `network:<code>`, `http_<status>`, `rate_limited`, `validation: <message>`, `frozen_feed` (adsb.fi), `auth: <message>` (OpenSky token). Kept after recovery: it is history, not the current state |
+| `success_streak_since_ms` | Start of the unbroken run of successes, only while `RECOVERING`; empty otherwise |
+| `paused_until_ms` | OpenSky only. End of a pause set by a `429` with a retry time; empty when not paused. Readers must compare it with the current time |
+| `credits_remaining` | OpenSky only. From `X-Rate-Limit-Remaining`; a response without a usable header keeps the last known value |
+| `last_probe_ms` | OpenSky only. Time of the latest standby check, whatever its outcome |
+
+- Every field is a string; an empty string means never or not set. Times are coordinator processing time in epoch milliseconds.
+- Each write is one Lua script that checks the lease token first, then deletes and rewrites the whole hash, so no field from an earlier state survives. A refused, failed or timed-out write makes the coordinator give up the lease.
+- No TTL: health outlives every coordinator and is restored at each lease acquisition: `HEALTHY` and `DEGRADED` as `DEGRADED` with a fresh 60 s window, `RECOVERING` as `UNAVAILABLE` with its streak cleared, `UNAVAILABLE` unchanged. A future `paused_until_ms` is kept; an expired one is cleared. The restore is written only when it changes the stored record.
+- A true first deployment (no initialized authority and no health hash with a `state`) initializes adsb.fi as `HEALTHY` on its first valid response. Otherwise a provider with no record is unknown: its first success means `RECOVERING`, its first failure `UNAVAILABLE`.
 
 ### `position-updates` — pub/sub
 

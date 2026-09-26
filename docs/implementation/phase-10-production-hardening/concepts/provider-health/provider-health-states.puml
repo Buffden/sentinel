@@ -1,0 +1,42 @@
+@startuml provider-health-states
+title Provider health (ADR-022 section 2, CP3d)
+
+skinparam stateBorderColor #555555
+skinparam stateBackgroundColor #F8F8F8
+skinparam noteBorderColor #AAAAAA
+skinparam noteBackgroundColor #FFFDE7
+
+state "unknown\n(no health record)" as Unknown
+state HEALTHY
+state DEGRADED
+state UNAVAILABLE
+state RECOVERING
+
+[*] --> Unknown
+Unknown --> HEALTHY : true first deployment:\nfirst valid adsb.fi response
+Unknown --> RECOVERING : success
+Unknown --> UNAVAILABLE : failure
+
+HEALTHY --> DEGRADED : failure
+HEALTHY --> UNAVAILABLE : OpenSky 429 with a retry time,\nfrom any state (sets paused_until_ms)
+DEGRADED --> HEALTHY : success
+DEGRADED --> DEGRADED : failure\n(60 s clock unchanged)
+DEGRADED --> UNAVAILABLE : deadline timer, 60 s after entry\n(stamped at the deadline)
+UNAVAILABLE --> RECOVERING : first success
+RECOVERING --> HEALTHY : success once 120 s of\nevery request succeeding
+RECOVERING --> UNAVAILABLE : any failure\n(streak cleared)
+
+note bottom of UNAVAILABLE
+  Authority is NOT changed in CP3d.
+  adsb.fi stays authoritative and keeps
+  polling and publishing while UNAVAILABLE.
+end note
+
+note right of HEALTHY
+  Restore at lease acquisition:
+  HEALTHY, DEGRADED -> DEGRADED (fresh 60 s)
+  RECOVERING -> UNAVAILABLE (streak cleared)
+  UNAVAILABLE -> UNAVAILABLE
+  future pause kept, expired pause cleared
+end note
+@enduml
