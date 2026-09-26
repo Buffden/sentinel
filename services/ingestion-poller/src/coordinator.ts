@@ -55,8 +55,6 @@ import { Kafka, Partitioners } from 'kafkajs';
 import { config } from './config.js';
 import {
 	fetchAdsbfiResponse,
-	nextDelayMs,
-	pollCycleSummary,
 	type AdsbfiFetchFailure,
 	type Log,
 	type SplitResult,
@@ -77,7 +75,12 @@ import {
 	type TransitionTiming,
 } from './providerHealth.js';
 import { PROVIDERS, ProviderHealthStore } from './providerHealthStore.js';
-import { isStale, nextSelectionRetryMs, planSelectionRound } from './providerSelection.js';
+import {
+	isStale,
+	nextProviderDelayMs,
+	nextSelectionRetryMs,
+	planSelectionRound,
+} from './providerSelection.js';
 
 const TOPIC = 'adsb.raw';
 
@@ -428,7 +431,7 @@ export class Coordinator {
 			this.adsbfiFailures = failed ? this.adsbfiFailures + 1 : 0;
 			const interval =
 				role === 'active' ? this.deps.pollIntervalMs : this.deps.adsbfiStandbyIntervalMs;
-			delayMs = nextDelayMs(
+			delayMs = nextProviderDelayMs(
 				this.adsbfiFailures,
 				interval,
 				this.deps.backoffBaseMs,
@@ -584,7 +587,13 @@ export class Coordinator {
 		const activeSuccessMs = Date.now();
 		const credited = verdict === 'fresh';
 		log('info', 'poll cycle complete', {
-			...pollCycleSummary(split, published.firstOffset),
+			aircraft_in_response: split.total,
+			published: split.messages.length,
+			skipped_non_icao: split.skippedNonIcao,
+			skipped_no_position: split.skippedNoPosition,
+			skipped_outside_box: split.skippedOutsideBox,
+			topic: TOPIC,
+			first_offset: published.firstOffset,
 			lease_token: token,
 			freshness: verdict,
 			coverage_credited: credited,

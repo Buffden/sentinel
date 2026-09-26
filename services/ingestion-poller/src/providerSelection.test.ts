@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderHealth } from './providerHealth.js';
 import {
 	isStale,
+	nextProviderDelayMs,
 	nextSelectionRetryMs,
 	planSelectionRound,
 	type Provider,
@@ -140,6 +141,34 @@ describe('planSelectionRound', () => {
 		expect(planSelectionRound(both, fresh, T, new Set<Provider>(['adsbfi', 'opensky']))).toEqual(
 			[],
 		);
+	});
+});
+
+describe('nextProviderDelayMs', () => {
+	const INTERVAL = 2_000;
+	const BASE = 2_000;
+	const MAX = 60_000;
+
+	it('uses the normal interval when nothing has failed', () => {
+		expect(nextProviderDelayMs(0, INTERVAL, BASE, MAX, () => 0.5)).toBe(INTERVAL);
+	});
+
+	it('grows the jitter ceiling exponentially with consecutive failures', () => {
+		expect(nextProviderDelayMs(3, INTERVAL, BASE, MAX, () => 0.999)).toBe(
+			Math.floor(0.999 * 8_000),
+		);
+	});
+
+	it('caps the ceiling at the configured maximum', () => {
+		expect(nextProviderDelayMs(20, INTERVAL, BASE, MAX, () => 0.999)).toBe(
+			Math.floor(0.999 * MAX),
+		);
+	});
+
+	it('never retries sooner than the normal cadence', () => {
+		for (const failures of [1, 2, 5, 20]) {
+			expect(nextProviderDelayMs(failures, INTERVAL, BASE, MAX, () => 0)).toBe(INTERVAL);
+		}
 	});
 });
 
