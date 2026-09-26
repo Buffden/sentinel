@@ -17,7 +17,7 @@
 // authoritative provider's health reaches UNAVAILABLE, authority is
 // relinquished to none, and a selection round tries eligible providers until
 // one commits. A working authority is never replaced here; failback from
-// OpenSky to adsb.fi is CP3f.
+// Proactive failback from a healthy OpenSky authority is not implemented here.
 //
 // Three things stay separate. Provider health describes the upstream
 // provider. Coverage describes successful authoritative delivery. Authority
@@ -82,8 +82,6 @@ import {
 	planSelectionRound,
 } from './providerSelection.js';
 
-const TOPIC = 'adsb.raw';
-
 type Lease = Pick<
 	CoordinatorLease,
 	'token' | 'tryAcquire' | 'renew' | 'release' | 'forget' | 'currentHolder'
@@ -114,7 +112,7 @@ export interface CoordinatorDeps {
 	log: Log;
 	renewalIntervalMs: number;
 	followerRetryMs: number;
-	// adsb.fi while authoritative, with the CP1 backoff after failures.
+	// adsb.fi while authoritative, with bounded backoff after failures.
 	pollIntervalMs: number;
 	backoffBaseMs: number;
 	backoffMaxMs: number;
@@ -208,7 +206,7 @@ export class Coordinator {
 	// time: a send that has started cannot be recalled.
 	private publishQueue: Promise<unknown> = Promise.resolve();
 
-	// adsb.fi requests failed in a row, for the CP1 backoff.
+	// adsb.fi requests failed in a row, for bounded request backoff.
 	private adsbfiFailures = 0;
 	// OpenSky requests failed in a row while UNAVAILABLE and not paused.
 	private openskyUnavailableStep = 0;
@@ -592,7 +590,7 @@ export class Coordinator {
 			skipped_non_icao: split.skippedNonIcao,
 			skipped_no_position: split.skippedNoPosition,
 			skipped_outside_box: split.skippedOutsideBox,
-			topic: TOPIC,
+			topic: config.TOPIC,
 			first_offset: published.firstOffset,
 			lease_token: token,
 			freshness: verdict,
@@ -1376,7 +1374,7 @@ function main(): void {
 			backoffMaxMs: config.OPENSKY_UNAVAILABLE_BACKOFF_MAX_MS,
 		},
 		publish: async (messages) => {
-			const results = await producer.send({ topic: TOPIC, messages });
+			const results = await producer.send({ topic: config.TOPIC, messages });
 			return results[0]?.baseOffset ?? 'unknown';
 		},
 		log,

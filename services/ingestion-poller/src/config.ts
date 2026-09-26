@@ -252,7 +252,7 @@ export const config = {
 		25_000,
 	),
 	// adsb.fi's request rate when it is not authoritative (standby, or a
-	// candidate while authority is none), with the CP1 backoff while failing.
+	// candidate while authority is none), with the same bounded backoff while failing.
 	ADSBFI_STANDBY_INTERVAL_MS: requireAtLeast(
 		'ADSBFI_STANDBY_INTERVAL_MS',
 		process.env['ADSBFI_STANDBY_INTERVAL_MS'],
