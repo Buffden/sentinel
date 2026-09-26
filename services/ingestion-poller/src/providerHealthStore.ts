@@ -5,8 +5,8 @@
 // writer, and every write is one script that checks the lease token first
 // and writes nothing on a mismatch, the same rule as the coverage timeline.
 //
-// Health is persisted so a restart can restore it. It is never read for
-// signal loss, and in CP3d nothing reads it to change authority.
+// Health is persisted so a restart can restore it and the coordinator can
+// make authority decisions. The Alert Evaluator never uses it for signal loss.
 
 import type { Redis } from 'ioredis';
 import { AUTHORITY_KEY, LEASE_KEY } from './coordinatorLease.js';

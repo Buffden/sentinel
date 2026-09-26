@@ -123,8 +123,8 @@ type Mode = Provider | 'none';
 
 type Role = 'active' | 'standby' | 'candidate';
 
-// What asked for a request. While a delivery retry is pending, only a round
-// may publish as a candidate.
+// Selection-round requests are distinguished from normal cadence because a
+// stale provider gets only conservative recovery credit on that immediate try.
 type Trigger = 'cadence' | 'round';
 
 interface RequestOutcome {
