@@ -11,7 +11,7 @@
 //   publish, never a commit;
 // - while authority is none, a request is a candidate: health evidence, and,
 //   if the response qualifies, a delivery that publishes and then commits
-//   authority. Candidates run one at a time.
+//   authority. Candidate delivery shares the single publish lane.
 //
 // Health drives authority in one direction only (ADR-022 section 4): when the
 // authoritative provider's health reaches UNAVAILABLE, authority is
@@ -191,15 +191,13 @@ export class Coordinator {
 	};
 	private deadlineTimers: Record<Provider, Timer | null> = { adsbfi: null, opensky: null };
 
-	// Within one acquisition, requests to one provider run one at a time, and
-	// candidate requests across both providers run one at a time. Both queues
-	// start empty at every acquisition: work left from a lost lease is
+	// Within one acquisition, requests to one provider run one at a time.
+	// Queues start empty at every acquisition: work left from a lost lease is
 	// term-guarded and writes nothing, so a new holder never waits for it.
 	private requestQueue: Record<Provider, Promise<unknown>> = {
 		adsbfi: Promise.resolve(),
 		opensky: Promise.resolve(),
 	};
-	private candidateQueue: Promise<unknown> = Promise.resolve();
 	private requestTimers: Record<Provider, Timer | null> = { adsbfi: null, opensky: null };
 	// Every request still running, of any acquisition, for shutdown to await.
 	private inFlight = new Set<Promise<unknown>>();
@@ -278,7 +276,6 @@ export class Coordinator {
 		const term = ++this.term;
 		this.mode = 'none';
 		this.requestQueue = { adsbfi: Promise.resolve(), opensky: Promise.resolve() };
-		this.candidateQueue = Promise.resolve();
 		log('info', 'lease acquired: now leader', { lease_token: lease.token });
 		// A shutdown that raced the acquisition releases the lease itself.
 		if (this.stopping) return;
@@ -399,10 +396,7 @@ export class Coordinator {
 	): Promise<RequestOutcome | null> {
 		const run = this.requestQueue[provider].then(async () => {
 			if (!this.current(token, term)) return null;
-			const outcome =
-				this.mode === 'none'
-					? await this.asCandidate(() => this.providerRequest(provider, token, term, trigger))
-					: await this.providerRequest(provider, token, term, trigger);
+			const outcome = await this.providerRequest(provider, token, term, trigger);
 			if (outcome !== null && !outcome.leaseLost && this.current(token, term)) {
 				this.scheduleNext(provider, outcome, token, term);
 			}
@@ -411,12 +405,6 @@ export class Coordinator {
 		this.requestQueue[provider] = run.catch(() => undefined);
 		this.inFlight.add(run);
 		void run.finally(() => this.inFlight.delete(run)).catch(() => undefined);
-		return run;
-	}
-
-	private asCandidate<T>(fn: () => Promise<T>): Promise<T> {
-		const run = this.candidateQueue.then(fn);
-		this.candidateQueue = run.catch(() => undefined);
 		return run;
 	}
 
@@ -775,78 +763,84 @@ export class Coordinator {
 			log('info', 'candidate not delivered: waiting for the selection retry', { provider });
 			return outcome({});
 		}
-		// Waits for any publish still running, such as a relinquished
-		// provider's send that could not be recalled.
-		const published = await this.serializedPublish(async () => {
-			if (this.mode !== 'none' || !this.current(token, term)) {
-				return { status: 'authority_changed' as const };
+
+		// Candidate publish + COMMIT stay in the same serialization lane. If two
+		// candidates finish fetching together, the second re-checks mode only
+		// after the first has either committed authority or failed.
+		return this.serializedPublish(async () => {
+			if (this.mode !== 'none' || !this.current(token, term)) return outcome({});
+
+			const published = await this.sendAll(messages);
+			if (published.status === 'failed') {
+				log('error', 'candidate publish failed: authority stays none', {
+					provider,
+					error: published.error,
+				});
+				this.scheduleSelectionRetry(token, term, 'publish_failed');
+				return outcome({});
 			}
-			return this.sendAll(messages);
-		});
-		if (published.status === 'authority_changed') return outcome({});
-		if (published.status === 'failed') {
-			log('error', 'candidate publish failed: authority stays none', {
-				provider,
-				error: published.error,
-			});
-			this.scheduleSelectionRetry(token, term, 'publish_failed');
-			return outcome({});
-		}
-		const commitMs = Date.now();
-		if (this.mode !== 'none' || !this.current(token, term)) return outcome({});
 
-		let result;
-		try {
-			result = await this.deps.timeline.commit(token, provider, commitMs);
-		} catch (err) {
-			this.loseLeadership(token, 'authority commit error: result unknown', err);
-			return outcome({ leaseLost: true });
-		}
-		if (result.status === 'lease_mismatch') {
-			this.loseLeadership(token, 'authority commit rejected: token no longer matches');
-			return outcome({ leaseLost: true });
-		}
-		if (result.status === 'not_none') {
-			// Redis holds an authority this coordinator believed was none.
-			this.loseLeadership(token, `authority commit refused: authority is ${result.authority}`);
-			return outcome({ leaseLost: true });
-		}
-		if (result.status === 'stale_clock') {
-			log('warn', 'authority commit refused: time is not after the last success', {
+			const commitMs = Date.now();
+			if (this.mode !== 'none' || !this.current(token, term)) return outcome({});
+
+			let result;
+			try {
+				result = await this.deps.timeline.commit(token, provider, commitMs);
+			} catch (err) {
+				this.loseLeadership(token, 'authority commit error: result unknown', err);
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'lease_mismatch') {
+				this.loseLeadership(token, 'authority commit rejected: token no longer matches');
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'not_none') {
+				// Redis holds an authority this coordinator believed was none.
+				this.loseLeadership(token, `authority commit refused: authority is ${result.authority}`);
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'stale_clock') {
+				log('warn', 'authority commit refused: time is not after the last success', {
+					provider,
+					commit_ms: commitMs,
+				});
+				this.scheduleSelectionRetry(token, term, 'stale_clock');
+				return outcome({});
+			}
+
+			this.mode = provider;
+			this.retryStep = 0;
+			if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+			this.retryTimer = null;
+			log('info', 'authority committed', {
 				provider,
+				epoch: result.epoch,
+				timeline_version: result.timelineVersion,
 				commit_ms: commitMs,
+				published: messages.length,
 			});
-			this.scheduleSelectionRetry(token, term, 'stale_clock');
-			return outcome({});
-		}
+			if (provider === 'opensky' && !this.deps.openskyAuthenticated) {
+				log(
+					'warn',
+					'opensky authoritative without credentials: the anonymous budget will run out',
+					{ active_interval_ms: this.deps.openskyActiveIntervalMs },
+				);
+			}
+			if (creditEligible && !(await this.creditCoverage(token, provider, commitMs))) {
+				return outcome({ committed: true, leaseLost: true });
+			}
 
-		this.mode = provider;
-		this.retryStep = 0;
-		if (this.retryTimer !== null) clearTimeout(this.retryTimer);
-		this.retryTimer = null;
-		log('info', 'authority committed', {
-			provider,
-			epoch: result.epoch,
-			timeline_version: result.timelineVersion,
-			commit_ms: commitMs,
-			published: messages.length,
+			// The other provider continues as a standby check at its own rate.
+			const other: Provider = provider === 'adsbfi' ? 'opensky' : 'adsbfi';
+			if (this.requestTimers[other] === null) {
+				const delayMs =
+					other === 'adsbfi'
+						? this.deps.adsbfiStandbyIntervalMs
+						: this.openskyStandbyDelayMs();
+				this.scheduleRequest(other, delayMs, token, term);
+			}
+			return outcome({ committed: true });
 		});
-		if (provider === 'opensky' && !this.deps.openskyAuthenticated) {
-			log('warn', 'opensky authoritative without credentials: the anonymous budget will run out', {
-				active_interval_ms: this.deps.openskyActiveIntervalMs,
-			});
-		}
-		if (creditEligible && !(await this.creditCoverage(token, provider, commitMs))) {
-			return outcome({ committed: true, leaseLost: true });
-		}
-		// The other provider continues as a standby check at its own rate.
-		const other: Provider = provider === 'adsbfi' ? 'opensky' : 'adsbfi';
-		if (this.requestTimers[other] === null) {
-			const delayMs =
-				other === 'adsbfi' ? this.deps.adsbfiStandbyIntervalMs : this.openskyStandbyDelayMs();
-			this.scheduleRequest(other, delayMs, token, term);
-		}
-		return outcome({ committed: true });
 	}
 
 	// The authoritative provider has become UNAVAILABLE: stop its active
