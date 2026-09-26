@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-	fetchAdsbfiCycle,
 	fetchAdsbfiResponse,
 	nextDelayMs,
 	splitAdsbfiResponse,
@@ -89,7 +88,7 @@ describe('nextDelayMs', () => {
 	});
 });
 
-// ---- Failure classes for provider health (CP3d) --------------------------------
+// ---- Failure classes for provider health ---------------------------------------
 
 describe('fetchAdsbfiResponse: last_error classes', () => {
 	const quiet = () => {};
@@ -121,8 +120,4 @@ describe('fetchAdsbfiResponse: last_error classes', () => {
 		});
 	});
 
-	it('keeps the legacy wrapper returning null on failure', async () => {
-		stub(async () => new Response('', { status: 503 }));
-		expect(await fetchAdsbfiCycle(quiet)).toBeNull();
-	});
 });

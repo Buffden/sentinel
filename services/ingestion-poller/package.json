@@ -4,9 +4,6 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"produce": "tsx src/produce.ts",
-		"poll": "tsx --env-file-if-exists=.env src/poller.ts",
-		"poll:adsbfi": "tsx --env-file-if-exists=.env src/adsbfiPoller.ts",
 		"coordinate": "tsx --env-file-if-exists=.env src/coordinator.ts",
 		"test": "vitest run",
 		"test:coverage": "vitest run --coverage"
