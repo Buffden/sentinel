@@ -4,7 +4,7 @@
 	"private": true,
 	"type": "module",
 	"scripts": {
-		"coordinate": "tsx --env-file-if-exists=.env src/coordinator.ts",
+		"coordinate": "tsx --env-file-if-exists=.env src/index.ts",
 		"test": "vitest run",
 		"test:coverage": "vitest run --coverage"
 	},
