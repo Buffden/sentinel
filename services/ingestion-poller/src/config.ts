@@ -84,6 +84,16 @@ export const config = {
 	// Canonical Kafka topic — do not change without an ADR.
 	TOPIC: 'adsb.raw',
 
+	// HTTP timeout shared by OpenSky token and state requests.
+	FETCH_TIMEOUT_MS: requirePositiveInt('FETCH_TIMEOUT_MS', process.env['FETCH_TIMEOUT_MS'], 8_000),
+
+	// Bounding box for the OpenSky states/all request. Defaults to the same
+	// SF Bay region monitored by adsb.fi so failover keeps geographic scope.
+	OPENSKY_LAMIN: requireFiniteNumber('OPENSKY_LAMIN', process.env['OPENSKY_LAMIN'], 36.9),
+	OPENSKY_LOMIN: requireFiniteNumber('OPENSKY_LOMIN', process.env['OPENSKY_LOMIN'], -122.8),
+	OPENSKY_LAMAX: requireFiniteNumber('OPENSKY_LAMAX', process.env['OPENSKY_LAMAX'], 38.1),
+	OPENSKY_LOMAX: requireFiniteNumber('OPENSKY_LOMAX', process.env['OPENSKY_LOMAX'], -121.5),
+
 	// OAuth2 client-credentials, from OpenSky's account "API Client" section.
 	// Optional: undefined means unauthenticated requests, same as before —
 	// the poller falls back to the anonymous rate limit rather than failing.
