@@ -13,6 +13,12 @@ import { config } from './config.js';
 import { adsbRawEnvelope } from './envelope.js';
 import { classifyRequestError } from './providerHealth.js';
 
+const USER_AGENT = 'sentinel-ingestion-poller/0.1 (portfolio project)';
+
+const ADSBFI_URL =
+	`https://opendata.adsb.fi/api/v3/lat/${config.ADSBFI_CENTER_LAT}` +
+	`/lon/${config.ADSBFI_CENTER_LON}/dist/${config.ADSBFI_RADIUS_NM}`;
+
 // ---- Pure helpers (unit-tested) ---------------------------------------------
 
 // Plausible range for an epoch-milliseconds timestamp: 2017-07 to 2100-01.
