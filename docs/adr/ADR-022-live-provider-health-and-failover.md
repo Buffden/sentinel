@@ -1,6 +1,6 @@
 # ADR-022: Live Provider Health, Failover and Observed Silence
 
-**Status:** Accepted (2026-09-23). Implementation status: CP3a through CP3e implemented; CP3f (voluntary failback hysteresis) pending.
+**Status:** Accepted (2026-09-23). Implementation status: CP3a through CP3f implemented.
 **Date:** 2026-09-23
 **Depends on:** ADR-007 (idempotency key schema), ADR-013 (Node.js ingestion poller), ADR-020 (aviation data provider strategy), ADR-021 (`adsb.raw` provider envelope)
 
@@ -128,7 +128,6 @@ Repeated `now` values never extend coverage, so a frozen-feed close ends at the 
 | --- | --- |
 | `failure` | The first failed active cycle, even if the provider stays authoritative |
 | `handover_attempt` | OpenSky is stopped for a failback attempt |
-| `handover` | A failback has committed |
 | `coordinator_shutdown` | Clean shutdown |
 | `coordinator_down` | Found open by the next coordinator to acquire the lease: a restart, another coordinator, or the same process reacquiring |
 
@@ -157,7 +156,7 @@ There is no transaction spanning Kafka and Redis. Every cycle and every switch r
 **Failback sequence:**
 1. OpenSky finishes its cycle and stops. Its coverage closes as `handover_attempt`, while authority stays `opensky`.
 2. adsb.fi runs a committing cycle.
-3. On success, COMMIT changes authority to `adsbfi`; if that response qualifies for coverage, CREDIT opens coverage separately.
+3. On success, HANDOVER atomically changes the expected `opensky` authority to `adsbfi`, increments the epoch and keeps coverage closed; if that response qualifies for coverage, CREDIT opens coverage separately.
 
 If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its coverage reopens only at its next successful cycle. A failed publish is not adsb.fi health evidence (section 3).
 
@@ -166,8 +165,8 @@ If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its covera
 | Failure | Effect |
 | --- | --- |
 | The publish fails during a switch | Nothing is committed. A failover stays at `none`, and a failback returns to OpenSky |
-| The publish succeeds, then COMMIT fails or its result is unknown | Positions may have been delivered, but authority is not trusted; the coordinator fails closed |
-| COMMIT succeeds, then CREDIT fails or its result is unknown | Authority may already have changed, but no new coverage is assumed; the coordinator fails closed. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
+| The publish succeeds, then the authority write (COMMIT for failover, HANDOVER for failback) fails or its result is unknown | Positions may have been delivered, but authority is not trusted; the coordinator fails closed |
+| The authority write succeeds, then CREDIT fails or its result is unknown | Authority may already have changed, but no new coverage is assumed; the coordinator fails closed. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
 
 ### 7. Redis state, heartbeat and restart
 
@@ -180,7 +179,7 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | `{live-provider}:coverage` (sorted set) | Closed segments: provider, start, end and reason, scored by end | Evaluator |
 | `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes) | `state`, `state_since_ms`, `last_success_ms`, `last_failure_ms`, `consecutive_failures`, `last_error`, `success_streak_since_ms`. OpenSky also has `paused_until_ms`, `credits_remaining` and `last_probe_ms` | Operators. **Not used for silence** |
 
-- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: COMMIT increments it once for an authority change, CREDIT increments it once when opening coverage, and CLOSE/RELINQUISH increment it when they change the timeline. Extending an already-open segment's `last_active_success_ms` does not increment it.
+- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: COMMIT and HANDOVER increment it once for an authority change, CREDIT increments it once when opening coverage, and CLOSE/RELINQUISH increment it when they change the timeline. HANDOVER only succeeds from the exact expected authority with coverage already closed. Extending an already-open segment's `last_active_success_ms` does not increment it.
 - **Reads.** At the start of each scan the evaluator reads `authority` and the retained `coverage` in one transaction. It evaluates every aircraft against that snapshot and logs `timeline_version`. A provider's segments are its closed members plus, if that provider is the authority and `coverage_open_since_ms` is set, the open span from `coverage_open_since_ms` to `last_active_success_ms`.
 - **Retention.** A `coverage` member is kept until its end is older than live-state TTL + the largest configured signal-loss threshold + one scan interval (today 86,400 + 900 + 30 s). The 900 s is the evaluator's `.env` value. The code default is 300 s, and the outage experiment ran at 300 s because the evaluator did not load `.env`. The coordinator holds this as its own setting. Consistency with the other services' settings is documented, not enforced.
 - **Heartbeat.** The lease renewal script writes `heartbeat_ms` every 5 s, independent of polling, backoff or pauses. It means only that the coordinator is alive and holds the lease. It is stale after 60 s.
@@ -200,7 +199,7 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | `UNAVAILABLE` or `RECOVERING` | `UNAVAILABLE`, with the success streak cleared |
 | OpenSky with a future `paused_until_ms` | Paused until then |
 
-A restart can delay failback, but never speed it up.
+There is no persistent "handover in progress" flag. Before HANDOVER commits, OpenSky is still the stored authority, so a restart resumes OpenSky and restored health must prove itself again before another failback attempt. After HANDOVER commits, the stored adsb.fi authority wins. A restart can therefore delay failback, but never speed it up.
 
 ### 8. The lease is not fencing
 
