@@ -6,6 +6,7 @@ import type {
 	CommitResult,
 	CoverageCloseReason,
 	CreditResult,
+	HandoverResult,
 	RelinquishResult,
 } from './coverageTimeline.js';
 import type { OpenskyFetchResult } from './poller.js';
@@ -61,11 +62,13 @@ class FakeTimeline {
 	creditProviders: string[] = [];
 	closes: CoverageCloseReason[] = [];
 	commits: { provider: string; atMs: number }[] = [];
+	handovers: { expected: string; next: string; atMs: number }[] = [];
 	relinquishes: string[] = [];
 	creditResult: CreditResult | Error = { status: 'extended', timelineVersion: 1 };
 	closeResult: CloseResult | Error = { status: 'already_closed' };
 	// Queued results for the next commits; afterwards every commit succeeds.
 	commitResults: (CommitResult | Error)[] = [];
+	handoverResult: HandoverResult | Error | null = null;
 	relinquishResult: RelinquishResult | Error = {
 		status: 'relinquished',
 		timelineVersion: 9,
@@ -87,6 +90,18 @@ class FakeTimeline {
 		if (queued !== undefined) return queued;
 		this.commits.push({ provider, atMs });
 		return { status: 'committed', epoch: ++this.epoch, timelineVersion: 10 + this.epoch };
+	}
+	async handover(
+		_token: string,
+		expected: string,
+		next: string,
+		atMs: number,
+	): Promise<HandoverResult> {
+		events.push(`handover:${expected}->${next}`);
+		if (this.handoverResult instanceof Error) throw this.handoverResult;
+		if (this.handoverResult !== null) return this.handoverResult;
+		this.handovers.push({ expected, next, atMs });
+		return { status: 'handed_over', epoch: ++this.epoch, timelineVersion: 20 + this.epoch };
 	}
 	async relinquish(_token: string, expected: string): Promise<RelinquishResult> {
 		events.push(`relinquish:${expected}`);
@@ -132,6 +147,7 @@ class FakeHealthStore {
 	snapshot: AcquisitionSnapshot = {
 		authorityInitialized: true,
 		authorityProvider: 'adsbfi',
+		authoritySinceMs: null,
 		stored: { adsbfi: UNKNOWN, opensky: UNKNOWN },
 	};
 	writes: { provider: Provider; health: ProviderHealth }[] = [];
@@ -264,6 +280,7 @@ function build(overrides: Partial<CoordinatorDeps> = {}): Coordinator {
 		openskyActiveIntervalMs: OPENSKY_ACTIVE_MS,
 		selectionRetryBaseMs: 60_000,
 		selectionRetryMaxMs: 900_000,
+		failbackMinOpenskyAuthorityMs: 5 * 60_000,
 		...overrides,
 	});
 }
@@ -1079,9 +1096,10 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		problem: null,
 		present: true,
 	});
-	const authorityIs = (provider: string) => {
+	const authorityIs = (provider: string, sinceMs: number | null = null) => {
 		healthStore.snapshot.authorityInitialized = true;
 		healthStore.snapshot.authorityProvider = provider;
+		healthStore.snapshot.authoritySinceMs = sinceMs;
 	};
 	const plans = () =>
 		logs.filter((l) => l.message === 'selection round').map((l) => l.extra['plan'] as string[]);
@@ -1286,27 +1304,66 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		);
 	});
 
-	it('OpenSky authoritative: one request per active cycle, adsb.fi standby never publishes, and no failback', async () => {
-		authorityIs('opensky');
+	it('does not fail back before five minutes on OpenSky, then hands over on the next healthy adsb.fi check', async () => {
+		const start = Date.now();
+		authorityIs('opensky', start);
 		healthStore.snapshot.stored.opensky = recent('HEALTHY');
 		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
 		opensky(() => osOk(398, 2));
 		coordinator.start();
-		await vi.advanceTimersByTimeAsync(10 * 60_000);
-		// Active cycles every 25 s after the last one finished: no separate
-		// OpenSky check ever runs alongside them.
-		const calls = fetchOpenskyMock.mock.calls.length;
-		expect(calls).toBeGreaterThanOrEqual(24);
-		expect(calls).toBeLessThanOrEqual(25);
-		// adsb.fi was asked at its standby rate, is HEALTHY, and never took over.
-		expect(fetchCycle.mock.calls.length).toBeGreaterThanOrEqual(55);
+
+		await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
 		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
-		expect(timeline.commits).toEqual([]);
-		expect(timeline.relinquishes).toEqual([]);
-		expect(new Set(timeline.creditProviders)).toEqual(new Set(['opensky']));
-		for (const [messages] of publish.mock.calls) {
-			expect(messages.every((m) => m.key.startsWith('os'))).toBe(true);
-		}
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+
+		await vi.advanceTimersByTimeAsync(2);
+		expect(timeline.closes).toContain('handover_attempt');
+		expect(timeline.handovers.map((h) => [h.expected, h.next])).toEqual([
+			['opensky', 'adsbfi'],
+		]);
+		expect(coordinator.authority).toBe('adsbfi');
+		expect(logs.some((l) => l.message === 'failback committed')).toBe(true);
+	});
+
+	it('a failed failback publish leaves OpenSky authoritative and resumes its active cycle', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 1));
+		publish.mockImplementation(async (messages) => {
+			if (messages.some((m) => m.key.startsWith('ac'))) throw new Error('kafka down');
+			events.push('publish:opensky');
+			return '0';
+		});
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(20);
+
+		expect(timeline.closes).toContain('handover_attempt');
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+		expect(logs.some((l) => l.message === 'failback publish failed: OpenSky remains authoritative')).toBe(
+			true,
+		);
+		expect(fetchOpenskyMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it('RECOVERING adsb.fi cannot fail back until its uninterrupted recovery window completes', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('UNAVAILABLE');
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+
+		await vi.advanceTimersByTimeAsync(RECOVERY_MS - 1);
+		expect(healthStore.last('adsbfi')?.state).toBe('RECOVERING');
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+
+		await vi.advanceTimersByTimeAsync(STANDBY_MS + 1);
+		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
+		expect(timeline.handovers).toHaveLength(1);
+		expect(coordinator.authority).toBe('adsbfi');
 	});
 
 	it('an OpenSky health success never commits while adsb.fi holds authority', async () => {

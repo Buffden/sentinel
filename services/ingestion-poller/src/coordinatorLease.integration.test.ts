@@ -221,6 +221,7 @@ describe('Coordinator against real Redis', () => {
 				credit: async () => ({ status: 'extended', timelineVersion: 1 }),
 				close: async () => ({ status: 'already_closed' }),
 				commit: async () => ({ status: 'committed', epoch: 1, timelineVersion: 1 }),
+				handover: async () => ({ status: 'handed_over', epoch: 2, timelineVersion: 1 }),
 				relinquish: async () => ({ status: 'relinquished', timelineVersion: 1, member: null }),
 			},
 			fetchCycle: async (): Promise<SplitResult> => ({
@@ -246,6 +247,7 @@ describe('Coordinator against real Redis', () => {
 			openskyActiveIntervalMs: 25_000,
 			selectionRetryBaseMs: 60_000,
 			selectionRetryMaxMs: 900_000,
+			failbackMinOpenskyAuthorityMs: 300_000,
 		});
 
 		try {
@@ -370,6 +372,7 @@ describe('Coordinator against real Redis', () => {
 			openskyActiveIntervalMs: 25_000,
 			selectionRetryBaseMs: 60_000,
 			selectionRetryMaxMs: 900_000,
+			failbackMinOpenskyAuthorityMs: 300_000,
 		});
 
 		try {

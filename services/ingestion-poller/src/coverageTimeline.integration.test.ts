@@ -553,6 +553,7 @@ describe('Coordinator with the real lease and timeline', () => {
 			openskyActiveIntervalMs: 25_000,
 			selectionRetryBaseMs: 60_000,
 			selectionRetryMaxMs: 900_000,
+			failbackMinOpenskyAuthorityMs: 300_000,
 		});
 
 		const version = async () => Number((await authority())['timeline_version'] ?? 0);

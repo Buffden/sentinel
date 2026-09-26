@@ -209,6 +209,7 @@ describe('Coordinator health end to end against real Redis', () => {
 			openskyActiveIntervalMs: 25_000,
 			selectionRetryBaseMs: 60_000,
 			selectionRetryMaxMs: 900_000,
+			failbackMinOpenskyAuthorityMs: 300_000,
 		});
 		const state = async () => (await redis.hget(healthKeys.adsbfi, 'state')) ?? 'unknown';
 		const authorityCore = async () =>

@@ -87,6 +87,7 @@ function runtime(
 	fetchCycle: () => Promise<SplitResult | AdsbfiFetchFailure>,
 	fetchOpensky: () => Promise<OpenskyFetchResult>,
 	publishOverride?: CoordinatorDeps['publish'],
+	failbackMinOpenskyAuthorityMs = 5 * 60_000,
 ): Runtime {
 	const client = new Redis(REDIS_URL, { commandTimeout: 2_000 });
 	const acceptedProviders: Provider[] = [];
@@ -139,6 +140,7 @@ function runtime(
 		openskyActiveIntervalMs: 30,
 		selectionRetryBaseMs: 80,
 		selectionRetryMaxMs: 320,
+		failbackMinOpenskyAuthorityMs,
 	});
 
 	return {
