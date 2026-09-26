@@ -71,6 +71,21 @@ export function planSelectionRound(
 	];
 }
 
+// Bounded full-jitter backoff for a provider request. The normal cadence is
+// the floor, so a failure never causes requests to run faster than healthy
+// polling.
+export function nextProviderDelayMs(
+	consecutiveFailures: number,
+	intervalMs: number,
+	baseMs: number,
+	maxMs: number,
+	random: () => number = Math.random,
+): number {
+	if (consecutiveFailures <= 0) return intervalMs;
+	const ceiling = Math.min(maxMs, baseMs * 2 ** (consecutiveFailures - 1));
+	return Math.max(intervalMs, Math.floor(random() * ceiling));
+}
+
 // The coordinator's own retry after a delivery failure while none (a publish
 // that failed, or a commit refused for its time): 60 s, doubling to 15 min.
 // Separate from provider health: the provider itself answered correctly.

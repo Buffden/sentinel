@@ -109,22 +109,6 @@ export function splitAdsbfiResponse(body: unknown, box: Box, fetchedAtMs: number
 	return result;
 }
 
-// Delay before the next request. With no failures it is the normal interval.
-// After n consecutive failures it is a random value in [0, min(max, base * 2^(n-1))]
-// (full jitter), floored at the normal interval so a retry is never sooner
-// than normal polling.
-export function nextDelayMs(
-	consecutiveFailures: number,
-	intervalMs: number,
-	baseMs: number,
-	maxMs: number,
-	random: () => number = Math.random,
-): number {
-	if (consecutiveFailures <= 0) return intervalMs;
-	const ceiling = Math.min(maxMs, baseMs * 2 ** (consecutiveFailures - 1));
-	return Math.max(intervalMs, Math.floor(random() * ceiling));
-}
-
 // ---- Logging ---------------------------------------------------------------
 
 export type Log = (
@@ -183,16 +167,4 @@ export async function fetchAdsbfiResponse(logFn: Log): Promise<SplitResult | Ads
 		logFn('error', 'adsb.fi response rejected', { error: message });
 		return { error: `validation: ${message}` };
 	}
-}
-
-export function pollCycleSummary(split: SplitResult, firstOffset: string): Record<string, unknown> {
-	return {
-		aircraft_in_response: split.total,
-		published: split.messages.length,
-		skipped_non_icao: split.skippedNonIcao,
-		skipped_no_position: split.skippedNoPosition,
-		skipped_outside_box: split.skippedOutsideBox,
-		topic: config.TOPIC,
-		first_offset: firstOffset,
-	};
 }

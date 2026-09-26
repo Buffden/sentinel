@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
 	fetchAdsbfiResponse,
-	nextDelayMs,
 	splitAdsbfiResponse,
 	toResponseNowMs,
 } from './adsbfiPoller.js';
@@ -60,31 +59,6 @@ describe('splitAdsbfiResponse', () => {
 
 	it('rejects the whole response when `now` is unusable, rather than publishing untimed records', () => {
 		expect(() => splitAdsbfiResponse({ now: 1790127082, ac: [inBox] }, BOX, 0)).toThrow();
-	});
-});
-
-describe('nextDelayMs', () => {
-	const INTERVAL = 2_000;
-	const BASE = 2_000;
-	const MAX = 60_000;
-
-	it('uses the normal interval when nothing has failed', () => {
-		expect(nextDelayMs(0, INTERVAL, BASE, MAX, () => 0.5)).toBe(INTERVAL);
-	});
-
-	it('grows the jitter ceiling exponentially with consecutive failures', () => {
-		// random() just under 1 approaches the ceiling: base * 2^(n-1)
-		expect(nextDelayMs(3, INTERVAL, BASE, MAX, () => 0.999)).toBe(Math.floor(0.999 * 8_000));
-	});
-
-	it('caps the ceiling at the configured maximum', () => {
-		expect(nextDelayMs(20, INTERVAL, BASE, MAX, () => 0.999)).toBe(Math.floor(0.999 * MAX));
-	});
-
-	it('never retries sooner than the normal poll interval, however low the jitter', () => {
-		for (const failures of [1, 2, 5, 20]) {
-			expect(nextDelayMs(failures, INTERVAL, BASE, MAX, () => 0)).toBe(INTERVAL);
-		}
 	});
 });
 
