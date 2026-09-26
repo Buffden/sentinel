@@ -13,11 +13,11 @@
 //   if the response qualifies, a delivery that publishes and then commits
 //   authority. Candidate delivery shares the single publish lane.
 //
-// Health drives authority in one direction only (ADR-022 section 4): when the
-// authoritative provider's health reaches UNAVAILABLE, authority is
-// relinquished to none, and a selection round tries eligible providers until
-// one commits. Proactive failback from a healthy OpenSky authority is not
-// implemented here.
+// Health drives failover: when the authoritative provider reaches
+// UNAVAILABLE, authority is relinquished to none and a selection round tries
+// eligible providers until one commits. Voluntary OpenSky -> adsb.fi failback
+// is separate: adsb.fi must be HEALTHY and OpenSky must have held authority
+// for the ADR's minimum window before a serialized handover is attempted.
 //
 // Three things stay separate. Provider health describes the upstream
 // provider. Coverage describes successful authoritative delivery. Authority

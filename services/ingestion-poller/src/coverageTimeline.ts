@@ -1,7 +1,7 @@
 // Provider authority and coverage timeline in Redis (ADR-022 sections 4 to 7).
 //
-// Four atomic scripts own every timeline write: COMMIT and RELINQUISH change
-// authority, CREDIT and CLOSE change coverage. Each checks the lease token
+// Five atomic scripts own timeline writes: COMMIT, HANDOVER and RELINQUISH
+// change authority; CREDIT and CLOSE change coverage. Each checks the lease token
 // first and writes nothing on a mismatch, so a coordinator that has lost its
 // lease can never extend, reopen or close coverage its successor now owns.
 // That keeps the Redis timeline consistent. It does not fence Kafka: a
@@ -40,7 +40,6 @@ export type AuthorityProvider = 'adsbfi' | 'opensky';
 export type CoverageCloseReason =
 	| 'failure'
 	| 'handover_attempt'
-	| 'handover'
 	| 'coordinator_shutdown'
 	| 'coordinator_down';
 
