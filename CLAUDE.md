@@ -196,24 +196,33 @@ A checkpoint is not complete because Claude wrote the code or tests pass.
 
 ### Implementation Documentation Requirement
 
-"Affected documentation is aligned" (above) is not optional polish and does not mean only updating source-of-truth contracts (ADRs, `DATA_MODEL.md`, `ARCHITECTURE.md`, use cases) when they change. Every completed non-trivial implementation checkpoint — one that introduces or changes runtime behavior through a real mechanism, not a trivial familiar edit — must also, before the checkpoint is called done:
+"Affected documentation is aligned" means updating the existing source of truth that materially changed: ADRs, `ARCHITECTURE.md`, `DATA_MODEL.md`, use cases, the active phase plan, or an existing concept document. Documentation is proportional to the change; do not create files merely because a checkpoint exists.
 
-- maintain an implementation concept document (`docs/implementation/phase-XX-*/concepts/<concept>/<concept>.md`) covering the mental model, ownership, and failure modes, following the existing Phase 03/05 pattern (plain language → technical depth → map to code → retention questions → completion checklist);
-- include a checkpoint debrief (`<concept>-debrief.md`) with real evidence — actual command output, actual inspected state — not a restatement of the concept doc;
-- add PlantUML source (`.puml`) only when a flow/sequence/state/class visualization materially improves understanding over prose and a code map; do not add a diagram, especially a class diagram, merely for completeness;
-- render every `.puml` to SVG and commit it under the mirrored path `diagrams/docs/implementation/phase-XX-*/concepts/...`, linked from the concept markdown;
-- link the new concept from that phase's `concepts/README.md` and, if the phase README tracks a checkpoint table, update that table;
-- describe only implemented and accepted behavior. Any checkpoint still under design discussion (a Pre-CPnX naming a resolved decision, or a later CPn not yet built) must be listed as Pending, not documented as if decided — this applies even when prior conversation sketched a design; nothing is accepted until it is actually implemented and committed.
+- Add a separate concept document only when the checkpoint introduces a reusable mental model, ownership boundary, or failure mode that is not already explained clearly elsewhere.
+- Add a separate debrief only when real experiments, failure-boundary observations, measurements, or surprising findings are worth preserving. A debrief must contain evidence, not restate the concept or ADR.
+- Prefer extending an existing ADR, architecture section, data-model section, or concept over creating overlapping documents.
+- Add PlantUML only when a diagram materially improves understanding. Render committed `.puml` files to the mirrored SVG path and link them from the relevant markdown.
+- Keep the phase checkpoint table/status accurate, but do not duplicate the same implementation narrative across the phase plan, ADR, concept, debrief, and code comments.
+- Describe only implemented and accepted behavior. Work still under design remains Pending.
 
-A research-only checkpoint (an experiment, architectural discovery, or decision that introduces no runtime behavior) may instead use one concise README in its concept folder covering method, evidence, limitations, and outcome. If the research changes an accepted decision or checkpoint order, the affected ADR and phase plan must still be updated. Do not create duplicate documents only to satisfy a template.
-
-Phase 06 fell behind this standard for four checkpoints before being backfilled (see `docs/implementation/phase-06-composite-correlation/`) — a documentation-only checkpoint had to be inserted afterward to catch up. Do not let that repeat in any phase: treat the documentation above as part of each checkpoint itself, not a cleanup pass done later.
+A research-only checkpoint may use one concise README covering method, evidence, limitations, and outcome when no existing source-of-truth document is a better home.
 
 ---
 
 ## Implementation Guardrails
 
+Thoroughness means covering the important reasoning, invariants, and failure cases — not maximizing code, tests, abstractions, configuration, comments, or documentation.
+
 - Prefer explicit code over clever abstractions.
+- Optimize for the smallest maintainable implementation that satisfies the current checkpoint.
+- Before adding a timer, queue, retry loop, state machine, wrapper, persistent field, config knob, or new abstraction, identify the concrete current invariant or failure it protects and whether an existing mechanism can protect it instead.
+- Prefer deletion, reuse, and consolidation. Do not keep legacy and replacement implementations in parallel after migration unless a real compatibility requirement needs both.
+- Avoid duplicate scheduling, retry/backoff, serialization, polling, or state-management mechanisms for the same invariant.
+- Keep configuration only for values that are genuinely useful to tune independently in operation.
+- If one orchestration class accumulates unrelated provider protocol, policy, persistence, publishing, scheduling, and lifecycle responsibilities, pause and move pure/provider-specific behavior into existing modules or functions before adding more machinery.
+- Tests should protect observable behavior, contracts, invariants, regressions, and real failure boundaries. Do not preserve tests that only mirror private callback ordering or implementation choreography.
+- Comments should explain non-obvious reasoning, invariants, or external quirks. Do not narrate checkpoint history or restate the code.
+- Passing tests proves compatibility with the tests; it does not by itself justify the complexity of the implementation.
 - Comment why, not what.
 - Name constants with units.
 - Keep ownership boundaries obvious.
