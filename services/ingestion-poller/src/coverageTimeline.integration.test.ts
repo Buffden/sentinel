@@ -408,6 +408,50 @@ describe('CoverageTimeline against real Redis', () => {
 		expect(await snapshot()).toBe(before);
 	});
 
+	it('HANDOVER changes exactly the expected live authority after coverage is closed', async () => {
+		await timeline.commit(TOKEN, 'opensky', 1_000);
+		await timeline.credit(TOKEN, 'opensky', 1_000);
+		await timeline.credit(TOKEN, 'opensky', 2_000);
+		expect((await timeline.close(TOKEN, 'handover_attempt', 2_500)).status).toBe('closed');
+
+		expect(await timeline.handover(TOKEN, 'opensky', 'adsbfi', 3_000)).toEqual({
+			status: 'handed_over',
+			epoch: 2,
+			timelineVersion: 4,
+		});
+		expect(await authority()).toMatchObject({
+			provider: 'adsbfi',
+			epoch: '2',
+			authority_since_ms: '3000',
+			coverage_open_since_ms: '',
+			last_active_success_ms: '2000',
+			timeline_version: '4',
+		});
+		expect(await coverage()).toEqual(['opensky|1000|2000|handover_attempt', '2000']);
+	});
+
+	it('HANDOVER refuses an open segment, a wrong authority, a stale time and a wrong lease', async () => {
+		await timeline.commit(TOKEN, 'opensky', 1_000);
+		await timeline.credit(TOKEN, 'opensky', 1_000);
+		expect(await timeline.handover(TOKEN, 'opensky', 'adsbfi', 2_000)).toEqual({
+			status: 'coverage_open',
+		});
+
+		await timeline.close(TOKEN, 'handover_attempt', 2_500);
+		const before = await snapshot();
+		expect(await timeline.handover(TOKEN, 'adsbfi', 'opensky', 2_000)).toEqual({
+			status: 'unexpected_provider',
+			authority: 'opensky',
+		});
+		expect(await timeline.handover(TOKEN, 'opensky', 'adsbfi', 1_000)).toEqual({
+			status: 'stale_clock',
+		});
+		expect(await timeline.handover('token-b', 'opensky', 'adsbfi', 2_000)).toEqual({
+			status: 'lease_mismatch',
+		});
+		expect(await snapshot()).toBe(before);
+	});
+
 	it('COMMIT refuses a time that is not after the last success: equal or backwards', async () => {
 		await timeline.commit(TOKEN, 'adsbfi', 1_000);
 		await timeline.credit(TOKEN, 'adsbfi', 1_000);

@@ -37,7 +37,12 @@ export const COVERAGE_KEY = '{live-provider}:coverage';
 
 export type AuthorityProvider = 'adsbfi' | 'opensky';
 
-export type CoverageCloseReason = 'failure' | 'coordinator_shutdown' | 'coordinator_down';
+export type CoverageCloseReason =
+	| 'failure'
+	| 'handover_attempt'
+	| 'handover'
+	| 'coordinator_shutdown'
+	| 'coordinator_down';
 
 export type CreditResult =
 	| { status: 'lease_mismatch' }
@@ -78,6 +83,13 @@ export type RelinquishResult =
 	| { status: 'unexpected_provider'; authority: string }
 	// No authority was ever committed: nothing to relinquish, nothing written.
 	| { status: 'not_initialized' };
+
+export type HandoverResult =
+	| { status: 'lease_mismatch' }
+	| { status: 'handed_over'; epoch: number; timelineVersion: number }
+	| { status: 'unexpected_provider'; authority: string | null }
+	| { status: 'coverage_open' }
+	| { status: 'stale_clock' };
 
 // KEYS: lease, authority. ARGV: token, success time (ms), provider.
 // Extends or reopens coverage for the provider that already holds authority.
@@ -184,6 +196,36 @@ export const COMMIT_SCRIPT = `
 // `failure`, with CLOSE's rules (a member only with length, backwards refused).
 // epoch and last_active_success_ms are kept; authority_since_ms records when
 // none began.
+// KEYS: lease, authority. ARGV: token, expected provider, next provider,
+// commit time (ms). Used only for voluntary failback after the old provider's
+// coverage has been closed. Unlike COMMIT, this intentionally changes one
+// live authority to another, but only from the exact expected provider.
+export const HANDOVER_SCRIPT = `
+	if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+		return {'lease_mismatch'}
+	end
+	local provider = redis.call('HGET', KEYS[2], 'provider')
+	local epoch = redis.call('HGET', KEYS[2], 'epoch')
+	if not provider or not epoch or provider ~= ARGV[2] then
+		return {'unexpected_provider', provider or ''}
+	end
+	local open = redis.call('HGET', KEYS[2], 'coverage_open_since_ms')
+	if open and open ~= '' then
+		return {'coverage_open'}
+	end
+	local last = redis.call('HGET', KEYS[2], 'last_active_success_ms')
+	if last and last ~= '' and tonumber(ARGV[4]) <= tonumber(last) then
+		return {'stale_clock'}
+	end
+	local e = redis.call('HINCRBY', KEYS[2], 'epoch', 1)
+	redis.call('HSET', KEYS[2],
+		'provider', ARGV[3],
+		'authority_since_ms', ARGV[4],
+		'coverage_open_since_ms', '')
+	local v = redis.call('HINCRBY', KEYS[2], 'timeline_version', 1)
+	return {'handed_over', e, v}
+`;
+
 export const RELINQUISH_SCRIPT = `
 	if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 		return {'lease_mismatch'}
@@ -275,6 +317,37 @@ export class CoverageTimeline {
 			return { status, epoch: Number(a), timelineVersion: Number(b) };
 		}
 		throw new Error(`unexpected commit script reply: ${JSON.stringify(reply)}`);
+	}
+
+	// Voluntary handover from one known authority to another after the old
+	// coverage has been closed and the new provider's cycle has published.
+	async handover(
+		token: string,
+		expected: AuthorityProvider,
+		next: AuthorityProvider,
+		commitMs: number,
+	): Promise<HandoverResult> {
+		const reply = (await this.redis.eval(
+			HANDOVER_SCRIPT,
+			2,
+			this.leaseKey,
+			this.authorityKey,
+			token,
+			expected,
+			next,
+			String(commitMs),
+		)) as [string, ...(string | number)[]];
+		const [status, a, b] = reply;
+		if (status === 'lease_mismatch' || status === 'coverage_open' || status === 'stale_clock') {
+			return { status };
+		}
+		if (status === 'unexpected_provider') {
+			return { status, authority: a ? String(a) : null };
+		}
+		if (status === 'handed_over') {
+			return { status, epoch: Number(a), timelineVersion: Number(b) };
+		}
+		throw new Error(`unexpected handover script reply: ${JSON.stringify(reply)}`);
 	}
 
 	// Relinquish expected's authority to none at nowMs.
