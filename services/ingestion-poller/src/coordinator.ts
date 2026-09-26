@@ -77,7 +77,7 @@ type Lease = Pick<
 	'token' | 'tryAcquire' | 'renew' | 'release' | 'forget' | 'currentHolder'
 >;
 
-type Timeline = Pick<CoverageTimeline, 'credit' | 'close' | 'commit' | 'relinquish'>;
+type Timeline = Pick<CoverageTimeline, 'credit' | 'close' | 'commit' | 'handover' | 'relinquish'>;
 
 type HealthStore = Pick<ProviderHealthStore, 'readForAcquisition' | 'write'>;
 
@@ -114,6 +114,9 @@ export interface CoordinatorDeps {
 	// Per-provider candidate delivery backoff while authority is none.
 	selectionRetryBaseMs: number;
 	selectionRetryMaxMs: number;
+	// Voluntary failback is never attempted before OpenSky has held authority
+	// this long. The production value is the ADR's fixed five minutes.
+	failbackMinOpenskyAuthorityMs: number;
 }
 
 // Who holds authority, as this coordinator knows it. `none` also covers a
@@ -121,7 +124,7 @@ export interface CoordinatorDeps {
 // first commit creates epoch 1.
 type Mode = Provider | 'none';
 
-type Role = 'active' | 'standby' | 'candidate';
+type Role = 'active' | 'standby' | 'candidate' | 'handover';
 
 // Selection-round requests are distinguished from normal cadence because a
 // stale provider gets only conservative recovery credit on that immediate try.
@@ -141,6 +144,7 @@ interface RequestOutcome {
 interface RestoredState {
 	authorityInitialized: boolean;
 	authorityProvider: string | null;
+	authoritySinceMs: number | null;
 	openskyDelayMs: number;
 }
 
@@ -168,6 +172,8 @@ export class Coordinator {
 	// nothing.
 	private term = 0;
 	private mode: Mode = 'none';
+	private authoritySinceMs: number | null = null;
+	private handoverInProgress = false;
 	// Rebuilt from Redis at every acquisition; null is unknown health.
 	private health: Record<Provider, ProviderHealth | null> = { adsbfi: null, opensky: null };
 	// A true first deployment, decided at acquisition: no initialized authority
@@ -268,6 +274,8 @@ export class Coordinator {
 		this.waitingLogged = false;
 		const term = ++this.term;
 		this.mode = 'none';
+		this.authoritySinceMs = null;
+		this.handoverInProgress = false;
 		this.requestQueue = { adsbfi: Promise.resolve(), opensky: Promise.resolve() };
 		log('info', 'lease acquired: now leader', { lease_token: lease.token });
 		// A shutdown that raced the acquisition releases the lease itself.
@@ -415,6 +423,11 @@ export class Coordinator {
 		const role = this.roleOf(provider);
 		let delayMs: number;
 
+		// A voluntary handover has stopped OpenSky after its current request.
+		// The handover's finally block decides whether it resumes as active or
+		// returns as standby.
+		if (provider === 'opensky' && this.handoverInProgress && this.mode === 'opensky') return;
+
 		if (outcome.committed) this.deliveryFailures[provider] = 0;
 		if (role === 'candidate' && outcome.deliveryFailed) {
 			const step = ++this.deliveryFailures[provider];
@@ -561,11 +574,23 @@ export class Coordinator {
 				aircraft: split.messages.length,
 				state: this.health.adsbfi?.state ?? 'unknown',
 			});
+			if (this.failbackEligible(Date.now()) && !this.handoverInProgress) {
+				await this.attemptFailback(token, term);
+			}
 			return outcome({});
 		}
 		if (role === 'candidate') {
 			return this.deliverCandidate(
 				'adsbfi',
+				split.messages,
+				token,
+				term,
+				verdict === 'fresh',
+				outcome,
+			);
+		}
+		if (role === 'handover') {
+			return this.deliverHandover(
 				split.messages,
 				token,
 				term,
@@ -809,6 +834,7 @@ export class Coordinator {
 			}
 
 			this.mode = provider;
+			this.authoritySinceMs = commitMs;
 			this.deliveryFailures[provider] = 0;
 			log('info', 'authority committed', {
 				provider,
@@ -841,6 +867,133 @@ export class Coordinator {
 		});
 	}
 
+	private failbackEligible(nowMs: number): boolean {
+		return (
+			this.mode === 'opensky' &&
+			this.health.adsbfi?.state === 'HEALTHY' &&
+			this.authoritySinceMs !== null &&
+			nowMs - this.authoritySinceMs >= this.deps.failbackMinOpenskyAuthorityMs
+		);
+	}
+
+	// Voluntary failback reuses the existing provider request loops and publish
+	// lane. No extra timer is needed: each adsb.fi standby check re-evaluates
+	// the five-minute condition.
+	private async attemptFailback(token: string, term: number): Promise<void> {
+		if (this.handoverInProgress || !this.current(token, term) || !this.failbackEligible(Date.now())) {
+			return;
+		}
+		this.handoverInProgress = true;
+		const timer = this.requestTimers.opensky;
+		if (timer !== null) clearTimeout(timer);
+		this.requestTimers.opensky = null;
+		this.deps.log('info', 'failback attempt started', {
+			from: 'opensky',
+			to: 'adsbfi',
+			authority_since_ms: this.authoritySinceMs,
+		});
+
+		try {
+			// Let a cycle that already started finish. scheduleNext will not
+			// arm another OpenSky request while handoverInProgress is true.
+			await this.requestQueue.opensky;
+			await this.publishQueue;
+			if (!this.current(token, term) || !this.failbackEligible(Date.now())) return;
+
+			if (!(await this.closeCoverage(token, 'handover_attempt'))) return;
+			if (!this.current(token, term) || this.mode !== 'opensky') return;
+
+			const result = await this.adsbfiRequest('handover', false, token, term);
+			if (result.leaseLost) return;
+			if (this.mode === 'opensky') {
+				this.deps.log('warn', 'failback attempt failed: OpenSky remains authoritative');
+			}
+		} finally {
+			this.handoverInProgress = false;
+			if (!this.current(token, term)) return;
+			if (this.mode === 'opensky' && this.requestTimers.opensky === null) {
+				// A failed handover deliberately left OpenSky coverage closed;
+				// the next successful active cycle reopens it truthfully.
+				this.scheduleRequest('opensky', 0, token, term);
+			} else if (this.mode === 'adsbfi' && this.requestTimers.opensky === null) {
+				this.scheduleRequest('opensky', this.openskyStandbyDelayMs(), token, term);
+			}
+		}
+	}
+
+	private deliverHandover(
+		messages: Messages,
+		token: string,
+		term: number,
+		creditEligible: boolean,
+		outcome: (o: Partial<RequestOutcome>) => RequestOutcome,
+	): Promise<RequestOutcome> {
+		const { log } = this.deps;
+		return this.serializedPublish(async () => {
+			if (
+				!this.handoverInProgress ||
+				this.mode !== 'opensky' ||
+				!this.current(token, term)
+			) {
+				return outcome({});
+			}
+
+			const published = await this.sendAll(messages);
+			if (published.status === 'failed') {
+				log('error', 'failback publish failed: OpenSky remains authoritative', {
+					error: published.error,
+				});
+				return outcome({ deliveryFailed: true });
+			}
+
+			const commitMs = Date.now();
+			let result;
+			try {
+				result = await this.deps.timeline.handover(
+					token,
+					'opensky',
+					'adsbfi',
+					commitMs,
+				);
+			} catch (err) {
+				this.loseLeadership(token, 'authority handover error: result unknown', err);
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'lease_mismatch') {
+				this.loseLeadership(token, 'authority handover rejected: token no longer matches');
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'unexpected_provider' || result.status === 'coverage_open') {
+				this.loseLeadership(
+					token,
+					result.status === 'unexpected_provider'
+						? `authority handover refused: authority is ${result.authority ?? 'not initialized'}`
+						: 'authority handover refused: OpenSky coverage is still open',
+				);
+				return outcome({ leaseLost: true });
+			}
+			if (result.status === 'stale_clock') {
+				log('warn', 'authority handover refused: time is not after the last success');
+				return outcome({ deliveryFailed: true });
+			}
+
+			this.mode = 'adsbfi';
+			this.authoritySinceMs = commitMs;
+			log('info', 'failback committed', {
+				from: 'opensky',
+				to: 'adsbfi',
+				epoch: result.epoch,
+				timeline_version: result.timelineVersion,
+				commit_ms: commitMs,
+				published: messages.length,
+			});
+			if (creditEligible && !(await this.creditCoverage(token, 'adsbfi', commitMs))) {
+				return outcome({ committed: true, leaseLost: true });
+			}
+			return outcome({ committed: true });
+		});
+	}
+
 	// The authoritative provider has become UNAVAILABLE: stop its active
 	// cycles at once and relinquish authority to none, then select.
 	private async relinquish(provider: Provider, token: string, term: number): Promise<void> {
@@ -849,6 +1002,7 @@ export class Coordinator {
 		// No new active cycle of this provider starts from here, and a cycle
 		// that has not reached its publish drops out when its turn comes.
 		this.mode = 'none';
+		this.authoritySinceMs = null;
 		const timer = this.requestTimers[provider];
 		if (timer !== null) clearTimeout(timer);
 		this.requestTimers[provider] = null;
@@ -964,6 +1118,7 @@ export class Coordinator {
 				never_committed: !restored.authorityInitialized,
 			});
 			this.mode = 'none';
+			this.authoritySinceMs = null;
 			this.enterNone(
 				token,
 				term,
@@ -976,6 +1131,7 @@ export class Coordinator {
 			return false;
 		}
 		this.mode = stored;
+		this.authoritySinceMs = restored.authoritySinceMs;
 		log('info', 'authority restored', {
 			provider: stored,
 			health: this.health[stored]?.state ?? 'unknown',
@@ -1230,6 +1386,7 @@ export class Coordinator {
 		return {
 			authorityInitialized: snapshot.authorityInitialized,
 			authorityProvider: snapshot.authorityProvider,
+			authoritySinceMs: snapshot.authoritySinceMs,
 			openskyDelayMs,
 		};
 	}

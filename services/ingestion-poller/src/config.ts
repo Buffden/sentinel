@@ -241,7 +241,11 @@ export const config = {
 		900_000,
 	),
 
-	// ---- Failover (ADR-022 section 4) ----
+	// ---- Failover and failback (ADR-022 section 4) ----
+
+	// Policy, not an operator tuning knob: OpenSky must hold authority for at
+	// least five minutes before a healthy adsb.fi may take it back.
+	FAILBACK_MIN_OPENSKY_AUTHORITY_MS: 5 * 60_000,
 
 	// OpenSky's active cycle while it is authoritative: 3,456 credits a day on
 	// the 1-credit SF Bay box, inside the 4,000 authenticated budget. Each

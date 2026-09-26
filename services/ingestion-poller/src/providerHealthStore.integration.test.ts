@@ -138,11 +138,23 @@ describe('ProviderHealthStore against real Redis', () => {
 		expect(snapshot.stored.adsbfi).toEqual({ health: null, problem: null, present: false });
 
 		// Initialized authority with an adsb.fi record and an unreadable OpenSky one.
-		await redis.hset(authorityKey, 'provider', 'adsbfi', 'epoch', '1');
+		await redis.hset(
+			authorityKey,
+			'provider',
+			'adsbfi',
+			'epoch',
+			'1',
+			'authority_since_ms',
+			'1790400000123',
+		);
 		await store.write(TOKEN, 'adsbfi', health({ state: 'RECOVERING', successStreakSinceMs: 7 }));
 		await redis.hset(healthKeys.opensky, 'state', 'SIDEWAYS');
 		snapshot = await store.readForAcquisition();
-		expect(snapshot).toMatchObject({ authorityInitialized: true, authorityProvider: 'adsbfi' });
+		expect(snapshot).toMatchObject({
+			authorityInitialized: true,
+			authorityProvider: 'adsbfi',
+			authoritySinceMs: 1790400000123,
+		});
 		expect(snapshot.stored.adsbfi.health).toMatchObject({
 			state: 'RECOVERING',
 			successStreakSinceMs: 7,

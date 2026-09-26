@@ -78,6 +78,7 @@ const coordinator = new Coordinator({
 	openskyActiveIntervalMs: config.OPENSKY_ACTIVE_INTERVAL_MS,
 	selectionRetryBaseMs: config.SELECTION_RETRY_BASE_MS,
 	selectionRetryMaxMs: config.SELECTION_RETRY_MAX_MS,
+	failbackMinOpenskyAuthorityMs: config.FAILBACK_MIN_OPENSKY_AUTHORITY_MS,
 });
 
 let shuttingDown = false;
@@ -115,6 +116,7 @@ producer
 			poll_interval_ms: config.ADSBFI_POLL_INTERVAL_MS,
 			adsbfi_standby_interval_ms: config.ADSBFI_STANDBY_INTERVAL_MS,
 			opensky_active_interval_ms: config.OPENSKY_ACTIVE_INTERVAL_MS,
+			failback_min_opensky_authority_ms: config.FAILBACK_MIN_OPENSKY_AUTHORITY_MS,
 			frozen_feed_ms: config.ADSBFI_FROZEN_FEED_MS,
 			coverage_retention_ms: config.COVERAGE_RETENTION_MS,
 		});

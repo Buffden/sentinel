@@ -48,6 +48,9 @@ export interface AcquisitionSnapshot {
 	// Initialized means both provider and epoch exist (the CP3b rule).
 	authorityInitialized: boolean;
 	authorityProvider: string | null;
+	// Null when the timeline has never had authority, or when an older/malformed
+	// record lacks a usable start time. Null is conservative for failback.
+	authoritySinceMs: number | null;
 	stored: Record<Provider, StoredHealth>;
 }
 
@@ -66,14 +69,14 @@ export class ProviderHealthStore {
 	async readForAcquisition(): Promise<AcquisitionSnapshot> {
 		const results = await this.redis
 			.multi()
-			.hmget(this.authorityKey, 'provider', 'epoch')
+			.hmget(this.authorityKey, 'provider', 'epoch', 'authority_since_ms')
 			.hgetall(this.healthKeys.adsbfi)
 			.hgetall(this.healthKeys.opensky)
 			.exec();
 		if (!results || results.length !== 3) throw new Error('unexpected MULTI/EXEC reply');
 		for (const [err] of results) if (err) throw err;
 
-		const [provider, epoch] = results[0]![1] as (string | null)[];
+		const [provider, epoch, authoritySince] = results[0]![1] as (string | null)[];
 		const stored = (index: number): StoredHealth => {
 			const record = results[index]![1] as Record<string, string>;
 			return { ...parseHealthHash(record), present: Boolean(record['state']) };
@@ -81,6 +84,8 @@ export class ProviderHealthStore {
 		return {
 			authorityInitialized: Boolean(provider) && Boolean(epoch),
 			authorityProvider: provider || null,
+			authoritySinceMs:
+				authoritySince !== null && /^\d+$/.test(authoritySince) ? Number(authoritySince) : null,
 			stored: { adsbfi: stored(1), opensky: stored(2) },
 		};
 	}
