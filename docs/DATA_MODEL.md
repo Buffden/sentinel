@@ -564,7 +564,7 @@ Writer: ingestion coordinator (ADR-022). `heartbeat_ms` is written by the lease 
 
 | Field | Meaning |
 | --- | --- |
-| `provider` | Authoritative provider. Only `adsbfi` is written today |
+| `provider` | Authoritative provider: `adsbfi`, `opensky`, or literal `none` after relinquish |
 | `epoch` | Authority term: 1 at the first commit, incremented on each later commit, never reset, unchanged by a restart or lease takeover |
 | `authority_since_ms` | When the current authority was committed |
 | `coverage_open_since_ms` | Start of the open coverage segment; empty string when closed |
@@ -574,9 +574,11 @@ Writer: ingestion coordinator (ADR-022). `heartbeat_ms` is written by the lease 
 
 - **Initialized** only when both `provider` and `epoch` exist. A hash holding only `heartbeat_ms` is pre-authority bootstrap state and follows first-deployment initialization.
 - No TTL: it outlives every coordinator.
-- **Credit script** (after a fresh cycle's publish): on a pre-authority hash, commits `adsbfi` and opens coverage as one revision; with coverage closed, opens a segment; with it open, extends `last_active_success_ms`. It writes nothing when the time is not after `last_active_success_ms`, and refuses with an error when another provider holds authority.
-- **Close script:** closes the open segment at `last_active_success_ms`, clears `coverage_open_since_ms` and increments `timeline_version`. Only a segment with length (`last_active_success_ms` after `coverage_open_since_ms`) is written to `{live-provider}:coverage`, followed by pruning. A segment with no length (the two equal) closes without a member. A `last_active_success_ms` before `coverage_open_since_ms` cannot come from the credit script, so it is refused as an invariant error and the coordinator gives up the lease. With nothing open it writes nothing.
-- Both scripts check the lease token first and write nothing on a mismatch. A refused, failed or timed-out timeline write makes the coordinator give up the lease.
+- **Commit script:** after a candidate's successful publish, changes authority only from virgin/uninitialized state or literal `none`, increments `epoch`, sets `authority_since_ms`, keeps coverage closed and increments `timeline_version`. It never creates coverage.
+- **Credit script:** only for the provider that already holds authority. With coverage closed it opens a segment, sets `last_active_success_ms` and increments `timeline_version`; with coverage open it only advances `last_active_success_ms`. It never commits authority.
+- **Close script:** closes the open segment at `last_active_success_ms`, clears `coverage_open_since_ms` and increments `timeline_version`. Only a segment with length (`last_active_success_ms` after `coverage_open_since_ms`) is written to `{live-provider}:coverage`, followed by pruning. A segment with no length closes without a member. A backwards segment is refused as an invariant error and the coordinator gives up the lease.
+- **Relinquish script:** changes the expected authority to literal `none`, preserves `epoch` and the last credited success, and closes any still-open coverage conservatively.
+- Every timeline script checks the lease token first and writes nothing on a mismatch. A refused, failed or timed-out write makes the coordinator give up the lease.
 - An adsb.fi cycle is credited only after its response `now` is seen to advance. The tracker for that is kept in memory per lease acquisition, never in Redis.
 
 ### `{live-provider}:coverage` (sorted set)
@@ -591,7 +593,7 @@ Writer: ingestion coordinator, through the close script. Reader: Alert Evaluator
 
 ### `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes)
 
-Writer: ingestion coordinator (ADR-022 sections 2 and 7). Readers: the coordinator, when restoring health at lease acquisition; operators. Not read for signal loss, and not used to choose authority until failover exists.
+Writer: ingestion coordinator (ADR-022 sections 2 and 7). Readers: the coordinator, when restoring health and selecting authority; operators. Health is not read by the Alert Evaluator for signal loss.
 
 | Field | Meaning |
 | --- | --- |

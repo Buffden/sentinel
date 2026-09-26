@@ -100,9 +100,9 @@ Authority is `adsbfi`, `opensky` or `none`. It changes only when a successful ac
 
 - **One-shot attempts.** The unknown, stale and emergency attempts are once per entry into `none`, not once per retry. After its attempt, a provider is not excluded: each of its later requests, at its own rate, is still a candidate.
 - **One request, both purposes.** While authority is `none`, a request to a provider is both its health evidence and a candidate delivery. There is never a separate check followed by a second request to attempt authority.
-- **Delivery failures while `none`.** If a candidate's request and validation succeed but its publish fails, or its commit is refused because its time is not after the last success, authority stays `none` and the coordinator retries selection on its own backoff: 60 s, doubling to 15 min, reset by a commit or by a new entry into `none`. This is not provider health; a failed provider request still follows the provider's own rate.
+- **Delivery failures while `none`.** If a candidate's request and validation succeed but its publish fails, or its commit is refused because its time is not after the last success, authority stays `none`. That provider's next candidate delivery backs off from 60 s, doubling to 15 min, on the same per-provider request schedule; there is no separate selection-retry timer. This is not provider health.
 - **The `none` record.** On an initialized timeline, `none` is stored literally as `provider=none`. `epoch` is kept, `authority_since_ms` becomes the time `none` began, coverage is closed, `last_active_success_ms` is kept, and the change takes one `timeline_version` revision. A timeline that has never had an authority (no `provider` or `epoch`) is treated as `none` in memory and is not written, so no epoch 0 exists. The first commit, by either provider, creates epoch 1.
-- **Commit.** Authority, the epoch increment and the new coverage segment are committed by one update, after a successful publish. Coverage credit never commits authority; it only extends or reopens coverage for the provider that already holds it.
+- **Commit.** After a successful publish, COMMIT changes only authority, increments the epoch, sets `authority_since_ms`, keeps coverage closed and takes one `timeline_version` revision. CREDIT is separate: it never commits authority and only opens or extends coverage for the provider that already holds it. A seeded adsb.fi response may therefore become authoritative without claiming coverage; a later fresh cycle opens coverage.
 
 - **Voluntary failback** from OpenSky requires adsb.fi `HEALTHY` and at least 5 min since OpenSky's authority was committed. There is no early failback.
 
@@ -152,12 +152,12 @@ Repeated `now` values never extend coverage, so a frozen-feed close ends at the 
 
 ### 6. Ordering between Kafka and Redis
 
-There is no transaction spanning Kafka and Redis. Every cycle and every switch runs fetch, then validation, then publishing all of its messages, and only then one atomic Redis update stamped with the publish-completion time.
+There is no transaction spanning Kafka and Redis. Every cycle and every switch runs fetch, validation and publication before any authority or coverage credit. Candidate delivery then COMMITs authority; if that same response qualifies as coverage, CREDIT follows as a separate lease-checked Redis write using the publish-completion time.
 
 **Failback sequence:**
 1. OpenSky finishes its cycle and stops. Its coverage closes as `handover_attempt`, while authority stays `opensky`.
 2. adsb.fi runs a committing cycle.
-3. On success, one update commits `adsbfi` and opens its coverage.
+3. On success, COMMIT changes authority to `adsbfi`; if that response qualifies for coverage, CREDIT opens coverage separately.
 
 If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its coverage reopens only at its next successful cycle. A failed publish is not adsb.fi health evidence (section 3).
 
@@ -166,7 +166,8 @@ If adsb.fi's fetch, validation or publish fails, OpenSky resumes, and its covera
 | Failure | Effect |
 | --- | --- |
 | The publish fails during a switch | Nothing is committed. A failover stays at `none`, and a failback returns to OpenSky |
-| The publish succeeds, then the Redis update fails, or the process crashes between the two | Positions were delivered, but no coverage or authority is credited. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
+| The publish succeeds, then COMMIT fails or its result is unknown | Positions may have been delivered, but authority is not trusted; the coordinator fails closed |
+| COMMIT succeeds, then CREDIT fails or its result is unknown | Authority may already have changed, but no new coverage is assumed; the coordinator fails closed. **This is conservative: it can delay a `SIGNAL_LOSS`, never cause a false one** |
 
 ### 7. Redis state, heartbeat and restart
 
@@ -179,7 +180,7 @@ All keys share the hash tag `{live-provider}`. The coordinator is the only write
 | `{live-provider}:coverage` (sorted set) | Closed segments: provider, start, end and reason, scored by end | Evaluator |
 | `{live-provider}:health:adsbfi`, `{live-provider}:health:opensky` (hashes) | `state`, `state_since_ms`, `last_success_ms`, `last_failure_ms`, `consecutive_failures`, `last_error`, `success_streak_since_ms`. OpenSky also has `paused_until_ms`, `credits_remaining` and `last_probe_ms` | Operators. **Not used for silence** |
 
-- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: each atomic update that opens or closes a coverage segment or commits authority increments it once, so the bootstrap update that both commits authority and opens coverage is one revision. Extending the open segment's `last_active_success_ms` does not increment it.
+- **Writes.** Every write is an atomic script that checks the lease token first and writes nothing if the token does not match. `timeline_version` is a revision of the timeline, not an event count: COMMIT increments it once for an authority change, CREDIT increments it once when opening coverage, and CLOSE/RELINQUISH increment it when they change the timeline. Extending an already-open segment's `last_active_success_ms` does not increment it.
 - **Reads.** At the start of each scan the evaluator reads `authority` and the retained `coverage` in one transaction. It evaluates every aircraft against that snapshot and logs `timeline_version`. A provider's segments are its closed members plus, if that provider is the authority and `coverage_open_since_ms` is set, the open span from `coverage_open_since_ms` to `last_active_success_ms`.
 - **Retention.** A `coverage` member is kept until its end is older than live-state TTL + the largest configured signal-loss threshold + one scan interval (today 86,400 + 900 + 30 s). The 900 s is the evaluator's `.env` value. The code default is 300 s, and the outage experiment ran at 300 s because the evaluator did not load `.env`. The coordinator holds this as its own setting. Consistency with the other services' settings is documented, not enforced.
 - **Heartbeat.** The lease renewal script writes `heartbeat_ms` every 5 s, independent of polling, backoff or pauses. It means only that the coordinator is alive and holds the lease. It is stale after 60 s.
