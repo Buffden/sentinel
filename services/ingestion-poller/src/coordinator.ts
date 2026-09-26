@@ -111,7 +111,7 @@ export interface CoordinatorDeps {
 	adsbfiStandbyIntervalMs: number;
 	// OpenSky while authoritative.
 	openskyActiveIntervalMs: number;
-	// Selection retry after a delivery failure while authority is none.
+	// Per-provider candidate delivery backoff while authority is none.
 	selectionRetryBaseMs: number;
 	selectionRetryMaxMs: number;
 }

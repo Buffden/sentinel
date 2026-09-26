@@ -6,7 +6,7 @@
 // Redis scripts used by production.
 import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
-import { Kafka, Partitioners, type Producer } from 'kafkajs';
+import { Kafka, Partitioners } from 'kafkajs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AdsbfiFetchFailure, SplitResult } from './adsbfiPoller.js';
 import { Coordinator, type CoordinatorDeps } from './coordinator.js';
@@ -316,7 +316,6 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 		await disconnected.connect();
 		await disconnected.disconnect();
 
-		let responseNowMs = 1_790_500_000_000;
 		const r = runtime(
 			async () => ({ error: 'http_503' }),
 			async () => ({
@@ -330,9 +329,6 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 				return results[0]?.baseOffset ?? 'unknown';
 			},
 		);
-		// Keep TypeScript from treating the local clock as dead code if this
-		// test's fixture is expanded with adsb.fi recovery later.
-		responseNowMs += 1;
 
 		let stopped = false;
 		try {
