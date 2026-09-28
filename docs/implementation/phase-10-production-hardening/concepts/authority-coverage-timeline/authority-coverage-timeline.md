@@ -56,7 +56,7 @@ A coverage segment is a period in which adsb.fi was delivering fresh observation
 | Clean shutdown | Close as `coordinator_shutdown` |
 | A coordinator acquires the lease and finds a segment open | Close it as `coordinator_down`, before polling |
 
-Every close ends at the last credited success, never at the failure, crash or shutdown time. The gap is never counted.
+Every close ends at the last credited success, never at the failure, crash or shutdown time. The gap is never counted. A segment opened by one credited cycle and closed before another has no length: since CP3d it closes (one revision) without writing a member.
 
 ### What makes a cycle count
 
@@ -142,7 +142,7 @@ Readers: none yet. The Alert Evaluator reads the timeline from CP3c on.
 | --- | --- |
 | Credit and close scripts, member format, retention cutoff | `services/ingestion-poller/src/coverageTimeline.ts` |
 | Freshness tracker | `services/ingestion-poller/src/adsbfiFreshness.ts` |
-| Cycle order, credit and failure close, acquisition and shutdown closes, failing closed | `activeCycle`, `creditCoverage`, `closeCoverage`, `attemptAcquire`, `shutdown`, `services/ingestion-poller/src/coordinator.ts` |
+| Cycle order, credit and failure close, acquisition and shutdown closes, failing closed | `adsbfiRequest`, `openskyRequest`, `creditCoverage`, `closeCoverage`, `attemptAcquire`, `shutdown`, `services/ingestion-poller/src/coordinator.ts` |
 | Response `now` handed to the coordinator | `responseNowMs` on `SplitResult`, `services/ingestion-poller/src/adsbfiPoller.ts` |
 | Frozen-feed window and retention settings | `ADSBFI_FROZEN_FEED_MS`, `COVERAGE_RETENTION_MS`, `services/ingestion-poller/src/config.ts` |
 | Tests | `adsbfiFreshness.test.ts`, `coordinator.test.ts`, `coverageTimeline.integration.test.ts`, `coordinatorLease.integration.test.ts` |

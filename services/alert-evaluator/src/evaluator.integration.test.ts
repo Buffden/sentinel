@@ -18,7 +18,16 @@
 // this suite at infra the api isn't consuming from) before running it.
 import { randomUUID } from 'node:crypto';
 import { Kafka } from 'kafkajs';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+	type MockInstance,
+} from 'vitest';
 import { config } from './config.js';
 import {
 	handleProximityCandidate,
@@ -27,7 +36,7 @@ import {
 	runScan,
 	startCandidateConsumerSession,
 } from './evaluator.js';
-import type { ProximityCandidateMessage } from './evaluator.js';
+import type { ProximityCandidateMessage, SignalLossScanOptions } from './evaluator.js';
 import {
 	CandidateDecisionConflictError,
 	CompositeFinalizeInvariantError,
@@ -73,9 +82,19 @@ async function assertNoAlert(entityId: string, waitMs = 1_500): Promise<void> {
 
 function seedLiveEntity(
 	entityId: string,
-	fields: Partial<{ last_seen_ms: number; on_ground: boolean; entity_type: string }>,
+	fields: Partial<{
+		last_seen_ms: number;
+		on_ground: boolean;
+		entity_type: string;
+		provider: string;
+	}>,
 ): Promise<number> {
-	const hashFields: string[] = ['entity_type', fields.entity_type ?? 'aircraft'];
+	const hashFields: string[] = [
+		'entity_type',
+		fields.entity_type ?? 'aircraft',
+		'provider',
+		fields.provider ?? 'adsbfi',
+	];
 	if (fields.last_seen_ms !== undefined) {
 		hashFields.push('last_seen_ms', String(fields.last_seen_ms));
 	}
@@ -83,6 +102,73 @@ function seedLiveEntity(
 		hashFields.push('on_ground', String(fields.on_ground));
 	}
 	return redis.hset(`entity:live:${entityId}`, ...hashFields);
+}
+
+// Each signal-loss test gets its own timeline keys and scans only its own
+// entities. The shared dev Redis holds real live entities and the real
+// {live-provider} timeline; neither may be read, gated or alerted here.
+interface ScanScope {
+	// Entity ids must start with this so the scan pattern finds them.
+	prefix: string;
+	options: SignalLossScanOptions;
+}
+
+function newScanScope(): ScanScope {
+	const prefix = `test-evaluator-${randomUUID()}`;
+	return {
+		prefix,
+		options: {
+			authorityKey: `{${prefix}}:authority`,
+			coverageKey: `{${prefix}}:coverage`,
+			entityKeyPattern: `entity:live:${prefix}*`,
+		},
+	};
+}
+
+// An initialized authority record in the shape the coordinator writes. With
+// openSinceMs, coverage is open from then until lastActiveMs; without it,
+// coverage is closed and only the closed members count.
+async function seedTimeline(
+	scope: ScanScope,
+	timeline: { lastActiveMs: number; openSinceMs?: number; closed?: string[] },
+): Promise<void> {
+	await redis.hset(
+		scope.options.authorityKey,
+		'provider',
+		'adsbfi',
+		'epoch',
+		'1',
+		'authority_since_ms',
+		String(timeline.openSinceMs ?? timeline.lastActiveMs),
+		'coverage_open_since_ms',
+		timeline.openSinceMs === undefined ? '' : String(timeline.openSinceMs),
+		'last_active_success_ms',
+		String(timeline.lastActiveMs),
+		'timeline_version',
+		'1',
+	);
+	for (const member of timeline.closed ?? []) {
+		const end = Number(member.split('|')[2]);
+		await redis.zadd(scope.options.coverageKey, end, member);
+	}
+}
+
+// adsb.fi coverage open from sinceMs up to now: enough for any entity last
+// seen after sinceMs to observe its full wall-clock silence.
+function seedOpenCoverageSince(scope: ScanScope, sinceMs: number): Promise<void> {
+	return seedTimeline(scope, { openSinceMs: sinceMs, lastActiveMs: Date.now() });
+}
+
+async function cleanupScope(scope: ScanScope, entityIds: string[]): Promise<void> {
+	await redis.del(
+		scope.options.authorityKey,
+		scope.options.coverageKey,
+		...entityIds.flatMap((id) => [`entity:live:${id}`, `alert-state:${id}`]),
+	);
+}
+
+function warnings(spy: MockInstance, message: string): unknown[][] {
+	return spy.mock.calls.filter((args) => args[1] === message);
 }
 
 function buildCandidate(
@@ -143,54 +229,82 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 	});
 
 	it('detects a dark entity and publishes a SIGNAL_LOSS alert with a deterministic id', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
+		const info = vi.spyOn(console, 'info');
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 
 			const alert = await waitForAlert(entityId);
 			expect(alert).toBeDefined();
 			expect(alert?.alert_id).toBe(`${entityId}:SIGNAL_LOSS:${darkSinceMs}`);
 			expect(alert?.alert_type).toBe('SIGNAL_LOSS');
 			expect(alert?.payload['dark_since_ms']).toBe(darkSinceMs);
+			// The payload shape is unchanged: observed silence is log-only.
+			expect(Object.keys(alert?.payload ?? {}).sort()).toEqual([
+				'callsign',
+				'dark_since_ms',
+				'last_known_altitude_m',
+				'last_known_course_deg',
+				'last_known_lat',
+				'last_known_lon',
+				'last_known_speed_mps',
+			]);
 
 			const gate = await redis.hgetall(`alert-state:${entityId}`);
 			expect(gate['dark_since_ms']).toBe(String(darkSinceMs));
 			expect(gate['signal_loss_alert_id']).toBe(alert?.alert_id);
+
+			const [detected] = warnings(info, 'signal loss detected');
+			const fields = detected?.[0] as Record<string, unknown>;
+			expect(fields['provider']).toBe('adsbfi');
+			expect(fields['observed_silence_ms']).toBeGreaterThanOrEqual(config.SIGNAL_LOSS_THRESHOLD_MS);
+			expect(fields['wall_silence_ms']).toBeGreaterThanOrEqual(
+				fields['observed_silence_ms'] as number,
+			);
+			const [summary] = warnings(info, 'scan complete');
+			expect((summary?.[0] as Record<string, unknown>)['timeline_version']).toBe('1');
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			info.mockRestore();
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
 	it('does not re-alert on a second scan tick for the same episode', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 			const first = await waitForAlert(entityId);
 			expect(first).toBeDefined();
 
 			// Same episode, second tick: the entity is still dark and the gate
 			// from the first tick is still set.
 			receivedAlerts.length = 0;
-			await runScan();
+			await runScan(scope.options);
 			await assertNoAlert(entityId);
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
 	it('computes a distinct alert_id for a new episode after the gate is cleared', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		const firstDarkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 20_000;
 		await seedLiveEntity(entityId, { last_seen_ms: firstDarkSinceMs });
+		await seedOpenCoverageSince(scope, firstDarkSinceMs - 1_000);
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 			const first = await waitForAlert(entityId);
 			expect(first).toBeDefined();
 
@@ -202,53 +316,233 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 			const secondDarkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 5_000;
 			await seedLiveEntity(entityId, { last_seen_ms: secondDarkSinceMs });
 
-			await runScan();
+			await runScan(scope.options);
 			const second = await waitForAlert(entityId);
 			expect(second).toBeDefined();
 			expect(second?.alert_id).not.toBe(first?.alert_id);
 			expect(second?.alert_id).toBe(`${entityId}:SIGNAL_LOSS:${secondDarkSinceMs}`);
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
 	it('does not alert an entity that is on the ground', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs, on_ground: true });
+		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 			await assertNoAlert(entityId);
 			expect(await redis.exists(`alert-state:${entityId}`)).toBe(0);
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
 	it('does not alert an entity with no accepted position (missing last_seen_ms)', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		await seedLiveEntity(entityId, {});
+		await seedOpenCoverageSince(scope, Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS * 2);
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 			await assertNoAlert(entityId);
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
 	it('does not alert an entity that is still within the silence threshold', async () => {
-		const entityId = `test-evaluator-${randomUUID()}`;
+		const scope = newScanScope();
+		const entityId = scope.prefix;
 		const recentMs = Date.now() - Math.floor(config.SIGNAL_LOSS_THRESHOLD_MS / 2);
 		await seedLiveEntity(entityId, { last_seen_ms: recentMs });
+		await seedOpenCoverageSince(scope, recentMs - 1_000);
 
 		try {
-			await runScan();
+			await runScan(scope.options);
 			await assertNoAlert(entityId);
 			expect(await redis.exists(`alert-state:${entityId}`)).toBe(0);
 		} finally {
-			await redis.del(`entity:live:${entityId}`, `alert-state:${entityId}`);
+			await cleanupScope(scope, [entityId]);
+		}
+	});
+
+	it('does not alert when wall silence exceeds the threshold but observed silence does not', async () => {
+		const scope = newScanScope();
+		const entityId = scope.prefix;
+		const now = Date.now();
+		const darkSinceMs = now - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
+		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		// The provider covered only the most recent half-threshold of the silence;
+		// before that it was down, so that time proves nothing about the aircraft.
+		await seedTimeline(scope, {
+			openSinceMs: now - Math.floor(config.SIGNAL_LOSS_THRESHOLD_MS / 2),
+			lastActiveMs: now,
+		});
+
+		try {
+			await runScan(scope.options);
+			await assertNoAlert(entityId);
+			expect(await redis.exists(`alert-state:${entityId}`)).toBe(0);
+		} finally {
+			await cleanupScope(scope, [entityId]);
+		}
+	});
+
+	it('alerts on covered silence split across a closed segment and the open span', async () => {
+		const scope = newScanScope();
+		const entityId = scope.prefix;
+		const now = Date.now();
+		const threshold = config.SIGNAL_LOSS_THRESHOLD_MS;
+		const darkSinceMs = now - threshold - 120_000;
+		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		// Closed: darkSince .. darkSince + threshold/2. Then a 60 s outage.
+		// Open: the remaining threshold/2 + 1 s. Together, just over threshold.
+		const closedEnd = darkSinceMs + threshold / 2;
+		await seedTimeline(scope, {
+			closed: [`adsbfi|${darkSinceMs}|${closedEnd}|failure`],
+			openSinceMs: closedEnd + 60_000,
+			lastActiveMs: closedEnd + 60_000 + threshold / 2 + 1_000,
+		});
+
+		try {
+			await runScan(scope.options);
+			const alert = await waitForAlert(entityId);
+			expect(alert?.alert_id).toBe(`${entityId}:SIGNAL_LOSS:${darkSinceMs}`);
+		} finally {
+			await cleanupScope(scope, [entityId]);
+		}
+	});
+
+	it('does not alert when the timeline is uninitialized, and warns once per scan', async () => {
+		const scope = newScanScope();
+		const ids = [`${scope.prefix}-a`, `${scope.prefix}-b`];
+		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
+		for (const id of ids) await seedLiveEntity(id, { last_seen_ms: darkSinceMs });
+		// A closed segment with no authority record is not trusted either.
+		await redis.zadd(
+			scope.options.coverageKey,
+			Date.now(),
+			`adsbfi|${darkSinceMs - 1_000}|${Date.now()}|failure`,
+		);
+		const warn = vi.spyOn(console, 'warn');
+
+		try {
+			await runScan(scope.options);
+			for (const id of ids) await assertNoAlert(id, 500);
+			const suppressed = warnings(
+				warn,
+				'signal loss suppressed: provider timeline not initialized',
+			);
+			expect(suppressed).toHaveLength(1);
+			expect(suppressed[0]?.[0]).toMatchObject({
+				scanned: 2,
+				eligible: 2,
+				wall_silent_over_threshold: 2,
+			});
+		} finally {
+			warn.mockRestore();
+			await cleanupScope(scope, ids);
+		}
+	});
+
+	it('treats a heartbeat-only authority record as uninitialized', async () => {
+		const scope = newScanScope();
+		const entityId = scope.prefix;
+		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
+		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		// What a coordinator leaves when it held the lease but never credited a cycle.
+		await redis.hset(scope.options.authorityKey, 'heartbeat_ms', String(Date.now()));
+		const warn = vi.spyOn(console, 'warn');
+
+		try {
+			await runScan(scope.options);
+			await assertNoAlert(entityId);
+			expect(
+				warnings(warn, 'signal loss suppressed: provider timeline not initialized'),
+			).toHaveLength(1);
+		} finally {
+			warn.mockRestore();
+			await cleanupScope(scope, [entityId]);
+		}
+	});
+
+	it('does not alert an OpenSky-owned aircraft on adsb.fi-only coverage', async () => {
+		const scope = newScanScope();
+		const openskyId = `${scope.prefix}-opensky`;
+		const adsbfiId = `${scope.prefix}-adsbfi`;
+		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
+		await seedLiveEntity(openskyId, { last_seen_ms: darkSinceMs, provider: 'opensky' });
+		// Control: same silence, same scan, owned by the covering provider.
+		await seedLiveEntity(adsbfiId, { last_seen_ms: darkSinceMs, provider: 'adsbfi' });
+		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
+
+		try {
+			await runScan(scope.options);
+			expect(await waitForAlert(adsbfiId)).toBeDefined();
+			await assertNoAlert(openskyId, 500);
+			expect(await redis.exists(`alert-state:${openskyId}`)).toBe(0);
+		} finally {
+			await cleanupScope(scope, [openskyId, adsbfiId]);
+		}
+	});
+
+	it('leaves an existing episode gate untouched and does not re-alert', async () => {
+		const scope = newScanScope();
+		const entityId = scope.prefix;
+		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
+		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
+		const gate = {
+			dark_since_ms: String(darkSinceMs),
+			signal_loss_alert_id: `${entityId}:SIGNAL_LOSS:${darkSinceMs}`,
+			composite_issued: '1',
+		};
+		await redis.hset(`alert-state:${entityId}`, gate);
+
+		try {
+			await runScan(scope.options);
+			await assertNoAlert(entityId);
+			expect(await redis.hgetall(`alert-state:${entityId}`)).toEqual(gate);
+		} finally {
+			await cleanupScope(scope, [entityId]);
+		}
+	});
+
+	it('skips signal loss without a wall-clock fallback when the timeline cannot be read', async () => {
+		const scope = newScanScope();
+		const entityId = scope.prefix;
+		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
+		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
+		const error = vi.spyOn(console, 'error');
+
+		try {
+			// Wrong key type: HGETALL fails inside EXEC with WRONGTYPE.
+			await redis.set(scope.options.authorityKey, 'not-a-hash');
+			await runScan(scope.options);
+			await assertNoAlert(entityId);
+
+			// Valid authority, but ZRANGE fails the same way.
+			await redis.del(scope.options.authorityKey);
+			await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
+			await redis.set(scope.options.coverageKey, 'not-a-zset');
+			await runScan(scope.options);
+			await assertNoAlert(entityId);
+
+			expect(await redis.exists(`alert-state:${entityId}`)).toBe(0);
+			const failures = warnings(error, 'signal loss skipped: provider timeline snapshot failed');
+			expect(failures.map((c) => (c[0] as Record<string, unknown>)['detail'])).toEqual([
+				'authority read failed',
+				'coverage read failed',
+			]);
+		} finally {
+			error.mockRestore();
+			await cleanupScope(scope, [entityId]);
 		}
 	});
 
@@ -385,6 +679,64 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 				);
 			}
 		});
+
+		// Signal loss runs in runScan; proximity and composite run in the
+		// candidate consumer. A timeline read failure must disable only the
+		// first, and must not throw out of the leader loop, which would stop
+		// the second.
+		it.each(['authority', 'coverage'] as const)(
+			'a %s read failure suppresses only signal loss; proximity and composite still run',
+			async (broken) => {
+				const scope = newScanScope();
+				const darkId = scope.prefix;
+				const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
+				await seedLiveEntity(darkId, { last_seen_ms: darkSinceMs });
+				await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
+				const brokenKey =
+					broken === 'authority' ? scope.options.authorityKey : scope.options.coverageKey;
+				await redis.del(brokenKey);
+				await redis.set(brokenKey, 'wrong-type');
+
+				const unscheduled = buildCandidate();
+				const composite = buildCandidate();
+				const compositeDarkSinceMs = composite.episode_start_ms - 8_000;
+				// Active loss raised by an earlier, healthy scan.
+				await seedActiveLoss(composite.entity_a_id, compositeDarkSinceMs);
+				await seedLiveEntity(composite.entity_a_id, { entity_type: 'aircraft' });
+				const decisionKeys = [unscheduled, composite].map(
+					(c) => `alert-decision:${c.pair_key}:${c.episode_start_ms}`,
+				);
+
+				try {
+					// One leader tick: the scan, then candidates from the consumer.
+					await expect(runScan(scope.options)).resolves.toBeUndefined();
+					await handleProximityCandidate(unscheduled);
+					await handleProximityCandidate(composite);
+
+					const proximityAlert = await waitForAlert(unscheduled.entity_a_id);
+					expect(proximityAlert?.alert_type).toBe('UNSCHEDULED_PROXIMITY');
+
+					const compositeAlert = await waitForAlert(composite.entity_a_id);
+					expect(compositeAlert?.alert_type).toBe('COMPOSITE');
+					expect(compositeAlert?.alert_id).toBe(
+						`${composite.pair_key}:COMPOSITE:${compositeDarkSinceMs}`,
+					);
+					const state = await redis.hgetall(`alert-state:${composite.entity_a_id}`);
+					expect(state['composite_issued']).toBe('1');
+
+					await assertNoAlert(darkId, 500);
+					expect(await redis.exists(`alert-state:${darkId}`)).toBe(0);
+				} finally {
+					await cleanupScope(scope, [darkId]);
+					await redis.del(
+						`entity:live:${unscheduled.entity_a_id}`,
+						`entity:live:${composite.entity_a_id}`,
+						`alert-state:${composite.entity_a_id}`,
+						...decisionKeys,
+					);
+				}
+			},
+		);
 
 		it('replaying an existing COMPOSITE decision republishes and finalizes again (idempotent)', async () => {
 			const candidate = buildCandidate();

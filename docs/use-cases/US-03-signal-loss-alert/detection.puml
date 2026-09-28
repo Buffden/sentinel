@@ -8,28 +8,36 @@ skinparam noteBorderColor #AAAAAA
 skinparam noteBackgroundColor #FFFDE7
 
 participant "Alert\nEvaluator\n(leader)" as Evaluator
+database "Redis\n{live-provider}:authority\n{live-provider}:coverage" as Timeline
 database "Redis\nentity:live:{id}" as LiveState
 database "Redis\nalert-state:{id}\n(hash)" as AlertState
-database "TimescaleDB\nposition_history" as TSDB
 queue "Kafka\nalerts" as Kafka
 
 loop scheduled scan
-  Evaluator -> LiveState : SCAN entity:live:*\nread last_seen_ms
+  Evaluator -> Timeline : one MULTI/EXEC:\nHGETALL authority, ZRANGE coverage 0 -1
+  Timeline --> Evaluator : coverage snapshot for this scan
+
+  note over Evaluator
+    Unreadable timeline: no signal loss this scan.
+    Uninitialized authority: observed silence is 0 for every entity.
+    Never a wall-clock fallback.
+  end note
+
+  Evaluator -> LiveState : SCAN entity:live:*\nread last_seen_ms, provider, on_ground,\nlast-known position and callsign
   LiveState --> Evaluator : current live-state records
 
-  alt now() - last_seen_ms > threshold for entity type
+  alt airborne and observed silence >= threshold\n(owning provider's coverage since last_seen_ms)
     Evaluator -> AlertState : HGETALL alert-state:{entity_id}
     AlertState --> Evaluator : active loss state or nil
 
     alt no active signal-loss episode
-      Evaluator -> TSDB : SELECT last known position\nfor entity_id ORDER BY observed_at DESC LIMIT 1
-      TSDB --> Evaluator : last known position
-
       Evaluator -> Evaluator : dark_since_ms = live.last_seen_ms\nalert_id = entity_id + ':SIGNAL_LOSS:' + dark_since_ms
-      Evaluator -> Kafka : publish deterministic SIGNAL_LOSS
       Evaluator -> AlertState : HSET alert-state:{entity_id}\ndark_since_ms\nsignal_loss_alert_id\ncomposite_issued=0
+      Evaluator -> Kafka : publish deterministic SIGNAL_LOSS\n(last-known fields from the live hash)
 
       note over Evaluator
+        Gate first: a crash between the gate and the publish
+        loses this episode's alert rather than re-emitting it every scan.
         Kafka publication can be replayed around failures.
         Durable API persistence deduplicates by deterministic alert_id.
         alert-state prevents normal repeated scan emission.
@@ -42,7 +50,8 @@ end
 
 note over LiveState
   Redis TTL = 24h safety net.
-  Signal-loss detection uses last_seen_ms;
+  Signal-loss detection uses last_seen_ms and
+  the owning provider's coverage (ADR-022);
   TTL expiry is not the detector.
 end note
 

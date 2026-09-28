@@ -8,7 +8,7 @@ ADR-022 gives live provider authority to one process, the ingestion coordinator.
 
 The coordinator runs the existing adsb.fi adapter from CP1, and only while it holds the lease. A second coordinator started alongside it waits as a follower, publishes nothing, and takes over once the first one dies and its lease expires.
 
-That is all CP3a is. The coordinator has no provider health, no authority record, no coverage timeline, no OpenSky adapter and no failover. The Alert Evaluator is unchanged. The standalone `poll` (OpenSky) and `poll:adsbfi` commands still work exactly as before.
+That was all CP3a implemented at the time: no provider health, authority record, coverage timeline, OpenSky adapter or failover. The Alert Evaluator was unchanged. The standalone `poll` (OpenSky) and `poll:adsbfi` commands still worked then; they were removed during the later coordinator migration. Use `npm run coordinate` today.
 
 ---
 
@@ -95,7 +95,7 @@ This is a liveness delay, not a safety violation. It is not split brain, because
 
 The lease is a duplicate-instance guard. ADR-022 section 8 states the limit: a coordinator paused past its lease (a long garbage-collection pause, a suspended laptop) can still complete Kafka sends after another coordinator has taken over, and Kafka never checks the token. Enforcing that downstream (epoch fencing) is deferred in ADR-022, since it only matters for running several coordinators on purpose. CP3 supports one active coordinator per deployment.
 
-The standalone `poll:adsbfi` and `poll` commands do not take the lease at all. Running either one alongside a coordinator gives two publishers, so an operator must not do that.
+At CP3a, the standalone `poll:adsbfi` and `poll` commands did not take the lease, so running either alongside a coordinator would have created two publishers. Those commands have since been removed; the current entry point is `npm run coordinate`.
 
 ---
 
