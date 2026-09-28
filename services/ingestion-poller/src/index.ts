@@ -2,9 +2,11 @@
 // Coordinator owns orchestration; this file owns concrete clients, config,
 // logging, lifecycle signals and dependency wiring.
 
-import { randomUUID } from 'node:crypto';
+// Must stay the first import: it installs the process warning and crash
+// handlers before any dependency runs (see logger.ts).
+import { kafkaLogCreator, log } from './logger.js';
 import { Redis } from 'ioredis';
-import { Kafka, Partitioners } from 'kafkajs';
+import { Kafka, logLevel, Partitioners } from 'kafkajs';
 import { fetchAdsbfiResponse, type Log } from './adsbfiPoller.js';
 import { config } from './config.js';
 import { Coordinator } from './coordinator.js';
@@ -12,21 +14,6 @@ import { CoordinatorLease } from './coordinatorLease.js';
 import { CoverageTimeline } from './coverageTimeline.js';
 import { fetchOpenskyCycle, openskyAuthenticated } from './poller.js';
 import { ProviderHealthStore } from './providerHealthStore.js';
-
-const instanceId = randomUUID();
-
-const log: Log = (level, message, extra) => {
-	process.stdout.write(
-		JSON.stringify({
-			timestamp: new Date().toISOString(),
-			level,
-			service: 'ingestion-coordinator',
-			instance_id: instanceId,
-			message,
-			...extra,
-		}) + '\n',
-	);
-};
 
 const adsbfiLog: Log = (level, message, extra) =>
 	log(level, message, { provider: 'adsbfi', ...extra });
@@ -40,7 +27,8 @@ const redis = new Redis(config.REDIS_URL, {
 const producer = new Kafka({
 	clientId: 'ingestion-coordinator',
 	brokers: config.KAFKA_BROKERS,
-	logLevel: 0,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
 }).producer({
 	createPartitioner: Partitioners.LegacyPartitioner,
 });
@@ -65,7 +53,11 @@ const coordinator = new Coordinator({
 	},
 	publish: async (messages) => {
 		const results = await producer.send({ topic: config.TOPIC, messages });
-		return results[0]?.baseOffset ?? 'unknown';
+		return results.map((r) => ({
+			topic: r.topicName,
+			partition: r.partition,
+			base_offset: r.baseOffset ?? 'unknown',
+		}));
 	},
 	log,
 	renewalIntervalMs: config.COORDINATOR_RENEWAL_INTERVAL_MS,
@@ -94,11 +86,16 @@ async function shutdown(signal: string): Promise<void> {
 	process.exit(0);
 }
 
+function shutdownFailed(err: unknown): void {
+	log('error', 'shutdown failed', { err });
+	process.exit(1);
+}
+
 process.on('SIGINT', () => {
-	shutdown('SIGINT').catch(() => process.exit(1));
+	shutdown('SIGINT').catch(shutdownFailed);
 });
 process.on('SIGTERM', () => {
-	shutdown('SIGTERM').catch(() => process.exit(1));
+	shutdown('SIGTERM').catch(shutdownFailed);
 });
 
 producer
@@ -123,8 +120,6 @@ producer
 		coordinator.start();
 	})
 	.catch((err: unknown) => {
-		log('error', 'coordinator failed to start', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		log('error', 'coordinator failed to start', { err });
 		process.exit(1);
 	});

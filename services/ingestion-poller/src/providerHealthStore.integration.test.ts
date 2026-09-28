@@ -197,7 +197,7 @@ describe('Coordinator health end to end against real Redis', () => {
 				backoffBaseMs: 60_000,
 				backoffMaxMs: 900_000,
 			},
-			publish: async () => '0',
+			publish: async () => [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }],
 			log: () => {},
 			renewalIntervalMs: 500,
 			followerRetryMs: 500,

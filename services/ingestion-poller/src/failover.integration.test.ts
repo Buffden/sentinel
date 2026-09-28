@@ -107,7 +107,11 @@ function runtime(
 				const parsed = JSON.parse(String(item.value)) as { provider: Provider };
 				acceptedProviders.push(parsed.provider);
 			}
-			return results[0]?.baseOffset ?? 'unknown';
+			return results.map((r) => ({
+				topic: r.topicName,
+				partition: r.partition,
+				base_offset: r.baseOffset ?? 'unknown',
+			}));
 		} finally {
 			publishInFlight--;
 		}
@@ -481,7 +485,11 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			}),
 			async (messages) => {
 				const results = await disconnected.send({ topic, messages });
-				return results[0]?.baseOffset ?? 'unknown';
+				return results.map((r) => ({
+					topic: r.topicName,
+					partition: r.partition,
+					base_offset: r.baseOffset ?? 'unknown',
+				}));
 			},
 		);
 

@@ -29,6 +29,7 @@ import {
 	type MockInstance,
 } from 'vitest';
 import { config } from './config.js';
+import { logger } from './logger.js';
 import {
 	handleProximityCandidate,
 	producer,
@@ -234,7 +235,7 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 10_000;
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
 		await seedOpenCoverageSince(scope, darkSinceMs - 1_000);
-		const info = vi.spyOn(console, 'info');
+		const info = vi.spyOn(logger, 'info');
 
 		try {
 			await runScan(scope.options);
@@ -430,7 +431,7 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 			Date.now(),
 			`adsbfi|${darkSinceMs - 1_000}|${Date.now()}|failure`,
 		);
-		const warn = vi.spyOn(console, 'warn');
+		const warn = vi.spyOn(logger, 'warn');
 
 		try {
 			await runScan(scope.options);
@@ -458,7 +459,7 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
 		// What a coordinator leaves when it held the lease but never credited a cycle.
 		await redis.hset(scope.options.authorityKey, 'heartbeat_ms', String(Date.now()));
-		const warn = vi.spyOn(console, 'warn');
+		const warn = vi.spyOn(logger, 'warn');
 
 		try {
 			await runScan(scope.options);
@@ -519,7 +520,7 @@ describe('evaluator.ts SIGNAL_LOSS episode idempotency (integration)', () => {
 		const entityId = scope.prefix;
 		const darkSinceMs = Date.now() - config.SIGNAL_LOSS_THRESHOLD_MS - 60_000;
 		await seedLiveEntity(entityId, { last_seen_ms: darkSinceMs });
-		const error = vi.spyOn(console, 'error');
+		const error = vi.spyOn(logger, 'error');
 
 		try {
 			// Wrong key type: HGETALL fails inside EXEC with WRONGTYPE.

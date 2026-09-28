@@ -97,8 +97,9 @@ export interface CoordinatorDeps {
 	openskyAuthenticated: boolean;
 	healthTiming: TransitionTiming;
 	openskyCadence: OpenskyCadence;
-	// Publishes one cycle's messages and returns the first offset.
-	publish: (messages: Messages) => Promise<string>;
+	// Publishes one cycle's messages and returns each partition's base offset,
+	// so a logged cycle can be matched to the consumer's per-record offsets.
+	publish: (messages: Messages) => Promise<PublishedOffsets>;
 	log: Log;
 	renewalIntervalMs: number;
 	followerRetryMs: number;
@@ -149,6 +150,8 @@ interface RestoredState {
 }
 
 type Timer = ReturnType<typeof setTimeout>;
+
+export type PublishedOffsets = Array<{ topic: string; partition: number; base_offset: string }>;
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -258,7 +261,7 @@ export class Coordinator {
 		try {
 			acquired = await lease.tryAcquire();
 		} catch (err) {
-			log('warn', 'lease acquisition failed', { error: errorMessage(err) });
+			log('warn', 'lease acquisition failed', { err });
 		}
 		if (!acquired) {
 			if (!this.waitingLogged) {
@@ -361,7 +364,7 @@ export class Coordinator {
 		this.deps.log('warn', 'lease lost: stopped polling and publishing', {
 			lease_token: token,
 			reason,
-			...(err === undefined ? {} : { error: errorMessage(err) }),
+			...(err === undefined ? {} : { err }),
 		});
 		this.scheduleAcquire(this.deps.followerRetryMs);
 	}
@@ -607,7 +610,7 @@ export class Coordinator {
 		if (published.status === 'failed') {
 			// A failed publish fails the active cycle, but says nothing about
 			// adsb.fi's health.
-			log('error', 'poll cycle error', { error: published.error });
+			log('error', 'poll cycle error', { err: published.err });
 			return this.failRequest(role, 'adsbfi', token, outcome, false);
 		}
 		// The publish stage has completed (immediately after validation for a
@@ -615,12 +618,13 @@ export class Coordinator {
 		const activeSuccessMs = Date.now();
 		const credited = verdict === 'fresh';
 		log('info', 'poll cycle complete', {
+			provider: 'adsbfi',
 			aircraft_in_response: split.total,
 			published: split.messages.length,
 			skipped_non_icao: split.skippedNonIcao,
 			skipped_no_position: split.skippedNoPosition,
 			skipped_outside_box: split.skippedOutsideBox,
-			first_offset: published.firstOffset,
+			partition_offsets: published.offsets,
 			lease_token: token,
 			freshness: verdict,
 			coverage_credited: credited,
@@ -681,7 +685,7 @@ export class Coordinator {
 			provider: 'opensky',
 			role,
 			outcome: result.kind,
-			...(result.kind === 'failed' ? { error: result.error } : {}),
+			...(result.kind === 'failed' ? { error_class: result.error } : {}),
 			...(result.kind === 'ok' ? { aircraft: result.messages.length } : {}),
 			state: next?.state ?? 'unknown',
 			credits_remaining: next?.creditsRemaining ?? null,
@@ -698,14 +702,14 @@ export class Coordinator {
 		const published = await this.publishAs('opensky', result.messages);
 		if (published.status === 'authority_changed') return outcome({});
 		if (published.status === 'failed') {
-			log('error', 'opensky cycle error', { error: published.error });
+			log('error', 'opensky cycle error', { err: published.err });
 			return this.failRequest(role, 'opensky', token, outcome, false);
 		}
 		const activeSuccessMs = Date.now();
 		log('info', 'opensky cycle complete', {
 			provider: 'opensky',
 			published: result.messages.length,
-			first_offset: published.firstOffset,
+			partition_offsets: published.offsets,
 			lease_token: token,
 		});
 		if (lease.token !== token) return outcome({ leaseLost: true });
@@ -741,8 +745,8 @@ export class Coordinator {
 		provider: Provider,
 		messages: Messages,
 	): Promise<
-		| { status: 'published'; firstOffset: string }
-		| { status: 'failed'; error: string }
+		| { status: 'published'; offsets: PublishedOffsets }
+		| { status: 'failed'; err: unknown }
 		| { status: 'authority_changed' }
 	> {
 		return this.serializedPublish(async () => {
@@ -759,12 +763,14 @@ export class Coordinator {
 
 	private async sendAll(
 		messages: Messages,
-	): Promise<{ status: 'published'; firstOffset: string } | { status: 'failed'; error: string }> {
-		if (messages.length === 0) return { status: 'published', firstOffset: 'none' };
+	): Promise<
+		{ status: 'published'; offsets: PublishedOffsets } | { status: 'failed'; err: unknown }
+	> {
+		if (messages.length === 0) return { status: 'published', offsets: [] };
 		try {
-			return { status: 'published', firstOffset: await this.deps.publish(messages) };
+			return { status: 'published', offsets: await this.deps.publish(messages) };
 		} catch (err) {
-			return { status: 'failed', error: errorMessage(err) };
+			return { status: 'failed', err };
 		}
 	}
 
@@ -793,7 +799,7 @@ export class Coordinator {
 			if (published.status === 'failed') {
 				log('error', 'candidate publish failed: authority stays none', {
 					provider,
-					error: published.error,
+					err: published.err,
 				});
 				return outcome({ deliveryFailed: true });
 			}
@@ -840,6 +846,7 @@ export class Coordinator {
 				timeline_version: result.timelineVersion,
 				commit_ms: commitMs,
 				published: messages.length,
+				partition_offsets: published.offsets,
 			});
 			if (provider === 'opensky' && !this.deps.openskyAuthenticated) {
 				log(
@@ -964,7 +971,7 @@ export class Coordinator {
 			const published = await this.sendAll(messages);
 			if (published.status === 'failed') {
 				log('error', 'failback publish failed: OpenSky remains authoritative', {
-					error: published.error,
+					err: published.err,
 				});
 				return outcome({ deliveryFailed: true });
 			}
@@ -1016,6 +1023,7 @@ export class Coordinator {
 				timeline_version: result.timelineVersion,
 				commit_ms: commitMs,
 				published: messages.length,
+				partition_offsets: published.offsets,
 			});
 			if (creditEligible && !(await this.creditCoverage(token, 'adsbfi', commitMs))) {
 				return outcome({ committed: true, leaseLost: true });
@@ -1466,7 +1474,7 @@ export class Coordinator {
 		} catch (err) {
 			this.deps.log('warn', 'lease release failed: it will expire after its TTL', {
 				lease_token: token,
-				error: errorMessage(err),
+				err,
 			});
 		}
 	}
