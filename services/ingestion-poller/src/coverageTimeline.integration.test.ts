@@ -540,7 +540,7 @@ describe('Coordinator with the real lease and timeline', () => {
 			publish: async () => {
 				if (publishFails) throw new Error('broker unavailable');
 				published++;
-				return '0';
+				return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 			},
 			log: () => {},
 			renewalIntervalMs: 500,

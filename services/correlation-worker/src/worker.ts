@@ -17,8 +17,7 @@
 // consumer processes messages sequentially (no concurrent partitions
 // configured), so there is no concurrency for separate sessions to isolate,
 // and session creation has real overhead worth avoiding per message.
-import { fileURLToPath } from 'node:url';
-import { Kafka, Partitioners, type Producer } from 'kafkajs';
+import { Kafka, logLevel, Partitioners, type Producer } from 'kafkajs';
 import { Redis } from 'ioredis';
 import neo4j, { type Session } from 'neo4j-driver';
 import { latLngToCell } from 'h3-js';
@@ -29,6 +28,7 @@ import { computeMidpoint } from './midpoint.js';
 import { markCandidatePublished } from './episode.js';
 import { evaluateProximityEncounter } from './proximityDecision.js';
 import type { ProximityEntity } from './proximityEvent.js';
+import { kafkaLogCreator, log } from './logger.js';
 
 interface IncomingPosition {
 	entity_id: string;
@@ -120,7 +120,7 @@ export async function handlePosition(
 		const [entityAId, entityBId] =
 			entityA.id <= entityB.id ? [entityA.id, entityB.id] : [entityB.id, entityA.id];
 
-		await producer.send({
+		const [sent] = await producer.send({
 			topic: config.CANDIDATES_TOPIC,
 			messages: [
 				{
@@ -138,6 +138,21 @@ export async function handlePosition(
 			],
 		});
 
+		// entity_id and timestamp_ms are the position that triggered this
+		// candidate, matching the Position Consumer's `position persisted` line.
+		log('info', 'proximity candidate published', {
+			pair_key: decision.pairKey,
+			entity_a_id: entityAId,
+			entity_b_id: entityBId,
+			episode_start_ms: decision.episodeStartMs,
+			distance_metres: match.distanceMetres,
+			entity_id: position.entity_id,
+			timestamp_ms: position.timestamp_ms,
+			topic: config.CANDIDATES_TOPIC,
+			partition: sent?.partition,
+			base_offset: sent?.baseOffset,
+		});
+
 		// Only after the publish above actually completes -- a crash or
 		// throw before this line leaves candidate_published at '0' so the
 		// next qualifying ping for this episode retries.
@@ -150,7 +165,8 @@ export async function handlePosition(
 const kafka = new Kafka({
 	clientId: 'correlation-worker',
 	brokers: config.KAFKA_BROKERS,
-	logLevel: 0,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
 });
 
 const producer = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });
@@ -166,16 +182,13 @@ const session = driver.session();
 // ---- Consumer loop ----------------------------------------------------------
 
 async function run(): Promise<void> {
-	console.info(
-		{
-			brokers: config.KAFKA_BROKERS,
-			group: config.GROUP_ID,
-			source_topic: config.SOURCE_TOPIC,
-			candidates_topic: config.CANDIDATES_TOPIC,
-			from_beginning: config.FROM_BEGINNING,
-		},
-		'correlation worker starting',
-	);
+	log('info', 'correlation worker starting', {
+		brokers: config.KAFKA_BROKERS,
+		group: config.GROUP_ID,
+		source_topic: config.SOURCE_TOPIC,
+		candidates_topic: config.CANDIDATES_TOPIC,
+		from_beginning: config.FROM_BEGINNING,
+	});
 
 	await producer.connect();
 	await consumer.connect();
@@ -189,10 +202,11 @@ async function run(): Promise<void> {
 
 			const position = parsePosition(rawValue);
 			if (position === null) {
-				console.warn(
-					{ topic, partition, offset },
-					'skipping unparseable position.normalized message',
-				);
+				log('warn', 'skipping unparseable position.normalized message', {
+					topic,
+					partition,
+					offset,
+				});
 			} else {
 				await handlePosition(redis, session, producer, position);
 			}
@@ -207,25 +221,33 @@ async function run(): Promise<void> {
 }
 
 async function shutdown(signal: string): Promise<void> {
-	console.info({ signal }, 'shutdown initiated');
+	log('info', 'shutdown initiated', { signal });
 	await consumer.disconnect();
 	await producer.disconnect();
 	await session.close();
 	await driver.close();
 	await redis.quit();
+	log('info', 'shutdown complete');
 	process.exit(0);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function shutdownFailed(err: unknown): void {
+	log('error', 'shutdown failed', { err });
+	process.exit(1);
+}
+
+// Called by main.ts. Integration tests import this module for handlePosition
+// and never start the service.
+export function start(): void {
 	process.on('SIGINT', () => {
-		shutdown('SIGINT').catch(() => process.exit(1));
+		shutdown('SIGINT').catch(shutdownFailed);
 	});
 	process.on('SIGTERM', () => {
-		shutdown('SIGTERM').catch(() => process.exit(1));
+		shutdown('SIGTERM').catch(shutdownFailed);
 	});
 
 	run().catch((err: unknown) => {
-		console.error({ err }, 'correlation worker failed');
+		log('error', 'correlation worker failed', { err });
 		process.exit(1);
 	});
 }

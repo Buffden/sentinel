@@ -237,7 +237,7 @@ beforeEach(() => {
 	});
 	publish = vi.fn(async () => {
 		events.push('publish');
-		return '0';
+		return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 	});
 	const origRelease = lease.release.bind(lease);
 	lease.release = async () => {
@@ -492,7 +492,7 @@ describe('Coordinator coverage timeline', () => {
 		publish.mockImplementation(async () => {
 			events.push('publish');
 			publishedAt = Date.now();
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await runCycles(2);
@@ -1333,7 +1333,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		publish.mockImplementation(async (messages) => {
 			if (messages.some((m) => m.key.startsWith('ac'))) throw new Error('kafka down');
 			events.push('publish:opensky');
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(1_020);
@@ -1356,7 +1356,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		opensky(() => osOk(398, 1));
 		publish.mockImplementation(async (messages) => {
 			if (messages.some((m) => m.key.startsWith('ac'))) lease.forget();
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(1_020);
@@ -1391,7 +1391,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 				handoverPublishes.push(Date.now());
 				throw new Error('handover publish rejected');
 			}
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(220_000);
@@ -1443,7 +1443,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		let openskyPublishes = 0;
 		publish.mockImplementation(async (messages) => {
 			if (messages.some((m) => m.key.startsWith('os'))) openskyPublishes++;
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(300_000);
@@ -1585,7 +1585,7 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 			order.push(`${who}:start`);
 			if (who === 'adsbfi') await new Promise<void>((r) => (releaseOld = r));
 			order.push(`${who}:end`);
-			return '0';
+			return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 		});
 		coordinator.start();
 		await vi.advanceTimersByTimeAsync(10); // adsb.fi's first cycle is publishing

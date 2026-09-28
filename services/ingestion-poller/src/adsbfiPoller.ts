@@ -145,9 +145,7 @@ export async function fetchAdsbfiResponse(logFn: Log): Promise<SplitResult | Ads
 			signal: AbortSignal.timeout(config.ADSBFI_FETCH_TIMEOUT_MS),
 		});
 	} catch (err) {
-		logFn('warn', 'adsb.fi request failed', {
-			error: err instanceof Error ? err.message : String(err),
-		});
+		logFn('warn', 'adsb.fi request failed', { err });
 		return { error: classifyRequestError(err) };
 	}
 
@@ -164,7 +162,7 @@ export async function fetchAdsbfiResponse(logFn: Log): Promise<SplitResult | Ads
 		return splitAdsbfiResponse(await response.json(), BOX, fetchedAtMs);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		logFn('error', 'adsb.fi response rejected', { error: message });
+		logFn('error', 'adsb.fi response rejected', { err });
 		return { error: `validation: ${message}` };
 	}
 }

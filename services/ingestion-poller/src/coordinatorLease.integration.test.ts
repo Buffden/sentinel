@@ -56,6 +56,14 @@ afterAll(async () => {
 	await redis.quit();
 });
 
+// The coordinator logs Error objects, which JSON.stringify renders
+// as {}; keep their message so assertions can match on the cause.
+function logText(extra?: Record<string, unknown>): string {
+	return JSON.stringify(extra ?? {}, (_key, value) =>
+		value instanceof Error ? value.message : value,
+	);
+}
+
 describe('CoordinatorLease against real Redis', () => {
 	it('lets exactly one coordinator acquire, with a TTL, under a fresh token', async () => {
 		const a = leaseFor();
@@ -235,9 +243,9 @@ describe('Coordinator against real Redis', () => {
 			}),
 			publish: async () => {
 				published++;
-				return '0';
+				return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 			},
-			log: (_level, message, extra) => messages.push(`${message} ${JSON.stringify(extra ?? {})}`),
+			log: (_level, message, extra) => messages.push(`${message} ${logText(extra)}`),
 			renewalIntervalMs: RENEWAL,
 			followerRetryMs: RENEWAL,
 			pollIntervalMs: 50,
@@ -349,8 +357,7 @@ describe('Coordinator against real Redis', () => {
 				},
 				close: (token, reason, nowMs) => timeline.close(token, reason, nowMs),
 				commit: (token, provider, atMs) => timeline.commit(token, provider, atMs),
-				handover: (token, expected, next, atMs) =>
-					timeline.handover(token, expected, next, atMs),
+				handover: (token, expected, next, atMs) => timeline.handover(token, expected, next, atMs),
 				relinquish: (token, expected, nowMs) => timeline.relinquish(token, expected, nowMs),
 			},
 			fetchCycle: async (): Promise<SplitResult> => ({
@@ -363,9 +370,9 @@ describe('Coordinator against real Redis', () => {
 			}),
 			publish: async () => {
 				published++;
-				return '0';
+				return [{ topic: 'adsb.raw', partition: 0, base_offset: '0' }];
 			},
-			log: (_level, message, extra) => messages.push(`${message} ${JSON.stringify(extra ?? {})}`),
+			log: (_level, message, extra) => messages.push(`${message} ${logText(extra)}`),
 			renewalIntervalMs: LONG_RENEWAL,
 			followerRetryMs: LONG_RENEWAL,
 			pollIntervalMs: 50,

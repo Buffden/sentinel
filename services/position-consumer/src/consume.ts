@@ -19,31 +19,23 @@
 //   observe in the normal flow. The restart experiment will demonstrate what happens
 //   when the offset is NOT committed.
 
-import { Kafka } from 'kafkajs';
+// Must stay the first import (see processHandlers.ts).
+import './processHandlers.js';
+import { Kafka, logLevel } from 'kafkajs';
+import { kafkaLogCreator, log } from './logger.js';
 
 const brokers = (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(',');
 
 const kafka = new Kafka({
 	clientId: 'position-consumer',
 	brokers,
-	logLevel: 0,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
 });
 
 const consumer = kafka.consumer({
 	groupId: 'kafka-experiment',
 });
-
-function log(level: 'info' | 'warn' | 'error', message: string, extra?: Record<string, unknown>) {
-	process.stdout.write(
-		JSON.stringify({
-			timestamp: new Date().toISOString(),
-			level,
-			service: 'position-consumer',
-			message,
-			...extra,
-		}) + '\n',
-	);
-}
 
 const TOPIC = 'adsb.raw';
 
@@ -55,7 +47,7 @@ async function run() {
 
 	// fromBeginning: true — read from offset 0 if the group has no committed position.
 	await consumer.subscribe({ topic: TOPIC, fromBeginning: true });
-	log('info', 'consumer subscribed', { topic: TOPIC, fromBeginning: true });
+	log('info', 'consumer subscribed', { topic: TOPIC, from_beginning: true });
 
 	await consumer.run({
 		// autoCommit is true by default in kafkajs. Offsets are committed on a
@@ -97,11 +89,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 run().catch((err: unknown) => {
-	log('error', 'consumer failed', {
-		error: {
-			name: err instanceof Error ? err.name : 'UnknownError',
-			message: err instanceof Error ? err.message : String(err),
-		},
-	});
+	log('error', 'consumer failed', { err });
 	process.exit(1);
 });

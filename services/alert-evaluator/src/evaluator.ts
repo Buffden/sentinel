@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
-import { Kafka, Partitioners, type Consumer } from 'kafkajs';
+import { Kafka, logLevel, Partitioners, type Consumer } from 'kafkajs';
 import { Redis } from 'ioredis';
 import { LeaderElection } from './leader.js';
 import { config } from './config.js';
@@ -21,13 +19,15 @@ import {
 	observedSilenceMs,
 	type CoverageSnapshot,
 } from './signalLossCoverage.js';
+import { instanceId, kafkaLogCreator, log } from './logger.js';
 
 // ---- Kafka setup -----------------------------------------------------------
 
 const kafka = new Kafka({
 	clientId: 'alert-evaluator',
 	brokers: config.KAFKA_BROKERS,
-	logLevel: 0,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
 });
 
 export const producer = kafka.producer({
@@ -36,7 +36,6 @@ export const producer = kafka.producer({
 
 // ---- Redis setup -----------------------------------------------------------
 
-const instanceId = randomUUID();
 export const redis = new Redis(config.REDIS_URL);
 const leader = new LeaderElection(
 	redis,
@@ -94,10 +93,9 @@ export async function runScan(
 	if (!snapshot) return;
 
 	if (snapshot.malformedMembers > 0) {
-		console.warn(
-			{ instanceId, malformed_coverage_members: snapshot.malformedMembers },
-			'ignored malformed provider coverage members',
-		);
+		log('warn', 'ignored malformed provider coverage members', {
+			malformed_coverage_members: snapshot.malformedMembers,
+		});
 	}
 
 	do {
@@ -190,39 +188,41 @@ export async function runScan(
 
 			// Keyed by entity_id so all alerts for the same entity land on the same
 			// partition, preserving order for downstream consumers.
-			await producer.send({
+			const [sent] = await producer.send({
 				topic: config.ALERTS_TOPIC,
 				messages: [{ key: entityId, value: JSON.stringify(alert) }],
 			});
 
 			alerted++;
-			console.info(
-				{
-					instanceId,
-					entityId,
-					alertId,
-					darkSinceMs,
-					provider,
-					observed_silence_ms: observedMs,
-					wall_silence_ms: wallSilenceMs,
-				},
-				'signal loss detected',
-			);
+			log('info', 'signal loss detected', {
+				entity_id: entityId,
+				alert_id: alertId,
+				alert_type: 'SIGNAL_LOSS',
+				dark_since_ms: darkSinceMs,
+				provider,
+				observed_silence_ms: observedMs,
+				wall_silence_ms: wallSilenceMs,
+				topic: config.ALERTS_TOPIC,
+				partition: sent?.partition,
+				base_offset: sent?.baseOffset,
+			});
 		}
 	} while (cursor !== '0');
 
 	// One warning per scan, not per entity.
 	if (!snapshot.initialized) {
-		console.warn(
-			{ instanceId, scanned, eligible, wall_silent_over_threshold: wallSilent },
-			'signal loss suppressed: provider timeline not initialized',
-		);
+		log('warn', 'signal loss suppressed: provider timeline not initialized', {
+			scanned,
+			eligible,
+			wall_silent_over_threshold: wallSilent,
+		});
 	}
 
-	console.info(
-		{ instanceId, scanned, alerted, timeline_version: snapshot.timelineVersion },
-		'scan complete',
-	);
+	log('info', 'scan complete', {
+		scanned,
+		alerted,
+		timeline_version: snapshot.timelineVersion,
+	});
 }
 
 // ---- Provider coverage timeline ---------------------------------------------
@@ -258,16 +258,12 @@ async function readCoverageSnapshot(
 	nowMs: number,
 ): Promise<CoverageSnapshot | null> {
 	const skip = (detail: string, err?: unknown): null => {
-		console.error(
-			{
-				instanceId,
-				detail,
-				err,
-				authorityKey: options.authorityKey,
-				coverageKey: options.coverageKey,
-			},
-			'signal loss skipped: provider timeline snapshot failed',
-		);
+		log('error', 'signal loss skipped: provider timeline snapshot failed', {
+			detail,
+			err,
+			authority_key: options.authorityKey,
+			coverage_key: options.coverageKey,
+		});
 		return null;
 	};
 
@@ -373,15 +369,22 @@ async function publishUnscheduledProximityAlert(
 		},
 	};
 
-	await producer.send({
+	const [sent] = await producer.send({
 		topic: config.ALERTS_TOPIC,
 		messages: [{ key: candidate.pair_key, value: JSON.stringify(alert) }],
 	});
 
-	console.info(
-		{ instanceId, alertId, pairKey: candidate.pair_key },
-		'unscheduled proximity alert emitted',
-	);
+	log('info', 'unscheduled proximity alert emitted', {
+		alert_id: alertId,
+		alert_type: 'UNSCHEDULED_PROXIMITY',
+		pair_key: candidate.pair_key,
+		entity_id: candidate.entity_a_id,
+		counterparty_entity_id: candidate.entity_b_id,
+		episode_start_ms: candidate.episode_start_ms,
+		topic: config.ALERTS_TOPIC,
+		partition: sent?.partition,
+		base_offset: sent?.baseOffset,
+	});
 }
 
 // DATA_MODEL.md's composite claim and decision protocol: builds and
@@ -406,7 +409,7 @@ async function publishCompositeAlert(
 		config.COMPOSITE_CORRELATION_WINDOW_MS,
 	);
 
-	await producer.send({
+	const [sent] = await producer.send({
 		topic: config.ALERTS_TOPIC,
 		messages: [{ key: candidate.pair_key, value: JSON.stringify(alert) }],
 	});
@@ -431,16 +434,26 @@ async function publishCompositeAlert(
 		);
 	}
 	if (result === 'NO_EPISODE') {
-		console.warn(
-			{ instanceId, candidateId: decision.candidate_id, entityId: decision.selected_entity_id },
+		log(
+			'warn',
 			'FINALIZE found no retained episode, already expired; the published alert stands as the only evidence',
+			{ candidate_id: decision.candidate_id, entity_id: decision.selected_entity_id },
 		);
 	}
 
-	console.info(
-		{ instanceId, alertId: alert.alert_id, pairKey: candidate.pair_key },
-		'composite alert emitted',
-	);
+	log('info', 'composite alert emitted', {
+		alert_id: alert.alert_id,
+		alert_type: 'COMPOSITE',
+		pair_key: candidate.pair_key,
+		entity_id: alert.entity_id,
+		counterparty_entity_id: alert.counterparty_entity_id,
+		candidate_id: decision.candidate_id,
+		dark_since_ms: decision.dark_since_ms,
+		episode_start_ms: candidate.episode_start_ms,
+		topic: config.ALERTS_TOPIC,
+		partition: sent?.partition,
+		base_offset: sent?.baseOffset,
+	});
 }
 
 async function publishDecision(
@@ -525,9 +538,10 @@ export async function handleProximityCandidate(
 				candidateId,
 			);
 			if (!released) {
-				console.warn(
-					{ instanceId, candidateId, entityId: decision.selected_entity_id },
+				log(
+					'warn',
 					'could not release stray composite claim after losing a decision-write conflict',
+					{ candidate_id: candidateId, entity_id: decision.selected_entity_id },
 				);
 			}
 		}
@@ -577,10 +591,11 @@ export async function startCandidateConsumerSession(
 
 			const candidate = parseProximityCandidate(rawValue);
 			if (candidate === null) {
-				console.warn(
-					{ instanceId, topic, partition, offset },
-					'skipping unparseable proximity.candidates message',
-				);
+				log('warn', 'skipping unparseable proximity.candidates message', {
+					topic,
+					partition,
+					offset,
+				});
 			} else {
 				await handleProximityCandidate(candidate);
 			}
@@ -636,15 +651,15 @@ async function runLeaderSession(): Promise<void> {
 
 	const session = await startCandidateConsumerSession(config.GROUP_ID);
 	activeSession = session;
-	console.info({ instanceId }, 'joined candidate consumer group');
+	log('info', 'joined candidate consumer group');
 
 	leader.startRenewal(() => {
-		console.warn({ instanceId }, 'lease lost — leaving candidate consumer group');
+		log('warn', 'lease lost — leaving candidate consumer group');
 		ac.abort();
 		void session.stop();
 	});
 
-	console.info({ instanceId }, 'acquired leader lease — starting scan loop');
+	log('info', 'acquired leader lease — starting scan loop');
 
 	try {
 		while (!ac.signal.aborted) {
@@ -654,7 +669,7 @@ async function runLeaderSession(): Promise<void> {
 	} finally {
 		leader.stopRenewal();
 		await session.stop();
-		console.info({ instanceId }, 'left candidate consumer group');
+		log('info', 'left candidate consumer group');
 		activeSession = null;
 		activeSessionAbort = null;
 	}
@@ -663,10 +678,10 @@ async function runLeaderSession(): Promise<void> {
 // ---- Main ------------------------------------------------------------------
 
 async function main(): Promise<void> {
-	console.info({ instanceId }, 'alert evaluator starting');
+	log('info', 'alert evaluator starting');
 
 	await producer.connect();
-	console.info({ instanceId }, 'kafka producer connected');
+	log('info', 'kafka producer connected');
 
 	// ADR-005: the candidate consumer group is joined only inside
 	// runLeaderSession(), on lease acquisition -- not here. A follower must
@@ -678,7 +693,7 @@ async function main(): Promise<void> {
 		if (acquired) {
 			await runLeaderSession();
 		} else {
-			console.info({ instanceId }, 'running as follower — waiting for leader lease');
+			log('info', 'running as follower — waiting for leader lease');
 		}
 		await sleep(config.FOLLOWER_RETRY_INTERVAL_MS);
 	}
@@ -689,7 +704,7 @@ async function main(): Promise<void> {
 // releasing the lease -- rather than exiting mid-session and leaving Kafka
 // to detect the departure via session timeout.
 async function shutdown(): Promise<void> {
-	console.info({ instanceId }, 'shutting down');
+	log('info', 'shutting down');
 	activeSessionAbort?.abort();
 	if (activeSession) {
 		await activeSession.stop();
@@ -700,10 +715,9 @@ async function shutdown(): Promise<void> {
 	await redis.quit();
 }
 
-// Only run the service when this file is executed directly (`npm run evaluator`),
-// not when imported — e.g. by an integration test importing runScan against a
-// real Redis and Kafka broker.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Called by main.ts. Integration tests import this module for runScan and
+// the candidate handlers and never start the service.
+export function start(): void {
 	process.on('SIGINT', () => {
 		shutdown().then(() => process.exit(0));
 	});
@@ -712,7 +726,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	});
 
 	main().catch((err) => {
-		console.error({ err }, 'fatal error');
+		log('error', 'fatal error', { err });
 		process.exit(1);
 	});
 }
