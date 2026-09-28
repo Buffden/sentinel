@@ -1,6 +1,7 @@
-import { Kafka, type Consumer } from 'kafkajs';
+import { Kafka, logLevel, type Consumer } from 'kafkajs';
 import { redis } from '../redis.js';
 import { config } from '../config.js';
+import { kafkaLogCreator, log } from '../logger.js';
 import {
 	persistCompositeAlert,
 	persistIndividualAlert,
@@ -8,7 +9,11 @@ import {
 	type PublishedAlert,
 } from './compositeSupersession.js';
 
-const kafka = new Kafka({ brokers: config.KAFKA_BROKERS });
+const kafka = new Kafka({
+	brokers: config.KAFKA_BROKERS,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
+});
 
 export interface AlertMessage {
 	alert_id: string;
@@ -56,29 +61,24 @@ export async function startAlertSink(
 	const consumer = kafka.consumer({ groupId });
 	await consumer.connect();
 	await consumer.subscribe({ topic: config.ALERTS_TOPIC, fromBeginning: false });
-	console.log(
-		JSON.stringify({
-			level: 'info',
-			msg: 'alert sink consumer started',
-			brokers: config.KAFKA_BROKERS,
-			topic: config.ALERTS_TOPIC,
-			group: groupId,
-		}),
-	);
+	log('info', 'alert sink consumer started', {
+		brokers: config.KAFKA_BROKERS,
+		topic: config.ALERTS_TOPIC,
+		group: groupId,
+	});
 
 	await consumer.run({
 		autoCommit: false,
 		eachMessage: async ({ topic, partition, message }) => {
 			const raw = message.value?.toString();
 			if (!raw) return;
+			const kafkaContext = { topic, partition, offset: message.offset };
 
 			let alert: AlertMessage;
 			try {
 				alert = JSON.parse(raw) as AlertMessage;
 			} catch (err) {
-				console.error(
-					JSON.stringify({ level: 'error', msg: 'alert parse failed', err: String(err), raw }),
-				);
+				log('error', 'alert parse failed', { ...kafkaContext, err, raw });
 				// Commit and skip — malformed messages cannot be fixed by retry.
 				await consumer.commitOffsets([
 					{ topic, partition, offset: String(Number(message.offset) + 1) },
@@ -96,14 +96,11 @@ export async function startAlertSink(
 				typeof alert.detected_at_ms !== 'number' ||
 				!isFinite(alert.detected_at_ms)
 			) {
-				console.error(
-					JSON.stringify({
-						level: 'error',
-						msg: 'alert validation failed — skipping',
-						alert_id: alert.alert_id,
-						raw,
-					}),
-				);
+				log('error', 'alert validation failed — skipping', {
+					...kafkaContext,
+					alert_id: alert.alert_id,
+					raw,
+				});
 				await consumer.commitOffsets([
 					{ topic, partition, offset: String(Number(message.offset) + 1) },
 				]);
@@ -118,14 +115,12 @@ export async function startAlertSink(
 			if (alert.alert_type === 'COMPOSITE') {
 				const supersedesError = validateSupersedesAlertIds(alert.payload);
 				if (supersedesError) {
-					console.error(
-						JSON.stringify({
-							level: 'error',
-							msg: `COMPOSITE validation failed: ${supersedesError}`,
-							alert_id: alert.alert_id,
-							raw,
-						}),
-					);
+					log('error', 'COMPOSITE validation failed', {
+						...kafkaContext,
+						alert_id: alert.alert_id,
+						detail: supersedesError,
+						raw,
+					});
 					await consumer.commitOffsets([
 						{ topic, partition, offset: String(Number(message.offset) + 1) },
 					]);
@@ -152,14 +147,15 @@ export async function startAlertSink(
 				{ topic, partition, offset: String(Number(message.offset) + 1) },
 			]);
 
-			console.log(
-				JSON.stringify({
-					level: 'info',
-					msg: 'alert sinked',
-					alert_id: alert.alert_id,
-					alert_type: alert.alert_type,
-				}),
-			);
+			// published_alert_ids are the rows sent to alert-events, each of which
+			// produces one `alert fan-out` line on every API instance.
+			log('info', 'alert sinked', {
+				...kafkaContext,
+				alert_id: alert.alert_id,
+				alert_type: alert.alert_type,
+				entity_id: alert.entity_id,
+				published_alert_ids: publishedAlerts.map((a) => a.alert_id),
+			});
 		},
 	});
 

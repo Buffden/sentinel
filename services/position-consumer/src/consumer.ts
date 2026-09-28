@@ -79,28 +79,24 @@
 //   causes redelivery and a duplicate publish. Downstream consumers must tolerate
 //   duplicates.
 
-import { hostname } from 'os';
-import { fileURLToPath } from 'node:url';
-import { Kafka, Partitioners } from 'kafkajs';
+import { Kafka, logLevel, Partitioners } from 'kafkajs';
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { latLngToCell } from 'h3-js';
 import { normalizeByProvider, type NormalizedPosition } from './normalize.js';
 import { classifyAdsbRaw } from './classify.js';
 import { config } from './config.js';
+import { instanceId as CONSUMER_ID, kafkaLogCreator, log } from './logger.js';
 
 const { Pool } = pg;
-
-// Stable identifier for this consumer instance, used in DLQ records so
-// operators can trace which consumer instance rejected a message.
-const CONSUMER_ID = `${hostname()}-${process.pid}`;
 
 // ---- Kafka setup -----------------------------------------------------------
 
 const kafka = new Kafka({
 	clientId: 'position-consumer',
 	brokers: config.KAFKA_BROKERS,
-	logLevel: 0,
+	logLevel: logLevel.WARN,
+	logCreator: kafkaLogCreator,
 });
 
 const consumer = kafka.consumer({ groupId: config.GROUP_ID });
@@ -163,24 +159,6 @@ function computeH3Cells(
 		history_geo_cell: latLngToCell(lat, lon, config.HISTORY_H3_RESOLUTION),
 		live_geo_cell: latLngToCell(lat, lon, config.LIVE_H3_RESOLUTION),
 	};
-}
-
-// ---- Logging ---------------------------------------------------------------
-
-function log(
-	level: 'info' | 'warn' | 'error',
-	message: string,
-	extra?: Record<string, unknown>,
-): void {
-	process.stdout.write(
-		JSON.stringify({
-			timestamp: new Date().toISOString(),
-			level,
-			service: 'position-consumer',
-			message,
-			...extra,
-		}) + '\n',
-	);
 }
 
 // ---- Database writes -------------------------------------------------------
@@ -459,7 +437,8 @@ export async function clearSignalLossEpisode(
 
 	log('info', 'signal loss episode cleared', {
 		entity_id: entityId,
-		dark_since_ms: darkSinceMs,
+		// Redis returns the stored value as a string.
+		dark_since_ms: Number(darkSinceMs),
 		resumed_at_ms: resumedAtMs,
 		signal_loss_alert_id: signalLossAlertId,
 		composite_issued: compositeIssued,
@@ -559,7 +538,8 @@ async function publishPositionUpdate(
 	} catch (err) {
 		log('error', 'position-updates pub/sub publish failed', {
 			entity_id: position.entity_id,
-			error: err instanceof Error ? err.message : String(err),
+			timestamp_ms: position.timestamp_ms,
+			err,
 		});
 	}
 }
@@ -607,9 +587,9 @@ async function routeToDlq(
 		await publishToDlq(dlqEvent);
 		log('warn', 'record routed to dlq', {
 			rejection_reason: dlqEvent.rejection_reason,
-			source_topic: topic,
-			source_partition: partition,
-			source_offset: offset,
+			topic,
+			partition,
+			offset,
 			dlq_topic: config.DLQ_TOPIC,
 		});
 	} catch (err) {
@@ -618,10 +598,10 @@ async function routeToDlq(
 		// The raw_events insert is idempotent on replay.
 		log('error', 'dlq publish failed; not committing offset — Kafka will redeliver', {
 			rejection_reason: dlqEvent.rejection_reason,
-			source_topic: topic,
-			source_partition: partition,
-			source_offset: offset,
-			error: err instanceof Error ? err.message : String(err),
+			topic,
+			partition,
+			offset,
+			err,
 		});
 		throw err;
 	}
@@ -684,6 +664,8 @@ async function handleMessage(
 			log('warn', 'skipping record with no position', {
 				entity_id: result.entity_id,
 				provider,
+				topic,
+				partition,
 				offset,
 			});
 			return;
@@ -746,6 +728,8 @@ async function handleMessage(
 		log('warn', 'live state not updated — stale event', {
 			entity_id: position.entity_id,
 			timestamp_ms: position.timestamp_ms,
+			topic,
+			partition,
 			offset,
 		});
 	}
@@ -769,6 +753,9 @@ async function handleMessage(
 		history_geo_cell,
 		live_geo_cell,
 		live_state_accepted: accepted,
+		provider: position.provider,
+		topic,
+		partition,
 		offset,
 	});
 }
@@ -833,24 +820,23 @@ async function shutdown(signal: string): Promise<void> {
 	process.exit(0);
 }
 
-// Only run the service when this file is executed directly (`npm run consumer`),
-// not when imported — e.g. by an integration test importing the write functions
-// below against a real Postgres/Redis.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function shutdownFailed(err: unknown): void {
+	log('error', 'shutdown failed', { err });
+	process.exit(1);
+}
+
+// Called by main.ts. Integration tests import this module for the write
+// functions above and never start the service.
+export function start(): void {
 	process.on('SIGINT', () => {
-		shutdown('SIGINT').catch(() => process.exit(1));
+		shutdown('SIGINT').catch(shutdownFailed);
 	});
 	process.on('SIGTERM', () => {
-		shutdown('SIGTERM').catch(() => process.exit(1));
+		shutdown('SIGTERM').catch(shutdownFailed);
 	});
 
 	run().catch((err: unknown) => {
-		log('error', 'consumer failed', {
-			error: {
-				name: err instanceof Error ? err.name : 'UnknownError',
-				message: err instanceof Error ? err.message : String(err),
-			},
-		});
+		log('error', 'consumer failed', { err });
 		process.exit(1);
 	});
 }

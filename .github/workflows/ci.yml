@@ -336,6 +336,7 @@ jobs:
           --health-retries 10
     env:
       REDIS_URL: redis://localhost:6379
+      KAFKA_BROKERS: localhost:9092
     steps:
       - uses: actions/checkout@v5
 
@@ -348,6 +349,27 @@ jobs:
           path: ~/.npm
           key: npm-ingestion-poller-${{ runner.os }}-${{ hashFiles('services/ingestion-poller/package.json') }}
           restore-keys: npm-ingestion-poller-${{ runner.os }}-
+
+      - name: Start Redpanda for failover integration tests
+        run: |
+          docker run -d --name redpanda \
+            -p 9092:9092 -p 9644:9644 \
+            docker.redpanda.com/redpandadata/redpanda:v24.1.2 \
+            redpanda start --mode dev-container --smp 1 --memory 512M \
+            --reserve-memory 0M --overprovisioned --node-id 0 --check=false \
+            --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+            --advertise-kafka-addr PLAINTEXT://localhost:9092 \
+            --rpc-addr 0.0.0.0:33145 --advertise-rpc-addr localhost:33145
+
+          echo "Waiting for Redpanda..."
+          for i in $(seq 1 20); do
+            docker exec redpanda rpk cluster info > /dev/null 2>&1 && break
+            if [ "$i" -eq 20 ]; then
+              echo "Redpanda did not become ready in time"
+              exit 1
+            fi
+            sleep 3
+          done
 
       - name: Install dependencies
         run: npm install --legacy-peer-deps

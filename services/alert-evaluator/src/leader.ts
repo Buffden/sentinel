@@ -1,4 +1,5 @@
 import type { Redis } from 'ioredis';
+import { log } from './logger.js';
 
 // Lua script for safe renewal: only extend the TTL if this
 // instance still owns the key. A different owner must not be
@@ -53,17 +54,14 @@ export class LeaderElection {
 			try {
 				const renewed = await this.renew();
 				if (!renewed) {
-					console.warn({ instanceId: this.instanceId }, 'leader lease lost — stopping renewal');
+					log('warn', 'leader lease lost — stopping renewal');
 					this.stopRenewal();
 					onLeaseLost();
 				}
 			} catch (err) {
 				// Redis error means we cannot confirm ownership. Fail closed: treat as lease loss.
 				// Continuing to scan without confirmed ownership would risk duplicate work.
-				console.error(
-					{ instanceId: this.instanceId, err },
-					'renewal error — treating as lease loss',
-				);
+				log('error', 'renewal error — treating as lease loss', { err });
 				this.stopRenewal();
 				onLeaseLost();
 			}

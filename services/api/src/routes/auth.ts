@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { pool } from '../db.js';
 import { getDemoCount } from '../shared/demoSessions.js';
 import { config } from '../config.js';
+import { log } from '../logger.js';
 
 const router = Router();
 
@@ -38,9 +39,7 @@ router.post('/google', async (req, res) => {
 		email = payload.email;
 		name = payload.name ?? payload.email;
 	} catch (err) {
-		console.error(
-			JSON.stringify({ level: 'warn', msg: 'Google token verification failed', err: String(err) }),
-		);
+		log('warn', 'Google token verification failed', { err });
 		res.status(401).json({ error: 'Google token verification failed' });
 		return;
 	}
@@ -60,7 +59,7 @@ router.post('/google', async (req, res) => {
 		);
 		userId = result.rows[0]!.user_id;
 	} catch (err) {
-		console.error(JSON.stringify({ level: 'error', msg: 'DB upsert failed', err: String(err) }));
+		log('error', 'DB upsert failed', { err });
 		res.status(500).json({ error: 'Internal server error' });
 		return;
 	}
@@ -76,9 +75,7 @@ router.post('/google', async (req, res) => {
 		sameSite: 'strict',
 	});
 
-	console.log(
-		JSON.stringify({ level: 'info', msg: 'operator authenticated', user_id: userId, email }),
-	);
+	log('info', 'operator authenticated', { user_id: userId, email });
 	res.json({ ok: true });
 });
 
@@ -109,7 +106,7 @@ router.post('/demo', (req, res) => {
 		sameSite: 'strict',
 	});
 
-	console.log(JSON.stringify({ level: 'info', msg: 'demo session issued', ip }));
+	log('info', 'demo session issued', { ip });
 	res.json({ ok: true });
 });
 
@@ -147,14 +144,10 @@ router.post('/logout', (req, res) => {
 				email?: string;
 				role?: string;
 			};
-			console.log(
-				JSON.stringify({
-					level: 'info',
-					msg: 'logout',
-					role: payload.role ?? 'unknown',
-					user_id: payload.user_id ?? 'unknown',
-				}),
-			);
+			log('info', 'logout', {
+				role: payload.role ?? 'unknown',
+				user_id: payload.user_id ?? 'unknown',
+			});
 		} catch {
 			// Token expired or invalid — still clear the cookie.
 		}

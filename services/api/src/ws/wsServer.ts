@@ -14,6 +14,7 @@ import {
 } from '../shared/alertScopeFilter.js';
 import type { GeoBounds } from '../shared/regions.js';
 import { config } from '../config.js';
+import { log } from '../logger.js';
 
 interface BBox {
 	minLat: number;
@@ -94,17 +95,11 @@ export function attachWebSocketServer(server: Server): void {
 
 	redisSub.subscribe(config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL, (err) => {
 		if (err) {
-			console.error(
-				JSON.stringify({ level: 'error', msg: 'redis subscribe failed', err: String(err) }),
-			);
+			log('error', 'redis subscribe failed', { err });
 		} else {
-			console.log(
-				JSON.stringify({
-					level: 'info',
-					msg: 'ws redis subscriber ready',
-					channels: [config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL],
-				}),
-			);
+			log('info', 'ws redis subscriber ready', {
+				channels: [config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL],
+			});
 		}
 	});
 
@@ -131,13 +126,17 @@ export function attachWebSocketServer(server: Server): void {
 			let alert: (AlertForScopeCheck & Record<string, unknown>) | null;
 			try {
 				alert = JSON.parse(message) as AlertForScopeCheck & Record<string, unknown>;
-			} catch {
+			} catch (err) {
+				log('warn', 'alert event unparseable', { channel, err });
 				return;
 			}
 			const envelope = JSON.stringify({ channel: config.ALERT_EVENTS_CHANNEL, data: alert });
+			let openConnections = 0;
+			let sendsAttempted = 0;
 
 			for (const [ws, state] of connections) {
 				if (ws.readyState !== WebSocket.OPEN) continue;
+				openConnections++;
 
 				if (state.role === 'operator') {
 					// Fail closed: no saved workspace, or the async load hasn't
@@ -157,7 +156,19 @@ export function attachWebSocketServer(server: Server): void {
 				// Demo with no positionBBox yet: unfiltered, same default as CP2's REST path.
 
 				ws.send(envelope);
+				sendsAttempted++;
 			}
+
+			// sends_attempted counts frames handed to ws.send for open, in-scope
+			// connections on this instance. It does not confirm the frame was
+			// written to the socket or received by a browser.
+			log('info', 'alert fan-out', {
+				alert_id: alert['alert_id'],
+				alert_type: alert['alert_type'],
+				status: alert['status'],
+				open_connections: openConnections,
+				sends_attempted: sendsAttempted,
+			});
 		}
 	});
 
@@ -197,14 +208,10 @@ export function attachWebSocketServer(server: Server): void {
 					current.scopeLoaded = true;
 				})
 				.catch((err) => {
-					console.error(
-						JSON.stringify({
-							level: 'error',
-							msg: 'failed to load operator workspace scope',
-							user_id: payload.user_id,
-							err: String(err),
-						}),
-					);
+					log('error', 'failed to load operator workspace scope', {
+						user_id: payload.user_id,
+						err,
+					});
 					// scopeLoaded stays false -- connection remains fail-closed for
 					// alerts for its whole lifetime; a reconnect retries the load.
 				});
@@ -223,15 +230,11 @@ export function attachWebSocketServer(server: Server): void {
 			}, delay);
 		}
 
-		console.log(
-			JSON.stringify({
-				level: 'info',
-				msg: 'ws client connected',
-				user_id: payload.user_id,
-				role: payload.role,
-				total: connections.size,
-			}),
-		);
+		log('info', 'ws client connected', {
+			user_id: payload.user_id,
+			role: payload.role,
+			total: connections.size,
+		});
 
 		ws.on('message', (data) => {
 			let msg: SubscribeMessage;
@@ -244,14 +247,7 @@ export function attachWebSocketServer(server: Server): void {
 				const [minLat, minLon, maxLat, maxLon] = msg.bbox;
 				const current = connections.get(ws);
 				if (current) current.positionBBox = { minLat, minLon, maxLat, maxLon };
-				console.log(
-					JSON.stringify({
-						level: 'info',
-						msg: 'ws bbox updated',
-						user_id: payload.user_id,
-						bbox: msg.bbox,
-					}),
-				);
+				log('info', 'ws bbox updated', { user_id: payload.user_id, bbox: msg.bbox });
 			}
 		});
 
@@ -261,26 +257,15 @@ export function attachWebSocketServer(server: Server): void {
 				decrementDemoCount();
 				if (demoExpiryTimer !== null) clearTimeout(demoExpiryTimer);
 			}
-			console.log(
-				JSON.stringify({
-					level: 'info',
-					msg: 'ws client disconnected',
-					user_id: payload.user_id,
-					role: payload.role,
-					total: connections.size,
-				}),
-			);
+			log('info', 'ws client disconnected', {
+				user_id: payload.user_id,
+				role: payload.role,
+				total: connections.size,
+			});
 		});
 
 		ws.on('error', (err) => {
-			console.error(
-				JSON.stringify({
-					level: 'error',
-					msg: 'ws client error',
-					user_id: payload.user_id,
-					err: String(err),
-				}),
-			);
+			log('error', 'ws client error', { user_id: payload.user_id, err });
 		});
 	});
 }

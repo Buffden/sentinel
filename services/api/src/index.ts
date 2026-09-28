@@ -1,3 +1,5 @@
+// Must stay the first import (see processHandlers.ts).
+import './processHandlers.js';
 import http from 'node:http';
 import express, { type ErrorRequestHandler } from 'express';
 import cookieParser from 'cookie-parser';
@@ -10,6 +12,7 @@ import { requireAuth } from './middleware/auth.js';
 import { startAlertSink } from './sink/alertSink.js';
 import { attachWebSocketServer } from './ws/wsServer.js';
 import { config } from './config.js';
+import { log } from './logger.js';
 
 const app = express();
 app.use(express.json());
@@ -51,9 +54,7 @@ const handleUnhandledRouteError: ErrorRequestHandler = (err, _req, res, next) =>
 		next(err);
 		return;
 	}
-	console.error(
-		JSON.stringify({ level: 'error', msg: 'unhandled request error', err: String(err) }),
-	);
+	log('error', 'unhandled request error', { err });
 	res.status(500).json({ error: 'internal error' });
 };
 app.use(handleUnhandledRouteError);
@@ -64,12 +65,10 @@ const server = http.createServer(app);
 attachWebSocketServer(server);
 
 startAlertSink().catch((err: unknown) => {
-	console.error(
-		JSON.stringify({ level: 'error', msg: 'alert sink failed to start', err: String(err) }),
-	);
+	log('error', 'alert sink failed to start', { err });
 	process.exit(1);
 });
 
 server.listen(config.PORT, () => {
-	console.log(JSON.stringify({ level: 'info', msg: 'API listening', port: config.PORT }));
+	log('info', 'API listening', { port: config.PORT });
 });

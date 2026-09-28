@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { nextDelayMs, splitAdsbfiResponse, toResponseNowMs } from './adsbfiPoller.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+	fetchAdsbfiResponse,
+	splitAdsbfiResponse,
+	toResponseNowMs,
+} from './adsbfiPoller.js';
 
 const BOX = { lamin: 36.9, lomin: -122.8, lamax: 38.1, lomax: -121.5 };
 
@@ -58,27 +62,36 @@ describe('splitAdsbfiResponse', () => {
 	});
 });
 
-describe('nextDelayMs', () => {
-	const INTERVAL = 2_000;
-	const BASE = 2_000;
-	const MAX = 60_000;
+// ---- Failure classes for provider health ---------------------------------------
 
-	it('uses the normal interval when nothing has failed', () => {
-		expect(nextDelayMs(0, INTERVAL, BASE, MAX, () => 0.5)).toBe(INTERVAL);
+describe('fetchAdsbfiResponse: last_error classes', () => {
+	const quiet = () => {};
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+	const stub = (impl: () => Promise<Response>) => vi.stubGlobal('fetch', vi.fn(impl));
+
+	it('returns the split response on success, including zero aircraft', async () => {
+		stub(async () => new Response(JSON.stringify({ now: 1790365486000, ac: [] })));
+		const result = await fetchAdsbfiResponse(quiet);
+		expect('error' in result).toBe(false);
 	});
 
-	it('grows the jitter ceiling exponentially with consecutive failures', () => {
-		// random() just under 1 approaches the ceiling: base * 2^(n-1)
-		expect(nextDelayMs(3, INTERVAL, BASE, MAX, () => 0.999)).toBe(Math.floor(0.999 * 8_000));
+	it('classifies the failure shapes observed live', async () => {
+		stub(async () => new Response('', { status: 400 })); // the bad-path response
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'http_400' });
+		stub(async () => new Response('', { status: 429 }));
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'rate_limited' });
+		stub(async () => {
+			throw Object.assign(new Error('The operation was aborted due to timeout'), {
+				name: 'TimeoutError',
+			});
+		});
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({ error: 'timeout' });
+		stub(async () => new Response(JSON.stringify({ ac: [] })));
+		expect(await fetchAdsbfiResponse(quiet)).toEqual({
+			error: 'validation: adsb.fi response "now" is not epoch milliseconds: undefined',
+		});
 	});
 
-	it('caps the ceiling at the configured maximum', () => {
-		expect(nextDelayMs(20, INTERVAL, BASE, MAX, () => 0.999)).toBe(Math.floor(0.999 * MAX));
-	});
-
-	it('never retries sooner than the normal poll interval, however low the jitter', () => {
-		for (const failures of [1, 2, 5, 20]) {
-			expect(nextDelayMs(failures, INTERVAL, BASE, MAX, () => 0)).toBe(INTERVAL);
-		}
-	});
 });
