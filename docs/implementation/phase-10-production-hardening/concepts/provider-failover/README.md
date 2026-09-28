@@ -105,3 +105,33 @@ The Redis lease is still a duplicate-instance guard, not Kafka fencing. The know
 ## Result
 
 CP3e and CP3f are complete. Sentinel can fail over through `none` when the active provider is unavailable, and can later fail back voluntarily from OpenSky to a proven-healthy adsb.fi only after the five-minute minimum. Both paths publish before changing authority, keep coverage separate, serialize publication, and restore conservatively after interruption.
+
+### CP3f repair
+
+A review after the initial CP3f run found three problems in failback, none of which the earlier CI run could see:
+
+- A failed handover was retried on every 10 second adsb.fi standby check, and each failure restarted OpenSky immediately. At that rate OpenSky would use about 8,640 requests a day against a 4,000 credit budget.
+- The committing adsb.fi fetch could start milliseconds after the standby fetch, breaking adsb.fi's one request per second limit.
+- The handover path did not check authority again after its Kafka publish, before calling HANDOVER.
+
+The repair backs off every failed attempt (60 seconds, doubling to 15 minutes), resumes OpenSky one normal interval after a failed attempt, waits until one second after the standby request before the committing fetch, and rechecks authority, lease and term after the publish. A second review then found that backing off only publish failures was not enough: a failed committing fetch moves adsb.fi to `DEGRADED`, one standby success returns it to `HEALTHY`, and each new attempt cancelled OpenSky's resumed cycle, so OpenSky was starved and nothing was published. Backing off every failed attempt closes that, and because the argument depends on the shortest retry being longer than OpenSky's active interval, the coordinator now refuses to start unless both `SELECTION_RETRY_BASE_MS` and `SELECTION_RETRY_MAX_MS` exceed `OPENSKY_ACTIVE_INTERVAL_MS`.
+
+**Automated evidence.** The full ingestion-poller suite, including every integration file against local Redis and Redpanda, passed 220 of 220 on 2026-09-27. Unit fixtures cover repeated handover-only publish failures, alternating successful standby checks with failed committing fetches, a `stale_clock` refusal, lease loss during the spacing wait and during the handover publish, and the startup timing rule. The starvation and lease-loss fixtures were each confirmed to fail with the fix removed.
+
+**Runtime evidence.** Two manual runs used the real coordinator, the real Redis scripts on the `{live-provider}` keys and real Redpanda publishes, with production timings and injected provider responses, so no live OpenSky credits were spent. OpenSky was seeded as the authority for more than five minutes with both providers healthy.
+
+| Run | Injected failure | Failback attempt gaps | OpenSky | adsb.fi request spacing | Authority |
+| --- | --- | --- | --- | --- | --- |
+| 440 s | adsb.fi handover publish rejected, OpenSky publishes normally | 61, 121, 241 s | 16 requests, 16 publishes, 25 s rhythm | at least 1,001 ms | `opensky`, epoch 1 throughout |
+| 300 s | committing adsb.fi fetch returns HTTP 503 | 61, 121 s | 11 requests, 11 publishes, coverage reopened after every attempt | at least 1,003 ms | `opensky`, epoch 1 throughout |
+
+In both runs OpenSky's gap was longer than 25 seconds only right after a failed attempt (36 s and 46 s), because its next cycle is scheduled one interval after the attempt ends. `handover_attempt` segments appeared once per attempt instead of once per standby check. The startup rule was checked with real environment values: a retry base of 10 s, or a maximum of 10 s or 25 s, stops the coordinator with an error naming both settings, while the defaults load.
+
+To inspect the same boundary, run the coordinator with a handover-only publish failure (not a stopped Redpanda, which would also break OpenSky's deliveries) and watch:
+
+```bash
+docker exec sentinel-redis redis-cli HGETALL '{live-provider}:authority'
+docker exec sentinel-redis redis-cli ZRANGE '{live-provider}:coverage' 0 -1 WITHSCORES
+```
+
+OpenSky should stay authoritative with the same epoch, with `handover_attempt` segments at the backoff pace.

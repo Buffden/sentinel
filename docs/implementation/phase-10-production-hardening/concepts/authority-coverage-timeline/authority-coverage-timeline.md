@@ -142,7 +142,7 @@ Readers: none yet. The Alert Evaluator reads the timeline from CP3c on.
 | --- | --- |
 | Credit and close scripts, member format, retention cutoff | `services/ingestion-poller/src/coverageTimeline.ts` |
 | Freshness tracker | `services/ingestion-poller/src/adsbfiFreshness.ts` |
-| Cycle order, credit and failure close, acquisition and shutdown closes, failing closed | `activeCycle`, `creditCoverage`, `closeCoverage`, `attemptAcquire`, `shutdown`, `services/ingestion-poller/src/coordinator.ts` |
+| Cycle order, credit and failure close, acquisition and shutdown closes, failing closed | `adsbfiRequest`, `openskyRequest`, `creditCoverage`, `closeCoverage`, `attemptAcquire`, `shutdown`, `services/ingestion-poller/src/coordinator.ts` |
 | Response `now` handed to the coordinator | `responseNowMs` on `SplitResult`, `services/ingestion-poller/src/adsbfiPoller.ts` |
 | Frozen-feed window and retention settings | `ADSBFI_FROZEN_FEED_MS`, `COVERAGE_RETENTION_MS`, `services/ingestion-poller/src/config.ts` |
 | Tests | `adsbfiFreshness.test.ts`, `coordinator.test.ts`, `coverageTimeline.integration.test.ts`, `coordinatorLease.integration.test.ts` |

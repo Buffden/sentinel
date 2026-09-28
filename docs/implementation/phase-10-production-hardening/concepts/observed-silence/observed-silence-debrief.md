@@ -209,8 +209,9 @@ docker exec sentinel-redis redis-cli EXISTS alert-state:<icao24>
 docker exec sentinel-redpanda rpk topic describe alerts -p
 docker exec sentinel-redis redis-cli --scan --pattern 'alert-state:*' | wc -l
 
-# An unclean outage
-pkill -9 -f src/coordinator.ts
+# An unclean outage of the current entry point: inspect the PID first
+pgrep -af 'src/index.ts'
+kill -9 <coordinator-pid>
 ```
 
 In the evaluator log, each `signal loss detected` line carries `provider`, `observed_silence_ms` and `wall_silence_ms`, and each `scan complete` line carries `timeline_version`.

@@ -211,9 +211,11 @@ export class Coordinator {
 	// ---- Selection while authority is none ----
 	// Providers that used their one immediate attempt in this entry into none.
 	private oneShotUsed = new Set<Provider>();
-	// Delivery failures are not provider-health failures. Back them off on
-	// that provider's request schedule instead of maintaining another timer.
+	// Delivery failures are not provider-health failures. Candidate requests
+	// back off on their schedule; failed handovers use a not-before deadline.
 	private deliveryFailures: Record<Provider, number> = { adsbfi: 0, opensky: 0 };
+	// A failed handover must not be retried by every 10 s adsb.fi health check.
+	private failbackRetryNotBeforeMs = 0;
 	private round: Promise<void> | null = null;
 
 	constructor(private readonly deps: CoordinatorDeps) {
@@ -276,6 +278,8 @@ export class Coordinator {
 		this.mode = 'none';
 		this.authoritySinceMs = null;
 		this.handoverInProgress = false;
+		this.deliveryFailures = { adsbfi: 0, opensky: 0 };
+		this.failbackRetryNotBeforeMs = 0;
 		this.requestQueue = { adsbfi: Promise.resolve(), opensky: Promise.resolve() };
 		log('info', 'lease acquired: now leader', { lease_token: lease.token });
 		// A shutdown that raced the acquisition releases the lease itself.
@@ -520,6 +524,7 @@ export class Coordinator {
 	): Promise<RequestOutcome> {
 		const { lease, log } = this.deps;
 		const outcome = this.outcomeFor(role);
+		const requestStartedMs = Date.now();
 		const result = await this.deps.fetchCycle();
 		// The fetch can take seconds. If the lease was lost meanwhile, a
 		// successor may already be publishing, so this request is dropped.
@@ -575,7 +580,7 @@ export class Coordinator {
 				state: this.health.adsbfi?.state ?? 'unknown',
 			});
 			if (this.failbackEligible(Date.now()) && !this.handoverInProgress) {
-				await this.attemptFailback(token, term);
+				await this.attemptFailback(token, term, requestStartedMs);
 			}
 			return outcome({});
 		}
@@ -590,13 +595,7 @@ export class Coordinator {
 			);
 		}
 		if (role === 'handover') {
-			return this.deliverHandover(
-				split.messages,
-				token,
-				term,
-				verdict === 'fresh',
-				outcome,
-			);
+			return this.deliverHandover(split.messages, token, term, verdict === 'fresh', outcome);
 		}
 
 		// Active cycle.
@@ -692,14 +691,7 @@ export class Coordinator {
 		if (result.kind !== 'ok') return this.failRequest(role, 'opensky', token, outcome, true);
 		if (role === 'standby') return outcome({});
 		if (role === 'candidate') {
-			return this.deliverCandidate(
-				'opensky',
-				result.messages,
-				token,
-				term,
-				true,
-				outcome,
-			);
+			return this.deliverCandidate('opensky', result.messages, token, term, true, outcome);
 		}
 
 		// Active cycle.
@@ -836,6 +828,12 @@ export class Coordinator {
 			this.mode = provider;
 			this.authoritySinceMs = commitMs;
 			this.deliveryFailures[provider] = 0;
+			if (provider === 'opensky') {
+				// Candidate retries from the preceding none period must not inflate
+				// the first failback delay under this new authority.
+				this.deliveryFailures.adsbfi = 0;
+				this.failbackRetryNotBeforeMs = 0;
+			}
 			log('info', 'authority committed', {
 				provider,
 				epoch: result.epoch,
@@ -858,9 +856,7 @@ export class Coordinator {
 			const other: Provider = provider === 'adsbfi' ? 'opensky' : 'adsbfi';
 			if (this.requestTimers[other] === null) {
 				const delayMs =
-					other === 'adsbfi'
-						? this.deps.adsbfiStandbyIntervalMs
-						: this.openskyStandbyDelayMs();
+					other === 'adsbfi' ? this.deps.adsbfiStandbyIntervalMs : this.openskyStandbyDelayMs();
 				this.scheduleRequest(other, delayMs, token, term);
 			}
 			return outcome({ committed: true });
@@ -876,11 +872,20 @@ export class Coordinator {
 		);
 	}
 
-	// Voluntary failback reuses the existing provider request loops and publish
-	// lane. No extra timer is needed: each adsb.fi standby check re-evaluates
-	// the five-minute condition.
-	private async attemptFailback(token: string, term: number): Promise<void> {
-		if (this.handoverInProgress || !this.current(token, term) || !this.failbackEligible(Date.now())) {
+	// Voluntary failback reuses the provider request loops and publish lane.
+	// Standby checks re-evaluate eligibility and the failed-handover deadline;
+	// no separate retry loop is needed.
+	private async attemptFailback(
+		token: string,
+		term: number,
+		standbyRequestStartedMs: number,
+	): Promise<void> {
+		if (
+			this.handoverInProgress ||
+			!this.current(token, term) ||
+			!this.failbackEligible(Date.now()) ||
+			Date.now() < this.failbackRetryNotBeforeMs
+		) {
 			return;
 		}
 		this.handoverInProgress = true;
@@ -899,12 +904,34 @@ export class Coordinator {
 			await this.requestQueue.opensky;
 			await this.publishQueue;
 			if (!this.current(token, term) || !this.failbackEligible(Date.now())) return;
+			// The check and committing cycle are separate HTTP requests. Space
+			// their start times by at least adsb.fi's one-second minimum.
+			const remainingMs = Math.max(0, 1_000 - (Date.now() - standbyRequestStartedMs));
+			if (remainingMs > 0) {
+				await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+			}
+			if (!this.current(token, term) || !this.failbackEligible(Date.now())) return;
 
 			if (!(await this.closeCoverage(token, 'handover_attempt'))) return;
 			if (!this.current(token, term) || this.mode !== 'opensky') return;
 
 			const result = await this.adsbfiRequest('handover', false, token, term);
 			if (result.leaseLost) return;
+			// Every failed attempt backs off, including a failed committing fetch.
+			// That failure moves adsb.fi to DEGRADED, but one standby success
+			// returns it to HEALTHY, so without this the next standby check would
+			// start another attempt and cancel OpenSky's resumed cycle every time.
+			// The 60 s minimum is longer than OpenSky's active interval, so that
+			// cycle always runs before the next attempt.
+			if (this.current(token, term) && this.mode === 'opensky') {
+				const retryMs = nextSelectionRetryMs(
+					++this.deliveryFailures.adsbfi,
+					this.deps.selectionRetryBaseMs,
+					this.deps.selectionRetryMaxMs,
+				);
+				this.failbackRetryNotBeforeMs = Date.now() + retryMs;
+				this.deps.log('warn', 'failback backing off', { retry_in_ms: retryMs });
+			}
 			if (this.mode === 'opensky') {
 				this.deps.log('warn', 'failback attempt failed: OpenSky remains authoritative');
 			}
@@ -914,7 +941,7 @@ export class Coordinator {
 			if (this.mode === 'opensky' && this.requestTimers.opensky === null) {
 				// A failed handover deliberately left OpenSky coverage closed;
 				// the next successful active cycle reopens it truthfully.
-				this.scheduleRequest('opensky', 0, token, term);
+				this.scheduleRequest('opensky', this.deps.openskyActiveIntervalMs, token, term);
 			} else if (this.mode === 'adsbfi' && this.requestTimers.opensky === null) {
 				this.scheduleRequest('opensky', this.openskyStandbyDelayMs(), token, term);
 			}
@@ -930,11 +957,7 @@ export class Coordinator {
 	): Promise<RequestOutcome> {
 		const { log } = this.deps;
 		return this.serializedPublish(async () => {
-			if (
-				!this.handoverInProgress ||
-				this.mode !== 'opensky' ||
-				!this.current(token, term)
-			) {
+			if (!this.handoverInProgress || this.mode !== 'opensky' || !this.current(token, term)) {
 				return outcome({});
 			}
 
@@ -947,14 +970,19 @@ export class Coordinator {
 			}
 
 			const commitMs = Date.now();
+			// Authority can move during the send (an OpenSky DEGRADED deadline
+			// relinquishing it, or a lost lease). The positions already reached
+			// Kafka and cannot be recalled; HANDOVER's expected-provider check
+			// stays the final guard for a change that lands after this point.
+			if (!this.handoverInProgress || this.mode !== 'opensky' || !this.current(token, term)) {
+				log('warn', 'failback dropped after publishing: authority changed during the send', {
+					published: messages.length,
+				});
+				return outcome({});
+			}
 			let result;
 			try {
-				result = await this.deps.timeline.handover(
-					token,
-					'opensky',
-					'adsbfi',
-					commitMs,
-				);
+				result = await this.deps.timeline.handover(token, 'opensky', 'adsbfi', commitMs);
 			} catch (err) {
 				this.loseLeadership(token, 'authority handover error: result unknown', err);
 				return outcome({ leaseLost: true });
@@ -979,6 +1007,8 @@ export class Coordinator {
 
 			this.mode = 'adsbfi';
 			this.authoritySinceMs = commitMs;
+			this.deliveryFailures.adsbfi = 0;
+			this.failbackRetryNotBeforeMs = 0;
 			log('info', 'failback committed', {
 				from: 'opensky',
 				to: 'adsbfi',
@@ -1037,6 +1067,7 @@ export class Coordinator {
 	private enterNone(token: string, term: number, reason: string): void {
 		this.oneShotUsed = new Set();
 		this.deliveryFailures = { adsbfi: 0, opensky: 0 };
+		this.failbackRetryNotBeforeMs = 0;
 		this.startSelectionRound(token, term, reason);
 	}
 

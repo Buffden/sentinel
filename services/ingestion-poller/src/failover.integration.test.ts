@@ -220,10 +220,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 				};
 			},
 			async () => {
-				if (
-					holdOpenSkyCandidate &&
-					(await redis.hget(authorityKey, 'provider')) === 'none'
-				) {
+				if (holdOpenSkyCandidate && (await redis.hget(authorityKey, 'provider')) === 'none') {
 					await openSkyGate;
 				}
 				if (openskyDown) return { kind: 'failed', error: 'http_503' };
@@ -371,7 +368,8 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			expect(await redis.hget(authorityKey, 'provider')).toBe('opensky');
 			expect(await redis.hget(authorityKey, 'epoch')).toBe('4');
 
-			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 4_000);
+			// The standby check and handover fetch now start at least 1 s apart.
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 6_000);
 			await waitFor(async () => (await redis.hget(authorityKey, 'coverage_open_since_ms')) !== '');
 
 			const authority = await redis.hgetall(authorityKey);
@@ -396,7 +394,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			if (!stopped) await r.coordinator.shutdown();
 			await r.client.quit();
 		}
-	}, 10_000);
+	}, 15_000);
 
 	it('restores an interrupted failback as OpenSky first, then retries the handover conservatively', async () => {
 		const now = Date.now();
@@ -417,11 +415,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			'timeline_version',
 			'20',
 		);
-		await redis.zadd(
-			coverageKey,
-			priorEnd,
-			`opensky|${priorStart}|${priorEnd}|handover_attempt`,
-		);
+		await redis.zadd(coverageKey, priorEnd, `opensky|${priorStart}|${priorEnd}|handover_attempt`);
 		await redis.hset(healthKeys.opensky, ...toHashFields('opensky', healthy('opensky', now)));
 		await redis.hset(healthKeys.adsbfi, ...toHashFields('adsbfi', healthy('adsbfi', now)));
 
@@ -455,7 +449,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			// resumes it rather than treating the old handover attempt as done.
 			expect(r.acceptedProviders[0]).toBe('opensky');
 
-			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 3_000);
+			await waitFor(async () => (await redis.hget(authorityKey, 'provider')) === 'adsbfi', 5_000);
 			expect(await redis.hget(authorityKey, 'epoch')).toBe('10');
 			expect(
 				(await redis.zrange(coverageKey, '0', '-1')).some(
@@ -470,7 +464,7 @@ describe('Coordinator failover against real Redis and Kafka', () => {
 			if (!stopped) await r.coordinator.shutdown();
 			await r.client.quit();
 		}
-	}, 10_000);
+	}, 15_000);
 
 	it('keeps provider health successful and authority uninitialized when candidate Kafka delivery fails', async () => {
 		const disconnected = kafka.producer({ createPartitioner: Partitioners.LegacyPartitioner });

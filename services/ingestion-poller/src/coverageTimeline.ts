@@ -38,10 +38,7 @@ export const COVERAGE_KEY = '{live-provider}:coverage';
 export type AuthorityProvider = 'adsbfi' | 'opensky';
 
 export type CoverageCloseReason =
-	| 'failure'
-	| 'handover_attempt'
-	| 'coordinator_shutdown'
-	| 'coordinator_down';
+	'failure' | 'handover_attempt' | 'coordinator_shutdown' | 'coordinator_down';
 
 export type CreditResult =
 	| { status: 'lease_mismatch' }
@@ -188,13 +185,6 @@ export const COMMIT_SCRIPT = `
 	return {'committed', e, v}
 `;
 
-// KEYS: lease, authority, coverage. ARGV: token, expected provider, time (ms),
-// prune cutoff (ms). The authoritative provider has become UNAVAILABLE:
-// authority becomes none, as one revision. Coverage has normally closed at
-// the first failed cycle already; anything still open closes here as
-// `failure`, with CLOSE's rules (a member only with length, backwards refused).
-// epoch and last_active_success_ms are kept; authority_since_ms records when
-// none began.
 // KEYS: lease, authority. ARGV: token, expected provider, next provider,
 // commit time (ms). Used only for voluntary failback after the old provider's
 // coverage has been closed. Unlike COMMIT, this intentionally changes one
@@ -225,6 +215,13 @@ export const HANDOVER_SCRIPT = `
 	return {'handed_over', e, v}
 `;
 
+// KEYS: lease, authority, coverage. ARGV: token, expected provider, time (ms),
+// prune cutoff (ms). The authoritative provider has become UNAVAILABLE:
+// authority becomes none, as one revision. Coverage has normally closed at
+// the first failed cycle already; anything still open closes here as
+// `failure`, with CLOSE's rules (a member only with length, backwards refused).
+// epoch and last_active_success_ms are kept; authority_since_ms records when
+// none began.
 export const RELINQUISH_SCRIPT = `
 	if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 		return {'lease_mismatch'}

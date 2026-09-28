@@ -78,6 +78,26 @@ validateLeaseTiming(
 	COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
 );
 
+// A failed failback resumes OpenSky one active interval later, and the next
+// attempt cancels OpenSky's pending request when it starts. If the shortest
+// failback retry were not longer than that interval, each attempt could
+// cancel OpenSky's resumed cycle before it runs, leaving no provider
+// publishing while OpenSky holds authority.
+// The shortest retry is min(base, max): the max caps every step, including the first.
+export function validateFailbackTiming(
+	selectionRetryBaseMs: number,
+	selectionRetryMaxMs: number,
+	openskyActiveIntervalMs: number,
+): void {
+	if (Math.min(selectionRetryBaseMs, selectionRetryMaxMs) <= openskyActiveIntervalMs) {
+		throw new Error(
+			`Config: SELECTION_RETRY_BASE_MS (${selectionRetryBaseMs}) and ` +
+				`SELECTION_RETRY_MAX_MS (${selectionRetryMaxMs}) must both be greater than ` +
+				`OPENSKY_ACTIVE_INTERVAL_MS (${openskyActiveIntervalMs})`,
+		);
+	}
+}
+
 export const config = {
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 
@@ -263,9 +283,9 @@ export const config = {
 		10_000,
 		ADSBFI_MIN_REQUEST_INTERVAL_MS,
 	),
-	// Per-provider candidate delivery backoff while authority is none. A
-	// healthy upstream response whose Kafka publish or authority commit cannot
-	// complete retries from this base, doubling up to the max.
+	// Per-provider candidate delivery and failed failback backoff. A healthy
+	// upstream response whose Kafka publish or authority change cannot complete
+	// retries from this base, doubling up to the max.
 	SELECTION_RETRY_BASE_MS: requirePositiveInt(
 		'SELECTION_RETRY_BASE_MS',
 		process.env['SELECTION_RETRY_BASE_MS'],
@@ -277,3 +297,9 @@ export const config = {
 		900_000,
 	),
 } as const;
+
+validateFailbackTiming(
+	config.SELECTION_RETRY_BASE_MS,
+	config.SELECTION_RETRY_MAX_MS,
+	config.OPENSKY_ACTIVE_INTERVAL_MS,
+);

@@ -1318,11 +1318,9 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 		expect(timeline.handovers).toEqual([]);
 		expect(coordinator.authority).toBe('opensky');
 
-		await vi.advanceTimersByTimeAsync(2);
+		await vi.advanceTimersByTimeAsync(1_002);
 		expect(timeline.closes).toContain('handover_attempt');
-		expect(timeline.handovers.map((h) => [h.expected, h.next])).toEqual([
-			['opensky', 'adsbfi'],
-		]);
+		expect(timeline.handovers.map((h) => [h.expected, h.next])).toEqual([['opensky', 'adsbfi']]);
 		expect(coordinator.authority).toBe('adsbfi');
 		expect(logs.some((l) => l.message === 'failback committed')).toBe(true);
 	});
@@ -1338,15 +1336,179 @@ describe('Coordinator failover (ADR-022 section 4, CP3e)', () => {
 			return '0';
 		});
 		coordinator.start();
-		await vi.advanceTimersByTimeAsync(20);
+		await vi.advanceTimersByTimeAsync(1_020);
 
 		expect(timeline.closes).toContain('handover_attempt');
 		expect(timeline.handovers).toEqual([]);
 		expect(coordinator.authority).toBe('opensky');
-		expect(logs.some((l) => l.message === 'failback publish failed: OpenSky remains authoritative')).toBe(
-			true,
+		expect(
+			logs.some((l) => l.message === 'failback publish failed: OpenSky remains authoritative'),
+		).toBe(true);
+		const openskyCalls = fetchOpenskyMock.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(OPENSKY_ACTIVE_MS);
+		expect(fetchOpenskyMock.mock.calls.length).toBe(openskyCalls + 1);
+	});
+
+	it('does not run HANDOVER when the lease is lost while the failback publish is in flight', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 1));
+		publish.mockImplementation(async (messages) => {
+			if (messages.some((m) => m.key.startsWith('ac'))) lease.forget();
+			return '0';
+		});
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(1_020);
+
+		expect(timeline.closes).toContain('handover_attempt');
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+		expect(
+			logs.some(
+				(l) => l.message === 'failback dropped after publishing: authority changed during the send',
+			),
+		).toBe(true);
+	});
+
+	it('backs off repeated handover-only publish failures without accelerating OpenSky', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		const adsbfiRequests: number[] = [];
+		const openskyRequests: number[] = [];
+		const handoverPublishes: number[] = [];
+		fetchCycle.mockImplementation(async () => {
+			adsbfiRequests.push(Date.now());
+			return split();
+		});
+		opensky(() => {
+			openskyRequests.push(Date.now());
+			return osOk(398, 1);
+		});
+		publish.mockImplementation(async (messages) => {
+			if (messages.some((m) => m.key.startsWith('ac'))) {
+				handoverPublishes.push(Date.now());
+				throw new Error('handover publish rejected');
+			}
+			return '0';
+		});
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(220_000);
+
+		expect(handoverPublishes).toHaveLength(3);
+		expect(handoverPublishes[1]! - handoverPublishes[0]!).toBeGreaterThanOrEqual(60_000);
+		expect(handoverPublishes[2]! - handoverPublishes[1]!).toBeGreaterThanOrEqual(120_000);
+		expect(adsbfiRequests[1]! - adsbfiRequests[0]!).toBeGreaterThanOrEqual(1_000);
+		expect(timeline.closes.filter((reason) => reason === 'handover_attempt')).toHaveLength(3);
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+		expect(
+			logs
+				.filter((line) => line.message === 'failback backing off')
+				.map((line) => line.extra['retry_in_ms']),
+		).toEqual([60_000, 120_000, 240_000]);
+		expect(openskyRequests.length).toBeGreaterThanOrEqual(6);
+		for (let i = 1; i < openskyRequests.length; i++) {
+			expect(openskyRequests[i]! - openskyRequests[i - 1]!).toBeGreaterThanOrEqual(
+				OPENSKY_ACTIVE_MS,
+			);
+		}
+	});
+
+	it('backs off failed committing fetches so OpenSky keeps delivering between attempts', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		// Standby checks are 10 s apart and succeed. The committing fetch starts
+		// about 1 s after its standby check and fails, which moves adsb.fi to
+		// DEGRADED; the next standby success returns it to HEALTHY.
+		let lastFetchMs = -Infinity;
+		const committingFailures: number[] = [];
+		fetchCycle.mockImplementation(async () => {
+			const now = Date.now();
+			const committing = now - lastFetchMs < 5_000;
+			lastFetchMs = now;
+			if (committing) {
+				committingFailures.push(now);
+				return { error: 'http_503' };
+			}
+			return split();
+		});
+		const openskyRequests: number[] = [];
+		opensky(() => {
+			openskyRequests.push(Date.now());
+			return osOk(398, 1);
+		});
+		let openskyPublishes = 0;
+		publish.mockImplementation(async (messages) => {
+			if (messages.some((m) => m.key.startsWith('os'))) openskyPublishes++;
+			return '0';
+		});
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(300_000);
+
+		expect(committingFailures).toHaveLength(3);
+		expect(committingFailures[1]! - committingFailures[0]!).toBeGreaterThanOrEqual(60_000);
+		expect(committingFailures[2]! - committingFailures[1]!).toBeGreaterThanOrEqual(120_000);
+		expect(
+			logs
+				.filter((line) => line.message === 'failback backing off')
+				.map((line) => line.extra['retry_in_ms']),
+		).toEqual([60_000, 120_000, 240_000]);
+		expect(timeline.handovers).toEqual([]);
+		expect(coordinator.authority).toBe('opensky');
+		// OpenSky is never starved: it keeps its active rhythm, publishes, and
+		// reopens coverage after every attempt closed it.
+		expect(openskyRequests.length).toBeGreaterThanOrEqual(10);
+		for (let i = 1; i < openskyRequests.length; i++) {
+			const gap = openskyRequests[i]! - openskyRequests[i - 1]!;
+			expect(gap).toBeGreaterThanOrEqual(OPENSKY_ACTIVE_MS);
+			expect(gap).toBeLessThanOrEqual(2 * OPENSKY_ACTIVE_MS);
+		}
+		expect(openskyPublishes).toBe(openskyRequests.length);
+		const lastAttemptMs = committingFailures[2]!;
+		expect(openskyRequests.some((t) => t > lastAttemptMs)).toBe(true);
+		expect(timeline.creditProviders.filter((p) => p === 'opensky').length).toBe(
+			openskyRequests.length,
 		);
-		expect(fetchOpenskyMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it('backs off a stale-clock handover refusal without treating adsb.fi as unhealthy', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		timeline.handoverResult = { status: 'stale_clock' };
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(50_000);
+		expect(
+			logs.filter(
+				(line) => line.message === 'authority handover refused: time is not after the last success',
+			),
+		).toHaveLength(1);
+		expect(
+			logs
+				.filter((line) => line.message === 'failback backing off')
+				.map((line) => line.extra['retry_in_ms']),
+		).toEqual([60_000]);
+		expect(coordinator.authority).toBe('opensky');
+		expect(healthStore.last('adsbfi')?.state).toBe('HEALTHY');
+	});
+
+	it('does not fetch a committing cycle after losing the lease during the spacing wait', async () => {
+		authorityIs('opensky', Date.now() - 5 * 60_000);
+		healthStore.snapshot.stored.opensky = recent('HEALTHY');
+		healthStore.snapshot.stored.adsbfi = recent('HEALTHY');
+		opensky(() => osOk(398, 1));
+		coordinator.start();
+		await vi.advanceTimersByTimeAsync(500);
+		expect(fetchCycle).toHaveBeenCalledTimes(1);
+		lease.forget();
+		await vi.advanceTimersByTimeAsync(600);
+		expect(fetchCycle).toHaveBeenCalledTimes(1);
+		expect(timeline.closes).not.toContain('handover_attempt');
+		expect(timeline.handovers).toEqual([]);
 	});
 
 	it('RECOVERING adsb.fi cannot fail back until its uninterrupted recovery window completes', async () => {
