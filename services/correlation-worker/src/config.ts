@@ -12,6 +12,8 @@ function requirePositiveInt(name: string, raw: string | undefined, def: number):
 }
 
 export const config = {
+	// /healthz port. Override it when running a second instance on one host.
+	HEALTH_PORT: requirePositiveInt('HEALTH_PORT', process.env['HEALTH_PORT'], 9103),
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 	REDIS_URL: process.env['REDIS_URL'] ?? 'redis://localhost:6379',
 

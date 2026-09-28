@@ -12,6 +12,10 @@ import { requireAuth } from './middleware/auth.js';
 import { startAlertSink } from './sink/alertSink.js';
 import { attachWebSocketServer } from './ws/wsServer.js';
 import { config } from './config.js';
+import { checkHealth, NotConnectedError, type Check } from './health.js';
+import { pool } from './db.js';
+import { neo4jDriver } from './neo4j.js';
+import { redis } from './redis.js';
 import { log } from './logger.js';
 
 const app = express();
@@ -20,8 +24,28 @@ app.use(cookieParser());
 
 // Unauthenticated routes
 
-app.get('/healthz', (_req, res) => {
-	res.json({ ok: true });
+// 200 when Postgres, Redis and Neo4j all answer in time, 503 otherwise. The
+// body names each dependency's result but never its error text, since this
+// route is unauthenticated; the text is logged instead.
+const HEALTH_CHECKS: Record<string, Check> = {
+	postgres: async () => {
+		await pool.query('SELECT 1');
+	},
+	redis: async () => {
+		if (redis.status !== 'ready')
+			throw new NotConnectedError(`redis client status ${redis.status}`);
+		await redis.ping();
+	},
+	neo4j: async () => {
+		await neo4jDriver.getServerInfo();
+	},
+};
+
+app.get('/healthz', async (_req, res) => {
+	const report = await checkHealth(HEALTH_CHECKS);
+	res
+		.status(report.healthy ? 200 : 503)
+		.json({ status: report.healthy ? 'ok' : 'unhealthy', checks: report.checks });
 });
 
 app.use('/auth', authRouter);

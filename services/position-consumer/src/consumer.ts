@@ -87,6 +87,7 @@ import { normalizeByProvider, type NormalizedPosition } from './normalize.js';
 import { classifyAdsbRaw } from './classify.js';
 import { config } from './config.js';
 import { instanceId as CONSUMER_ID, kafkaLogCreator, log } from './logger.js';
+import { redisCheck, startHealthServer } from './health.js';
 
 const { Pool } = pg;
 
@@ -111,12 +112,26 @@ const producer = kafka.producer({
 
 export const pool = new Pool({ connectionString: config.PG_URL, max: config.PG_POOL_MAX });
 
+// Postgres ends idle pooled connections when it shuts down, and the pool
+// reports that as an 'error' event. Without a listener the event is thrown
+// and the consumer crashes; with one, the pool drops the dead client and opens
+// new connections once Postgres is back, and /healthz reports the outage.
+pool.on('error', (err) => {
+	log('warn', 'postgres idle client error', { err });
+});
+
 // ---- Redis setup -----------------------------------------------------------
 
 export const redis = new Redis(config.REDIS_URL, {
 	// Disable ioredis auto-reconnect logging noise on clean shutdown.
 	lazyConnect: false,
 	enableReadyCheck: true,
+});
+// ioredis prints an 'error' event to stderr as plain text when nothing listens,
+// once per failed reconnect during an outage. It reconnects on its own either
+// way; the listener only keeps those errors in the log contract.
+redis.on('error', (err) => {
+	log('warn', 'redis client error', { err });
 });
 
 // Lua script: monotonic guard for entity:live:{entity_id}.
@@ -833,6 +848,13 @@ export function start(): void {
 	});
 	process.on('SIGTERM', () => {
 		shutdown('SIGTERM').catch(shutdownFailed);
+	});
+
+	startHealthServer(config.HEALTH_PORT, {
+		redis: redisCheck(redis),
+		postgres: async () => {
+			await pool.query('SELECT 1');
+		},
 	});
 
 	run().catch((err: unknown) => {
