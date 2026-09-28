@@ -45,8 +45,15 @@ describe('checkHealth', () => {
 			started++;
 			return new Promise<void>((resolve) => (release = resolve));
 		};
+		const first = await checkHealth({ paused: hangsUntilReleased }, TIMEOUT_MS);
+		expect(first.checks['paused']).toEqual({ ok: false, reason: 'timeout' });
+
+		// Later requests during the same hang reuse the round's timeout result
+		// at once, rather than each waiting out a timer of its own.
 		for (let i = 0; i < 5; i++) {
+			const startedAt = Date.now();
 			const report = await checkHealth({ paused: hangsUntilReleased }, TIMEOUT_MS);
+			expect(Date.now() - startedAt).toBeLessThan(TIMEOUT_MS / 2);
 			expect(report.checks['paused']).toEqual({ ok: false, reason: 'timeout' });
 		}
 		expect(started).toBe(1);
@@ -60,6 +67,22 @@ describe('checkHealth', () => {
 			ok: false,
 			reason: 'timeout',
 		});
+		expect(started).toBe(2);
+	});
+
+	it('handles a probe that fails after its timeout, then starts a fresh round', async () => {
+		let started = 0;
+		const failsLate = () => {
+			started++;
+			return new Promise<void>((_, reject) =>
+				setTimeout(() => reject(new Error('late failure')), TIMEOUT_MS * 2),
+			);
+		};
+		const report = await checkHealth({ late: failsLate }, TIMEOUT_MS);
+		expect(report.checks['late']).toEqual({ ok: false, reason: 'timeout' });
+		// Let the probe reject. An unhandled rejection here fails the run.
+		await new Promise((r) => setTimeout(r, TIMEOUT_MS * 3));
+		await checkHealth({ late: failsLate }, TIMEOUT_MS);
 		expect(started).toBe(2);
 	});
 

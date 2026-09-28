@@ -35,21 +35,24 @@ class CheckTimeoutError extends Error {
 const lastHealthy = new Map<string, boolean>();
 
 // A timed-out probe is not cancelled: its PING, SELECT 1 or Neo4j request
-// keeps waiting on the connection. So a probe still running from an earlier
-// request is joined rather than started again, which caps outstanding probes
-// at one per dependency however often /healthz is called during a hang.
-const inFlight = new Map<string, Promise<void>>();
-
-function startOrJoin(name: string, check: Check): Promise<void> {
-	let probe = inFlight.get(name);
-	if (!probe) {
-		probe = check().finally(() => inFlight.delete(name));
-		inFlight.set(name, probe);
-	}
-	return probe;
+// keeps waiting on the connection. So each dependency has at most one probe
+// round at a time, and the round's bounded outcome is computed once, with one
+// timer, and shared. Requests during the round await that one outcome; once it
+// has timed out they get the timeout at once. The round ends when the probe
+// itself settles, not when its timeout fires, so a hang never starts a second
+// probe or attaches more waiters to the first.
+interface Outcome {
+	result: CheckResult;
+	failure?: unknown;
 }
 
-async function runCheck(name: string, check: Check, timeoutMs: number): Promise<CheckResult> {
+const rounds = new Map<string, Promise<Outcome>>();
+
+function probeRound(name: string, check: Check, timeoutMs: number): Promise<Outcome> {
+	const current = rounds.get(name);
+	if (current) return current;
+
+	const probe = check();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_, reject) => {
 		timer = setTimeout(
@@ -57,25 +60,36 @@ async function runCheck(name: string, check: Check, timeoutMs: number): Promise<
 			timeoutMs,
 		);
 	});
-	let result: CheckResult;
-	let failure: unknown;
-	try {
-		await Promise.race([startOrJoin(name, check), timeout]);
-		result = { ok: true };
-	} catch (err) {
-		failure = err;
-		result = {
-			ok: false,
-			reason:
-				err instanceof CheckTimeoutError
-					? 'timeout'
-					: err instanceof NotConnectedError
-						? 'not_connected'
-						: 'error',
-		};
-	} finally {
-		clearTimeout(timer);
-	}
+	const outcome = Promise.race([probe, timeout])
+		.then(
+			(): Outcome => ({ result: { ok: true } }),
+			(err: unknown): Outcome => ({
+				result: {
+					ok: false,
+					reason:
+						err instanceof CheckTimeoutError
+							? 'timeout'
+							: err instanceof NotConnectedError
+								? 'not_connected'
+								: 'error',
+				},
+				failure: err,
+			}),
+		)
+		.finally(() => clearTimeout(timer));
+
+	rounds.set(name, outcome);
+	// Both handlers return normally, so a probe that rejects after its timeout
+	// is still handled and never becomes an unhandled rejection.
+	const endRound = () => {
+		rounds.delete(name);
+	};
+	void probe.then(endRound, endRound);
+	return outcome;
+}
+
+async function runCheck(name: string, check: Check, timeoutMs: number): Promise<CheckResult> {
+	const { result, failure } = await probeRound(name, check, timeoutMs);
 
 	if ((lastHealthy.get(name) ?? true) !== result.ok) {
 		if (result.ok) log('info', 'dependency healthy again', { dependency: name });
