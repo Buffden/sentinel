@@ -10,6 +10,13 @@ All scripts assume the stack is up (`make up`) and provisioned (`make migrate &&
 | --- | --- |
 | [`timescaledb-schema/`](timescaledb-schema/) | TimescaleDB schema verification and transaction rollback experiment |
 | [`manual-store-verification/`](manual-store-verification/) | Direct CLI verification of all four stores: Redpanda, TimescaleDB, Redis, Neo4j |
+| [`consumer-lag/`](consumer-lag/) | Read-only Kafka consumer lag inspection and an isolated stop/restart experiment |
+
+## Consumer lag
+
+`make lag` inspects all four backend groups; `make lag GROUP=position-consumer`
+selects one. See the [runbook](consumer-lag/README.md) for report fields and the
+stop/restart experiment.
 
 ## timescaledb-schema
 
