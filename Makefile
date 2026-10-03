@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: up down reset ps logs migrate topics neo4j-schema help
+.PHONY: up down reset ps logs migrate topics lag neo4j-schema help
 
 up: ## Start all infrastructure services in detached mode
 	docker compose up -d
@@ -22,6 +22,9 @@ migrate: ## Apply database migrations in order (run after make up)
 
 topics: ## Provision canonical Kafka topics (run after make up)
 	@bash infra/kafka/topics.sh
+
+lag: ## Inspect Kafka consumer lag; optional GROUP=<name> (default: all four backend groups)
+	@bash scripts/consumer-lag/inspect.sh $(GROUP)
 
 neo4j-schema: ## Apply canonical Neo4j constraints and indexes (run after make up)
 	@bash infra/neo4j/apply-schema.sh

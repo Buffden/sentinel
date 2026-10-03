@@ -60,7 +60,7 @@ Tune implementation choices only from observed evidence.
 
 A measured provider comparison (Pre-CP1) changed this phase's order. ADR-020 now makes adsb.fi the primary regional live source and OpenSky the fallback, with exactly one authoritative live provider at a time, explicit failover, and no merging of positions from both. The order follows from that: build the new primary, make the fallback production-safe, then connect them through provider health, and only then move on to system-wide observability, the failure lab and load.
 
-CP3a to CP3f, CP4 and CP5 are **Done**. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
+CP3a to CP3f, CP4 and CP5 are **Done**. CP6 is implemented and runtime-verified, pending developer review of the debrief. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
 
 | # | Checkpoint | Smallest observable result | Status |
 | --- | --- | --- | --- |
@@ -77,7 +77,7 @@ CP3a to CP3f, CP4 and CP5 are **Done**. Every later checkpoint is **Pending**. E
 | Investigation | Proximity pairs dominated by ground traffic | Measure how many proximity candidates in the real pipeline involve aircraft that are not clearly airborne. Any filter is a separate decision | Pending, investigation only |
 | CP4 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Done: all five services migrated and validated live, and one real alert traced from ingestion to a connected WebSocket client. Known limitations are listed in the CP4 detail below See the CP4 detail below |
 | CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Done. See the CP5 detail below |
-| CP6 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Pending |
+| CP6 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Implemented and runtime-verified; developer review pending. See CP6 detail below |
 | CP7 onward | Failure lab runs | One checkpoint per failure listed above, each with its own debrief showing observed behavior | Pending |
 | Later | Load generator and capacity runs | Depends on the load generator decision below | Pending |
 
@@ -259,6 +259,30 @@ A check that runs out of time counts as failed. So `/healthz` answers within abo
 Every affected service reported healthy again within a few seconds of the datastore starting, with no restart, and no process exited.
 
 A hang was also tested with `docker pause`, which keeps connections open while the server stops answering. With Redis paused, 300 API health requests were answered as 503, and Redis's own counter showed one `PING` reaching it in total. Only the first 20 requests, which arrived together while the probe's timer was running, took about a second. The other 280 received the round's timeout immediately. With Postgres paused, 300 requests were answered as 503 within 1.01 seconds each, and the database's committed-transaction count rose only by its background rate. So at most one `SELECT 1` was outstanding. Neo4j was not paused; the runner's tests cover the same mechanism. All log lines from those runs passed the CP4 validator, and every stderr was empty. The check runner's own tests cover the time limit, the failure reasons and recovery, using stand-in checks that touch no shared infrastructure.
+
+### CP6 detail: consumer lag visibility
+
+`make lag` runs `rpk group describe` for the four backend groups.
+`make lag GROUP=position-consumer` selects one. Commands and report fields are
+in the [runbook](../../../scripts/consumer-lag/README.md).
+
+**Verified 2026-10-03** with an isolated one-partition topic and group named
+`cp6-lag-20261003`. After committing a baseline record, the consumer exited.
+Appending 30 records grew lag; restarting the same group in two passes cleared
+it without resetting offsets or repeating the baseline.
+
+| Observation | Committed next offset | Log end | Lag |
+| --- | --- | --- | --- |
+| Baseline committed; consumer stopped | 1 | 1 | 0 |
+| 10 records appended | 1 | 11 | 10 |
+| 20 more appended | 1 | 31 | 30 |
+| Restart consumed 10 | 11 | 31 | 20 |
+| Restart consumed remaining 20 | 31 | 31 | 0 |
+
+All four backend groups were also inspected: none had members, the Correlation
+Worker had lag 4,165, and the other three had zero. No live offsets were changed.
+Bash syntax, Make expansion, argument handling, and Docker failure propagation
+checks passed. Application persistence/replay verification remains for CP7.
 
 ### Investigation: proximity pairs dominated by ground traffic
 
