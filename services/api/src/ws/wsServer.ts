@@ -92,6 +92,9 @@ export function attachWebSocketServer(server: Server): void {
 
 	// Dedicated subscriber connection — cannot issue commands on a subscribed connection.
 	const redisSub = new Redis(config.REDIS_URL);
+	redisSub.on('error', (err) => {
+		log('warn', 'redis client error', { connection: 'subscriber', err });
+	});
 
 	redisSub.subscribe(config.POSITION_UPDATES_CHANNEL, config.ALERT_EVENTS_CHANNEL, (err) => {
 		if (err) {

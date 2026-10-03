@@ -27,7 +27,7 @@ This section records what earlier phases actually left in place, checked directl
 - **A consumer that has stopped for good can exit with status 0.** Observed on 2026-09-28 during CP4. After kafkajs crashed on the snappy record and did not restart the consumer, the Position Consumer's experiment process exited with status 0, which tells a supervisor it succeeded. The main consumer entry point was not tested this way, so whether it also exits 0, or stays running with no consumer, is still unknown. This is tracked separately from the poison-pill fix: any fatal consumer failure must end the process with a non-zero status, or stay visibly unhealthy to health checks (CP5). Belongs to the failure lab.
 - **The Correlation Worker's integration test writes to the live candidate topic.** Observed on 2026-09-28 during CP4. The worker's integration test publishes candidates for `test-worker-…` pairs to the real `proximity.candidates` topic. The next time the Alert Evaluator ran, it turned the six candidates from that day's two test runs into `UNSCHEDULED_PROXIMITY` alerts on the real `alerts` topic. The Alert Evaluator's own integration tests do the same on purpose: they publish to the real `alerts` topic, as their header warns. When the API next ran, it persisted 139 test alerts from its backlog. The dev database then held 217 alert rows whose `alert_id` starts with `test-`, some left by earlier phases' test runs. They were not deleted. Tests should publish to their own topics, or to nothing live. Not fixed in CP4.
 - **Logs are not consistent across services.** The poller and Position Consumer include timestamp, level, service and message. The API writes JSON but without a timestamp or service name, and uses a different field name for the message. The Alert Evaluator and Correlation Worker pass an object and a string to the console directly, so some of their lines are not JSON at all. **Being addressed by CP4.**
-- **Health checks do not check anything.** The API's `/healthz` always answers "ok", even if Postgres, Redis, Neo4j or its Kafka consumer is down. The other application services have no health endpoint.
+- **Health checks do not check anything.** The API's `/healthz` always answers "ok", even if Postgres, Redis, Neo4j or its Kafka consumer is down. The other application services have no health endpoint. **Addressed by CP5** for Postgres, Redis and Neo4j. Kafka health is out of CP5's scope.
 - **There is no view of Kafka consumer lag** other than running `rpk` by hand.
 - **There is no load generator.** The load experiments below assume one. The synthetic generator planned in Phase 04 was never built, because that phase stopped after its first checkpoint.
 - **The application services are not in Docker Compose.** Only the infrastructure is. They run by hand.
@@ -60,7 +60,7 @@ Tune implementation choices only from observed evidence.
 
 A measured provider comparison (Pre-CP1) changed this phase's order. ADR-020 now makes adsb.fi the primary regional live source and OpenSky the fallback, with exactly one authoritative live provider at a time, explicit failover, and no merging of positions from both. The order follows from that: build the new primary, make the fallback production-safe, then connect them through provider health, and only then move on to system-wide observability, the failure lab and load.
 
-CP3a to CP3f and CP4 are **Done**. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
+CP3a to CP3f, CP4 and CP5 are **Done**. CP6 is implemented and runtime-verified, pending developer review of the debrief. Every later checkpoint is **Pending**. Each one follows the full implementation sequence in `CLAUDE.md` (teach-back, direct experiment, implementation, a real failure boundary, docs), and the scope of each is confirmed before it starts.
 
 | # | Checkpoint | Smallest observable result | Status |
 | --- | --- | --- | --- |
@@ -76,8 +76,8 @@ CP3a to CP3f and CP4 are **Done**. Every later checkpoint is **Pending**. Each o
 | CP3f | Failback hysteresis and restart restoration | adsb.fi takes authority back only when `HEALTHY` and OpenSky has been authoritative for at least 5 min. Real Redis + Redpanda verification proves the minimum window, serialized OpenSky → adsb.fi HANDOVER, `handover_attempt` coverage, recovery gating, conservative restart, and backed-off retries after any failed attempt without starving OpenSky or exceeding adsb.fi's request limit. See [concepts/provider-failover/](concepts/provider-failover/) | Done |
 | Investigation | Proximity pairs dominated by ground traffic | Measure how many proximity candidates in the real pipeline involve aircraft that are not clearly airborne. Any filter is a separate decision | Pending, investigation only |
 | CP4 | Consistent structured logs | Every service's log lines parse as JSON with the same core fields, and one alert can be followed from ingestion to WebSocket by searching logs for its identifiers | Done: all five services migrated and validated live, and one real alert traced from ingestion to a connected WebSocket client. Known limitations are listed in the CP4 detail below See the CP4 detail below |
-| CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Pending |
-| CP6 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Pending |
+| CP5 | Dependency-aware health | Stopping Redis, Postgres or Neo4j makes the affected service report unhealthy, and starting it again makes it report healthy | Done. See the CP5 detail below |
+| CP6 | Consumer lag visibility | Pausing a consumer and watching its lag grow, then shrink after it restarts, using a documented command | Implemented and runtime-verified; developer review pending. See CP6 detail below |
 | CP7 onward | Failure lab runs | One checkpoint per failure listed above, each with its own debrief showing observed behavior | Pending |
 | Later | Load generator and capacity runs | Depends on the load generator decision below | Pending |
 
@@ -226,13 +226,71 @@ The trace took about 710 ms from the poller's publish to the client's receipt. I
   Before its live check, the worker's group was 83,550 records behind, mostly days-old telemetry. It was moved to the end of `position.normalized` so old positions could not reach the live alert path as new proximity candidates. The Neo4j evidence for encounters in that skipped range was never recorded.
 - For the Position Consumer, an unreachable TimescaleDB while real records were waiting. kafkajs's retries and consumer restarts are now visible, with the failing record's topic, partition and offset. The committed offset stayed put, and the 618 held-back records were all processed once the database was back.
 
+### CP5 detail: dependency-aware health
+
+Every backend service answers `GET /healthz` by checking the datastores it uses. Kafka health is not part of CP5.
+
+| Service | Port | Checks |
+| --- | --- | --- |
+| API | its main port (3000 locally) | Postgres, Redis, Neo4j |
+| Ingestion poller | 9101 | Redis |
+| Position Consumer | 9102 | Redis, Postgres |
+| Correlation Worker | 9103 | Redis, Neo4j |
+| Alert Evaluator | 9104 | Redis |
+
+`HEALTH_PORT` changes a worker's port, which is needed when two instances of one service, such as two Alert Evaluators, run on one host. Each service has its own small copy of the check runner. There is no shared health library.
+
+**How a check works.** Each dependency is checked on every request, in parallel, and each check has 1 second to answer:
+- Postgres: `SELECT 1`.
+- Redis: `PING`, but only when the client reports a live connection. Otherwise it reports `not_connected` at once instead of queuing a command behind the reconnect.
+- Neo4j: a server-info request.
+
+A check that runs out of time counts as failed. So `/healthz` answers within about a second even while a dependency hangs. A timed-out probe is not cancelled, because its command keeps waiting on the connection. So each dependency has at most one probe round at a time. A round's bounded result is computed once, with one timer, and shared. Requests during the round wait on that result, and once it has timed out they get the timeout immediately. The round ends when the probe itself settles, not when its timeout fires. So during a hang there is one outstanding probe per dependency, and no growing set of waiters on it. The response is 200 when every check passes and 503 otherwise. The body names each dependency's result as ok, `timeout`, `not_connected` or `error`. It never includes the error text, because the route is unauthenticated; the text goes to the service's log. The first check after a dependency's health changes logs one line, `dependency unhealthy` or `dependency healthy again`.
+
+**Two fixes the outages required.**
+- **A `pg` pool `'error'` listener in the API and the Position Consumer.** When Postgres shuts down it ends the pool's idle connections, and the pool reports that as an `'error'` event. With no listener, that event crashed the process, so it could never report the outage. With the listener, the pool drops the dead connection and opens new ones once Postgres is back.
+- **An `'error'` listener on every Redis client.** Without one, ioredis prints each failed reconnect to stderr as plain text, which breaks the CP4 log contract during an outage. Reconnecting was already automatic.
+
+**Verification (2026-09-28).** Each datastore was stopped for about 10 seconds and started again, while every service's `/healthz` was polled once a second:
+- **Redis:** all five services turned unhealthy.
+- **Postgres:** only the API and the Position Consumer turned unhealthy.
+- **Neo4j:** only the API and the Correlation Worker turned unhealthy.
+
+Every affected service reported healthy again within a few seconds of the datastore starting, with no restart, and no process exited.
+
+A hang was also tested with `docker pause`, which keeps connections open while the server stops answering. With Redis paused, 300 API health requests were answered as 503, and Redis's own counter showed one `PING` reaching it in total. Only the first 20 requests, which arrived together while the probe's timer was running, took about a second. The other 280 received the round's timeout immediately. With Postgres paused, 300 requests were answered as 503 within 1.01 seconds each, and the database's committed-transaction count rose only by its background rate. So at most one `SELECT 1` was outstanding. Neo4j was not paused; the runner's tests cover the same mechanism. All log lines from those runs passed the CP4 validator, and every stderr was empty. The check runner's own tests cover the time limit, the failure reasons and recovery, using stand-in checks that touch no shared infrastructure.
+
+### CP6 detail: consumer lag visibility
+
+`make lag` runs `rpk group describe` for the four backend groups.
+`make lag GROUP=position-consumer` selects one. Commands and report fields are
+in the [runbook](../../../scripts/consumer-lag/README.md).
+
+**Verified 2026-10-03** with an isolated one-partition topic and group named
+`cp6-lag-20261003`. After committing a baseline record, the consumer exited.
+Appending 30 records grew lag; restarting the same group in two passes cleared
+it without resetting offsets or repeating the baseline.
+
+| Observation | Committed next offset | Log end | Lag |
+| --- | --- | --- | --- |
+| Baseline committed; consumer stopped | 1 | 1 | 0 |
+| 10 records appended | 1 | 11 | 10 |
+| 20 more appended | 1 | 31 | 30 |
+| Restart consumed 10 | 11 | 31 | 20 |
+| Restart consumed remaining 20 | 31 | 31 | 0 |
+
+All four backend groups were also inspected: none had members, the Correlation
+Worker had lag 4,165, and the other three had zero. No live offsets were changed.
+Bash syntax, Make expansion, argument handling, and Docker failure propagation
+checks passed. Application persistence/replay verification remains for CP7.
+
 ### Investigation: proximity pairs dominated by ground traffic
 
 The provider experiment found that most close proximity pairs involved airport surface traffic (see its README). The correlation worker has no on-ground filter. This item measures the effect in the real pipeline and brings the evidence back for a separate decision. It does not change the correlation worker, and it is not part of the provider decision.
 
 ## Decisions Needed
 
-- **Health endpoints for workers:** the Alert Evaluator, Correlation Worker and Position Consumer have no HTTP server. Options include adding a small health port to each, or relying on logs and container health checks. This is an implementation choice for CP5.
+- **Health endpoints for workers:** decided in CP5. Each worker serves `/healthz` on a small HTTP port of its own.
 - **Load generator:** build a minimal one inside this phase for load experiments, or first build the Phase 04 synthetic generator and reuse it. The load experiments cannot start until this is decided.
 - **Running the application services in Docker Compose:** several failure experiments (killing and restarting a service, running two API instances) are easier to reproduce if the services run as containers. Whether to do that here is open.
 - **AWS deployment:** the fixed stack names Docker Compose to AWS as the deployment target, but no phase plan currently covers the deployment itself. Decide whether it belongs in this phase or stays out of scope.

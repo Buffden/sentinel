@@ -1,11 +1,20 @@
 import pg from 'pg';
 import { config } from './config.js';
+import { log } from './logger.js';
 
 const { Pool } = pg;
 
 export const pool = new Pool({
 	connectionString: config.PG_URL,
 	max: config.PG_POOL_MAX,
+});
+
+// Postgres ends idle pooled connections when it shuts down, and the pool
+// reports that as an 'error' event. Without a listener the event is thrown
+// and the API crashes; with one, the pool drops the dead client and opens
+// new connections once Postgres is back, and /healthz reports the outage.
+pool.on('error', (err) => {
+	log('warn', 'postgres idle client error', { err });
 });
 
 // Runs fn inside one BEGIN/COMMIT/ROLLBACK transaction on a single checked-out

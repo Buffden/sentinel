@@ -20,6 +20,7 @@ import {
 	type CoverageSnapshot,
 } from './signalLossCoverage.js';
 import { instanceId, kafkaLogCreator, log } from './logger.js';
+import { redisCheck, startHealthServer } from './health.js';
 
 // ---- Kafka setup -----------------------------------------------------------
 
@@ -37,6 +38,12 @@ export const producer = kafka.producer({
 // ---- Redis setup -----------------------------------------------------------
 
 export const redis = new Redis(config.REDIS_URL);
+// ioredis prints an 'error' event to stderr as plain text when nothing listens,
+// once per failed reconnect during an outage. It reconnects on its own either
+// way; the listener only keeps those errors in the log contract.
+redis.on('error', (err) => {
+	log('warn', 'redis client error', { err });
+});
 const leader = new LeaderElection(
 	redis,
 	instanceId,
@@ -724,6 +731,8 @@ export function start(): void {
 	process.on('SIGTERM', () => {
 		shutdown().then(() => process.exit(0));
 	});
+
+	startHealthServer(config.HEALTH_PORT, { redis: redisCheck(redis) });
 
 	main().catch((err) => {
 		log('error', 'fatal error', { err });

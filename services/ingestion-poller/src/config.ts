@@ -99,6 +99,8 @@ export function validateFailbackTiming(
 }
 
 export const config = {
+	// /healthz port. Override it when running a second instance on one host.
+	HEALTH_PORT: requirePositiveInt('HEALTH_PORT', process.env['HEALTH_PORT'], 9101),
 	KAFKA_BROKERS: (process.env['KAFKA_BROKERS'] ?? 'localhost:9092').split(','),
 
 	// Canonical Kafka topic — do not change without an ADR.

@@ -14,6 +14,7 @@ import { CoordinatorLease } from './coordinatorLease.js';
 import { CoverageTimeline } from './coverageTimeline.js';
 import { fetchOpenskyCycle, openskyAuthenticated } from './poller.js';
 import { ProviderHealthStore } from './providerHealthStore.js';
+import { redisCheck, startHealthServer } from './health.js';
 
 const adsbfiLog: Log = (level, message, extra) =>
 	log(level, message, { provider: 'adsbfi', ...extra });
@@ -22,6 +23,12 @@ const redis = new Redis(config.REDIS_URL, {
 	// A hung renewal must fail before the lease can expire and be acquired by
 	// another coordinator.
 	commandTimeout: config.COORDINATOR_REDIS_COMMAND_TIMEOUT_MS,
+});
+// ioredis prints an 'error' event to stderr as plain text when nothing listens,
+// once per failed reconnect during an outage. It reconnects on its own either
+// way; the listener only keeps those errors in the log contract.
+redis.on('error', (err) => {
+	log('warn', 'redis client error', { err });
 });
 
 const producer = new Kafka({
@@ -118,6 +125,7 @@ producer
 			coverage_retention_ms: config.COVERAGE_RETENTION_MS,
 		});
 		coordinator.start();
+		startHealthServer(config.HEALTH_PORT, { redis: redisCheck(redis) });
 	})
 	.catch((err: unknown) => {
 		log('error', 'coordinator failed to start', { err });

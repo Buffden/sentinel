@@ -29,6 +29,7 @@ import { markCandidatePublished } from './episode.js';
 import { evaluateProximityEncounter } from './proximityDecision.js';
 import type { ProximityEntity } from './proximityEvent.js';
 import { kafkaLogCreator, log } from './logger.js';
+import { redisCheck, startHealthServer } from './health.js';
 
 interface IncomingPosition {
 	entity_id: string;
@@ -173,6 +174,12 @@ const producer = kafka.producer({ createPartitioner: Partitioners.LegacyPartitio
 const consumer = kafka.consumer({ groupId: config.GROUP_ID });
 
 const redis = new Redis(config.REDIS_URL);
+// ioredis prints an 'error' event to stderr as plain text when nothing listens,
+// once per failed reconnect during an outage. It reconnects on its own either
+// way; the listener only keeps those errors in the log contract.
+redis.on('error', (err) => {
+	log('warn', 'redis client error', { err });
+});
 const driver = neo4j.driver(
 	config.NEO4J_URI,
 	neo4j.auth.basic(config.NEO4J_USER, config.NEO4J_PASSWORD),
@@ -244,6 +251,13 @@ export function start(): void {
 	});
 	process.on('SIGTERM', () => {
 		shutdown('SIGTERM').catch(shutdownFailed);
+	});
+
+	startHealthServer(config.HEALTH_PORT, {
+		redis: redisCheck(redis),
+		neo4j: async () => {
+			await driver.getServerInfo();
+		},
 	});
 
 	run().catch((err: unknown) => {
