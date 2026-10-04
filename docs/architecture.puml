@@ -34,13 +34,20 @@ skinparam queue {
     FontColor #e9d5ff
 }
 
+skinparam note {
+    BackgroundColor #313244
+    BorderColor #585b70
+    FontColor #cdd6f4
+}
+
 node "External Feeds" #1e3a2a {
-    component [OpenSky Network\n(ADS-B)] as ADSB #2d5a3d
-    component [AISHub\n(AIS)] as AIS #2d5a3d
+    component [adsb.fi\n(regional ADS-B primary)] as ADSBFI #2d5a3d
+    component [OpenSky Network\n(ADS-B fallback)] as OPENSKY #2d5a3d
+    component [AISHub\n(AIS · planned ingestion)] as AIS #2d5a3d
 }
 
 node "Dev Tooling" #3a3a1a {
-    component [Load Generator\n(synthetic anomaly injection)] as LOADGEN #5a5a1a
+    component [Load Generator\n(planned · synthetic anomaly injection)] as LOADGEN #5a5a1a
 }
 
 node "Identity Provider" #1a1a3a {
@@ -48,14 +55,16 @@ node "Identity Provider" #1a1a3a {
 }
 
 node "Ingestion Layer" #1a2a3a {
-    component [Ingestion Poller] as POLLER #1e3a5a
+    component [ADS-B Ingestion Coordinator\nRedis lease + heartbeat\nadsb.fi / OpenSky adapters\nprovider health + failover / failback] as POLLER #1e3a5a
+    component [AIS Poller\n(planned)] as AIS_POLLER #1e3a5a
 }
 
 node "Message Broker" #2a1a3a {
-    queue [adsb.raw | ais.raw] as KAFKA_RAW
+    queue [adsb.raw\n{ provider, payload } · ICAO24 key] as KAFKA_RAW
+    queue [ais.raw\n(planned feed)] as KAFKA_AIS
     queue [position.normalized] as KAFKA_NORM
     queue [adsb.dlq | ais.dlq] as KAFKA_DLQ #5a1a1a
-    queue [deviation.candidates] as KAFKA_DEV
+    queue [deviation.candidates\n(planned path)] as KAFKA_DEV
     queue [proximity.candidates] as KAFKA_PROX
     queue [alerts] as KAFKA_ALERTS
 }
@@ -66,7 +75,7 @@ together {
     }
 
     node "Deviation Detector" #1a2a3a {
-        component [stateless reference-route\nclassification] as DEV #1e3a5a
+        component [planned · stateless reference-route\nclassification] as DEV #1e3a5a
     }
 
     node "Correlation Worker" #1a2a3a {
@@ -80,7 +89,7 @@ together {
     }
 
     node "Redis" #3a0a0a {
-        database [entity:live:{id}\ngeo-cell:{h3} sorted sets\nalert-state / recent-loss\ndeviation-state / proximity-episode\nleader lease\nposition-updates / alert-events] as REDIS #7f1d1d
+        database [entity:live:{id}\ngeo-cell:{h3} sorted sets\nalert-state / recent-loss\nproximity-episode\ndeviation-state (planned)\nalert-evaluator:leader\n{live-provider}:lease / authority / coverage\n{live-provider}:health:adsbfi / health:opensky\nposition-updates / alert-events] as REDIS #7f1d1d
     }
 
     node "Neo4j" #0a2a1a {
@@ -89,7 +98,7 @@ together {
 }
 
 node "Alert Layer" #2a1a3a {
-    component [Alert Evaluator\nleader-elected · hybrid inputs\nsignal loss via Redis scan\nroute deviation via Kafka\nproximity/composite via Kafka + Redis] as ALERT #4c1d95
+    component [Alert Evaluator\nleader-elected · hybrid inputs\nsignal loss: Redis scan + provider coverage\nroute deviation via Kafka (planned)\nproximity/composite via Kafka + Redis] as ALERT #4c1d95
 }
 
 node "API Layer" #1a2a3a {
@@ -97,37 +106,51 @@ node "API Layer" #1a2a3a {
 }
 
 node "Dashboard" #1e3a2a {
-    component [Next.js + Blueprint.js + Leaflet\nLive Map + Alert Feed + Investigation] as DASH #2d5a3d
+    component [Next.js + React\nDockview workspace + widget registry\nMapLibre GL basemap + deck.gl data layers\nLive Map + Alert Feed + Investigation\nBlueprint.js (accepted UI stack)] as DASH #2d5a3d
 }
 
-ADSB -[#4ade80]down-> POLLER
-AIS -[#4ade80]down-> POLLER
-LOADGEN -[#facc15]down-> KAFKA_RAW
-POLLER -[#facc15]down-> KAFKA_RAW
+ADSBFI -[#4ade80]down-> POLLER : "primary / standby requests"
+OPENSKY -[#4ade80]down-> POLLER : "fallback / standby requests"
+AIS -[#4ade80,dashed]down-> AIS_POLLER
+AIS_POLLER -[#facc15,dashed]down-> KAFKA_AIS
+LOADGEN -[#facc15,dashed]down-> KAFKA_RAW
+POLLER -[#facc15]down-> KAFKA_RAW : "authoritative cycles only"
+POLLER <-[#f87171]-> REDIS : "coordinator-owned lease, health,\nauthority + coverage timeline"
+
+note right of POLLER
+  ADR-020/021/022: one authoritative ADS-B provider.
+  Health, authority and coverage are separate.
+  Publish before committing authority / crediting coverage.
+  Failback: adsb.fi HEALTHY + 5 min on OpenSky.
+  Lease guards instances; it does not fence Kafka sends.
+end note
 
 KAFKA_RAW -[#a78bfa]down-> POS
+KAFKA_AIS -[#a78bfa,dashed]down-> POS
 POS -[#f87171]right-> KAFKA_DLQ
 POS -[#38bdf8]down-> TSDB
 POS -[#f87171]down-> REDIS
 POS -[#a78bfa]right-> KAFKA_NORM
 
-KAFKA_NORM -[#a78bfa]down-> DEV
+KAFKA_NORM -[#a78bfa,dashed]down-> DEV
 KAFKA_NORM -[#a78bfa]down-> CORR
 
-DEV -[#38bdf8]down-> TSDB : "reference routes"
-DEV -[#a78bfa]down-> KAFKA_DEV
+DEV -[#38bdf8,dashed]down-> TSDB : "reads reference routes"
+DEV -[#a78bfa,dashed]down-> KAFKA_DEV
 
 CORR -[#f87171]down-> REDIS : "live/H3 state"
 CORR <-[#4ade80]-> NEO4J : "KNOWN_ASSOCIATE read\nPROXIMITY_EVENT write"
 CORR -[#a78bfa]down-> KAFKA_PROX
 
-KAFKA_DEV -[#a78bfa]down-> ALERT
+KAFKA_DEV -[#a78bfa,dashed]down-> ALERT
 KAFKA_PROX -[#a78bfa]down-> ALERT
-REDIS <-[#fb923c]-> ALERT : "signal-loss +\nepisode state"
-TSDB -[#fb923c]-> ALERT : "last-known position\n(signal loss payload only)"
+REDIS <-[#fb923c]-> ALERT : "live entity + last-known position\nprovider authority / coverage snapshot\nalert / episode state + evaluator lease"
 
 note right of ALERT
-  No direct Neo4j dependency.
+  No direct TimescaleDB or Neo4j dependency.
+  Signal loss counts the entity owner's coverage
+  since last_seen_ms; provider downtime adds nothing.
+  Missing / unreadable timeline skips signal loss.
   KNOWN_ASSOCIATE filtering is owned
   by the Correlation Worker before
   proximity.candidates is published.
@@ -140,12 +163,26 @@ API -[#38bdf8]left-> TSDB
 API <-[#f87171]-> REDIS : "live state + pub/sub"
 API -[#4ade80]left-> NEO4J : "investigation evidence"
 API -[#a78bfa]up-> GOOGLE
-API -[#94a3b8]down-> DASH
+API <-[#94a3b8]-> DASH : "authenticated REST + WebSocket\nworkspace scope + client dedupe"
+
+note left of API
+  Alert sink: idempotent DB transaction,
+  then Redis alert-events, then offset commit.
+  Redis pub/sub fans out to all API instances.
+end note
 
 note bottom of KAFKA_ALERTS
   Kafka processing: at-least-once.
   Durable alert rows: idempotent / exactly-once effect.
   WebSocket delivery: at-least-once; client dedupe required.
 end note
+
+legend bottom
+  Solid arrows: implemented paths. Dashed arrows: planned paths.
+  Reference-route tables belong to the planned deviation path.
+  CP4: structured JSON logs across all five backend services.
+  CP5: bounded datastore /healthz checks; Kafka health is out of scope.
+  CP6: make lag reads committed offsets and broker log ends via rpk.
+endlegend
 
 @enduml
