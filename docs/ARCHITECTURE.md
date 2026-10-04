@@ -2,7 +2,7 @@
 
 This document defines Sentinel's service boundaries, component contracts, persistence ownership, Kafka topics, and delivery semantics. It is authoritative for who reads/writes which store and what each service is allowed to decide.
 
-![Architecture Diagram](../diagrams/docs/architecture.svg)
+![Architecture Diagram (Excalidraw)](../diagrams/docs/architecture-excalidraw.svg)
 
 ---
 

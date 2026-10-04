@@ -8,7 +8,7 @@ Sentinel is built to production distributed-systems reasoning standards: streami
 
 ## Architecture Overview
 
-![Architecture](diagrams/docs/architecture.svg)
+![Architecture (Excalidraw)](diagrams/docs/architecture-excalidraw.svg)
 
 ---
 

@@ -44,7 +44,7 @@ jobs:
 
       - name: Generate changed diagrams
         run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(puml|plantuml|excalidraw)$' || true)
+          CHANGED=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD | grep -E '\.(puml|plantuml|excalidraw)$' || true)
           if [ -n "$CHANGED" ]; then
             diagram-sync --files $CHANGED
           else
@@ -95,7 +95,7 @@ jobs:
             # Manual trigger: let diagram-sync auto-discover all supported files in the repo
             diagram-sync
           else
-            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml|excalidraw)$' || true)
+            CHANGED=$(git diff --name-only --diff-filter=d ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(puml|plantuml|excalidraw)$' || true)
             if [ -n "$CHANGED" ]; then
               diagram-sync --files $CHANGED
             else
